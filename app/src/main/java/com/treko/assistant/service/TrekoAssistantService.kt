@@ -64,6 +64,9 @@ class TrekoAssistantService : Service() {
     private var listeningStartTimestamp: Long = 0L
 
     @Volatile
+    private var speakingStartTimestamp: Long = 0L
+
+    @Volatile
     private var activeListeningTimeoutMs: Long = 4500L
 
     companion object {
@@ -224,6 +227,7 @@ class TrekoAssistantService : Service() {
                 "start" -> {
                     thinkingTimeoutJob?.cancel()
                     ttsDrainingJob?.cancel()
+                    speakingStartTimestamp = System.currentTimeMillis()
                     _serviceState.value = TrekoState.SPEAKING
                     _currentEmotion.value = TrekoEmotion.FELIZ_ABIERTO
                 }
@@ -271,13 +275,7 @@ class TrekoAssistantService : Service() {
         serviceScope.launch {
             detector.detectionEvents.collect { keyword ->
                 Log.i(TAG, "¡Wake word / Comando KWS detectado ('$keyword')! Estado actual: ${_serviceState.value}")
-                if (keyword == "STOP") {
-                    if (_serviceState.value == TrekoState.SPEAKING || _serviceState.value == TrekoState.LISTENING) {
-                        abortConversation()
-                    }
-                } else {
-                    beginConversation(keyword)
-                }
+                beginConversation(keyword)
             }
         }
     }
@@ -308,10 +306,11 @@ class TrekoAssistantService : Service() {
                     }
                 }
                 TrekoState.SPEAKING -> {
-                    // Interrupción vocal (Barge-In): KWS neuronal de alta precisión
-                    // Detecta 'Treko', 'Stop', 'Alto', 'Silencio', 'Cállate', 'Espera'
-                    // Sin falsos positivos causados por el propio altavoz del dispositivo
-                    wakeWordDetector?.acceptWaveform(buffer, read)
+                    // Barge-In vocal limpio: permitir que el usuario interrumpa diciendo "Treko",
+                    // ignorando los primeros 650ms de habla para evitar transitorios acústicos del altavoz
+                    if (System.currentTimeMillis() - speakingStartTimestamp > 650L) {
+                        wakeWordDetector?.acceptWaveform(buffer, read)
+                    }
                 }
                 TrekoState.LISTENING -> {
                     lastSoundTimestamp = System.currentTimeMillis()
