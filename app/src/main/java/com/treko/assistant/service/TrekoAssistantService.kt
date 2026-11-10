@@ -441,14 +441,26 @@ class TrekoAssistantService : Service() {
                     val action = args.optString("action", "turn_on")
                     val brightness = args.optInt("brightness", 0)
                     val kelvin = args.optInt("kelvin", 0)
+                    val color = args.optString("color", "").trim()
+                    val colorOrTemp = if (color.isNotBlank()) color else if (kelvin > 0) "${kelvin}k" else ""
 
                     val haClient = HomeAssistantClient(haUrl, haToken)
                     haClient.controlDevice(
                         deviceQuery = entityId,
                         accion = action,
-                        brillo = if (brightness > 0) (brightness * 100 / 255).coerceIn(1, 100) else 0,
-                        colorOrTemp = if (kelvin > 0) "${kelvin}k" else ""
+                        brillo = brightness,
+                        colorOrTemp = colorOrTemp
                     )
+                }
+                "home_assistant_list_entities" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val domain = args.optString("domain", "light")
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.listEntities(domain)
                 }
                 else -> "Herramienta '$name' no implementada en Treko."
             }

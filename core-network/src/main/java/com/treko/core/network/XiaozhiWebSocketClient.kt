@@ -270,21 +270,25 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "home_assistant_control")
-                        put("description", "Controla dispositivos en Home Assistant (encender/apagar luces o switches, brillo, blanco Kelvin).")
+                        put("description", "Controla dispositivos en Home Assistant (encender/apagar luces o switches, regular color, brillo o blanco Kelvin).")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("entity_id", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Entidad de Home Assistant (ej. 'light.sala', 'switch.ventilador')")
+                                    put("description", "Nombre amigable o ID de entidad (ej. 'colors smart', 'luz ambiente', 'light.colors_smart', 'luces del cuarto')")
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
                                     put("description", "'turn_on', 'turn_off', o 'toggle'")
                                 })
+                                put("color", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Color deseado en español (ej. 'azul', 'rojo', 'verde', 'amarillo', 'morado', 'cálido', 'frío') (opcional)")
+                                })
                                 put("brightness", JSONObject().apply {
                                     put("type", "integer")
-                                    put("description", "Brillo 0 a 255 (opcional)")
+                                    put("description", "Brillo de 1 a 100 por ciento (opcional)")
                                 })
                                 put("kelvin", JSONObject().apply {
                                     put("type", "integer")
@@ -292,6 +296,19 @@ class XiaozhiWebSocketClient(
                                 })
                             })
                             put("required", JSONArray().apply { put("entity_id"); put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_list_entities")
+                        put("description", "Lista los dispositivos y entidades disponibles en Home Assistant (luces, interruptores, etc.) con sus nombres reales y estados. Úsalo cuando el usuario pida listar las entidades o cuando necesites saber qué luces existen en su casa.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("domain", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Filtro opcional: 'light', 'switch', o 'all' (opcional)")
+                                })
+                            })
                         })
                     })
                 }
