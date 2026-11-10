@@ -53,7 +53,6 @@ class TrekoAssistantService : Service() {
     private var thinkingTimeoutJob: Job? = null
 
     private var lastSoundTimestamp: Long = System.currentTimeMillis()
-    private var consecutiveSpeakingFrames: Int = 0
 
     @Volatile
     private var speechDetected: Boolean = false
@@ -271,8 +270,14 @@ class TrekoAssistantService : Service() {
         // Escuchar detecciones acústicas locales
         serviceScope.launch {
             detector.detectionEvents.collect { keyword ->
-                Log.i(TAG, "¡Wake word detectada ('$keyword')! Iniciando conversación...")
-                beginConversation(keyword)
+                Log.i(TAG, "¡Wake word / Comando KWS detectado ('$keyword')! Estado actual: ${_serviceState.value}")
+                if (keyword == "STOP") {
+                    if (_serviceState.value == TrekoState.SPEAKING || _serviceState.value == TrekoState.LISTENING) {
+                        abortConversation()
+                    }
+                } else {
+                    beginConversation(keyword)
+                }
             }
         }
     }
@@ -303,25 +308,12 @@ class TrekoAssistantService : Service() {
                     }
                 }
                 TrekoState.SPEAKING -> {
-                    // Interrupción vocal (Barge-In):
-                    // 1. KWS escucha durante el habla de Treko
+                    // Interrupción vocal (Barge-In): KWS neuronal de alta precisión
+                    // Detecta 'Treko', 'Stop', 'Alto', 'Silencio', 'Cállate', 'Espera'
+                    // Sin falsos positivos causados por el propio altavoz del dispositivo
                     wakeWordDetector?.acceptWaveform(buffer, read)
-
-                    // 2. Interrupción por voz: si el usuario habla por encima de Treko (> 240ms continuos)
-                    val rms = NativeAudioEngine.audioLevel.value.rms
-                    if (rms > 0.038f) {
-                        consecutiveSpeakingFrames++
-                        if (consecutiveSpeakingFrames >= 4) {
-                            consecutiveSpeakingFrames = 0
-                            Log.i(TAG, "Interrupción por voz detectada mientras Treko habla (Barge-In). Escuchando al usuario...")
-                            beginConversation("Barge-In")
-                        }
-                    } else {
-                        consecutiveSpeakingFrames = 0
-                    }
                 }
                 TrekoState.LISTENING -> {
-                    consecutiveSpeakingFrames = 0
                     lastSoundTimestamp = System.currentTimeMillis()
 
                     // 1. Codificar a Opus y enviar al servidor Xiaozhi

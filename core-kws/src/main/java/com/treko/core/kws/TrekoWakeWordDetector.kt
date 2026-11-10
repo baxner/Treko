@@ -128,6 +128,18 @@ class TrekoWakeWordDetector(private val context: Context) {
             for (v in variants) {
                 lines.add(String.format(java.util.Locale.US, "%s :%.1f #%.2f @TREKO", v, boost, threshold))
             }
+
+            // Palabras de corte e interrupción por voz natural (Barge-In neuronal)
+            val stopVariants = listOf(
+                "▁ST O P",
+                "▁A L T O",
+                "▁S IL EN CI O",
+                "▁CALL ATE",
+                "▁E S PER A"
+            )
+            for (s in stopVariants) {
+                lines.add(String.format(java.util.Locale.US, "%s :2.2 #0.08 @STOP", s))
+            }
         } else {
             val tok = tokenizer ?: KwsTokenizer.loadFromAssets(context)
             val mainLine = tok.formatKeywordLine(clean, boost, threshold)
