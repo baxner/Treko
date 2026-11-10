@@ -269,14 +269,98 @@ class XiaozhiWebSocketClient(
                         })
                     })
                     put(JSONObject().apply {
-                        put("name", "home_assistant_control")
-                        put("description", "Controla dispositivos en Home Assistant (encender/apagar luces o switches, regular color, brillo o blanco Kelvin).")
+                        put("name", "home_assistant_call_service")
+                        put("description", "Llama a cualquier servicio o acción en Home Assistant. Permite controlar absolutamente cualquier dispositivo o integración disponible (enviar anuncios o hablar por altavoces Alexa/Google/media_players con 'notify' o 'media_player', reproducir música, pausar, cambiar volumen, activar escenas, scripts, automatizaciones, abrir/cerrar persianas, controlar clima o termostatos, aspiradoras, cerraduras, etc.).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("domain", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Dominio del servicio (ej. 'notify', 'media_player', 'light', 'switch', 'climate', 'scene', 'script', 'automation', 'cover')")
+                                })
+                                put("service", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre del servicio o acción a ejecutar (ej. 'alexa_media_en_todas_partes', 'media_play', 'media_pause', 'volume_set', 'turn_on', 'turn_off', 'set_temperature', 'trigger')")
+                                })
+                                put("service_data", JSONObject().apply {
+                                    put("type", "object")
+                                    put("description", "Parámetros del servicio en formato JSON (ej. {\"message\": \"Aviso a la casa\"}, {\"entity_id\": \"media_player.sala\", \"volume_level\": 0.5}) (opcional)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("domain"); put("service") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_broadcast")
+                        put("description", "Envía anuncios de voz o mensajes a los altavoces de la casa (Alexa, Echo, Google Cast, etc.) a través de Home Assistant. Úsalo cuando el usuario pida avisar, mandar un recado, regañar a alguien o hablar por las bocinas/Alexas.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("message", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Mensaje o texto que dirán los altavoces en voz alta")
+                                })
+                                put("target", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Destino opcional: 'todas', 'casa', o nombre de una habitación o altavoz (ej. 'cocina', 'recamara')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("message") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_list_entities")
+                        put("description", "Lista o busca entidades y dispositivos disponibles en Home Assistant (altavoces/Alexas, luces, interruptores, sensores, climas, persianas, etc.) con sus nombres amigables, entity_id reales y estados. Úsalo para saber qué dispositivos existen o encontrar el entity_id correcto.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("domain", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Filtro opcional por dominio: 'light', 'media_player', 'notify', 'switch', 'climate', 'sensor', 'scene', 'automation', o 'all' (opcional)")
+                                })
+                                put("search", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Término de búsqueda opcional por nombre o ID (ej. 'alexa', 'sala', 'cuarto', 'luz', 'temperatura')")
+                                })
+                            })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_get_entity_state")
+                        put("description", "Consulta el estado actual y todos los atributos detallados de un dispositivo o entidad específica en Home Assistant (ej. temperatura actual, si un dispositivo está encendido o apagado, volumen de un altavoz, nivel de batería, etc.).")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("entity_id", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre amigable o ID de entidad (ej. 'colors smart', 'luz ambiente', 'light.colors_smart', 'luces del cuarto')")
+                                    put("description", "El entity_id exacto en Home Assistant (ej. 'sensor.temperatura', 'media_player.sala', 'light.sala')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("entity_id") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_list_services")
+                        put("description", "Lista los servicios o acciones disponibles en Home Assistant, filtrados opcionalmente por dominio. Úsalo si necesitas saber qué acciones soporta un dominio como 'notify', 'media_player', 'climate', etc.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("domain", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Dominio a consultar (ej. 'notify', 'media_player', 'climate', 'scene')")
+                                })
+                            })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_control")
+                        put("description", "Control rápido de encendido/apagado, color, brillo y temperatura de color en dispositivos (luces, interruptores, enchufes). Resuelve nombres comunes en lenguaje natural dinámicamente sin requerir entity_ids exactos.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("entity_id", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre común o ID de entidad (ej. 'luz de la sala', 'luz ambiente', 'foco del cuarto', 'switch')")
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
@@ -296,19 +380,6 @@ class XiaozhiWebSocketClient(
                                 })
                             })
                             put("required", JSONArray().apply { put("entity_id"); put("action") })
-                        })
-                    })
-                    put(JSONObject().apply {
-                        put("name", "home_assistant_list_entities")
-                        put("description", "Lista los dispositivos y entidades disponibles en Home Assistant (luces, interruptores, etc.) con sus nombres reales y estados. Úsalo cuando el usuario pida listar las entidades o cuando necesites saber qué luces existen en su casa.")
-                        put("inputSchema", JSONObject().apply {
-                            put("type", "object")
-                            put("properties", JSONObject().apply {
-                                put("domain", JSONObject().apply {
-                                    put("type", "string")
-                                    put("description", "Filtro opcional: 'light', 'switch', o 'all' (opcional)")
-                                })
-                            })
                         })
                     })
                 }

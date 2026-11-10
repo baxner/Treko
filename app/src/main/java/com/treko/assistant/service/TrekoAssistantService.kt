@@ -430,6 +430,90 @@ class TrekoAssistantService : Service() {
                         else -> "Acción '$action' no reconocida para manage_vault_memory."
                     }
                 }
+                "home_assistant_call_service" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val domain = args.optString("domain", "").trim()
+                    val service = args.optString("service", "").trim()
+
+                    val serviceData = when {
+                        args.has("service_data") && args.optJSONObject("service_data") != null -> {
+                            args.getJSONObject("service_data")
+                        }
+                        args.has("service_data") && args.optString("service_data").startsWith("{") -> {
+                            try {
+                                JSONObject(args.getString("service_data"))
+                            } catch (_: Exception) {
+                                JSONObject()
+                            }
+                        }
+                        else -> {
+                            val payload = JSONObject()
+                            val it = args.keys()
+                            while (it.hasNext()) {
+                                val key = it.next()
+                                if (key != "domain" && key != "service") {
+                                    payload.put(key, args.get(key))
+                                }
+                            }
+                            payload
+                        }
+                    }
+
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.callService(domain, service, serviceData)
+                }
+                "home_assistant_broadcast" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val message = args.optString("message", "").trim()
+                    val target = args.optString("target", "").trim()
+                    if (message.isBlank()) {
+                        return@withContext "Mensaje vacío para transmisión."
+                    }
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.broadcastMessage(message, target)
+                }
+                "home_assistant_list_entities" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val domain = args.optString("domain", "")
+                    val search = args.optString("search", "")
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.listEntities(domain, search)
+                }
+                "home_assistant_get_entity_state" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val entityId = args.optString("entity_id", "").trim()
+                    if (entityId.isBlank()) {
+                        return@withContext "Se requiere 'entity_id' para consultar su estado."
+                    }
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.getEntityState(entityId)
+                }
+                "home_assistant_list_services" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val domain = args.optString("domain", "")
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.listServices(domain)
+                }
                 "home_assistant_control" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
@@ -451,16 +535,6 @@ class TrekoAssistantService : Service() {
                         brillo = brightness,
                         colorOrTemp = colorOrTemp
                     )
-                }
-                "home_assistant_list_entities" -> {
-                    val haUrl = prefs.haUrl.trim()
-                    val haToken = prefs.haToken.trim()
-                    if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
-                    }
-                    val domain = args.optString("domain", "light")
-                    val haClient = HomeAssistantClient(haUrl, haToken)
-                    haClient.listEntities(domain)
                 }
                 else -> "Herramienta '$name' no implementada en Treko."
             }
