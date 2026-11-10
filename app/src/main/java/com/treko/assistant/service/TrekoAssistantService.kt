@@ -12,20 +12,24 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.treko.assistant.R
 import com.treko.core.audio.NativeAudioEngine
+import com.treko.core.audio.OpusAudioCodec
 import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
 import com.treko.core.kws.TrekoWakeWordDetector
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import com.treko.core.network.XiaozhiWebSocketClient
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 
 /**
- * Servicio en segundo plano con permisos de micrófono para detección continua de la palabra de activación ("Treko" o personalizada).
+ * Servicio en segundo plano para Treko AI Assistant.
+ * Orquesta:
+ * 1. Detección local continua de Wake Word con Sherpa-ONNX.
+ * 2. Streaming bidireccional de audio Opus a 16kHz/24kHz con el servidor Xiaozhi.
+ * 3. VAD (Voice Activity Detection) para corte automático tras hablar.
+ * 4. Sincronización en tiempo real de estados conversacionales, subtítulos y emociones.
  */
 class TrekoAssistantService : Service() {
 
@@ -34,21 +38,51 @@ class TrekoAssistantService : Service() {
     private val NOTIFICATION_ID = 1001
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
     private var wakeWordDetector: TrekoWakeWordDetector? = null
+    private var opusCodec: OpusAudioCodec? = null
+    private var wsClient: XiaozhiWebSocketClient? = null
+    private var ttsDrainingJob: Job? = null
+
+    @Volatile
+    private var speechDetected: Boolean = false
+
+    @Volatile
+    private var lastSpeechTimestamp: Long = 0L
+
+    @Volatile
+    private var listeningStartTimestamp: Long = 0L
 
     companion object {
         private val _serviceState = MutableStateFlow(TrekoState.IDLE)
         val serviceState: StateFlow<TrekoState> = _serviceState.asStateFlow()
 
+        private val _currentEmotion = MutableStateFlow(TrekoEmotion.RELAX)
+        val currentEmotion: StateFlow<TrekoEmotion> = _currentEmotion.asStateFlow()
+
+        private val _subtitleText = MutableStateFlow("")
+        val subtitleText: StateFlow<String> = _subtitleText.asStateFlow()
+
         @Volatile
         private var instance: TrekoAssistantService? = null
+
+        fun startConversation(keyword: String = "Treko") {
+            instance?.beginConversation(keyword) ?: run {
+                _serviceState.value = TrekoState.LISTENING
+                _currentEmotion.value = TrekoEmotion.ESCUCHA
+            }
+        }
+
+        fun stopConversation() {
+            instance?.abortConversation()
+        }
 
         fun updateWakeWordConfig(context: Context, keyword: String, boost: Float, threshold: Float) {
             val current = instance
             if (current != null) {
                 current.wakeWordDetector?.updateKeywords(keyword, boost, threshold)
             } else {
-                Log.d("TrekoService", "Servicio inactivo al actualizar KWS, iniciando servicio...")
+                Log.d("TrekoService", "Servicio inactivo al actualizar KWS, iniciando...")
                 startService(context)
             }
         }
@@ -80,8 +114,77 @@ class TrekoAssistantService : Service() {
         startForeground(NOTIFICATION_ID, notification)
         Log.i(TAG, "TrekoAssistantService iniciado en primer plano.")
 
-        // Inicializar detector KWS local con configuración de preferencias
         val prefs = TrekoPreferences(this)
+
+        // 1. Inicializar Códec Opus nativo (16kHz entrada, 24kHz salida de Xiaozhi)
+        opusCodec = OpusAudioCodec(inputSampleRate = 16000, outputSampleRate = 24000)
+
+        // 2. Inicializar Cliente WebSocket Xiaozhi
+        initWebSocketClient(prefs)
+
+        // 3. Inicializar detector neuronal KWS
+        initWakeWordDetector(prefs)
+
+        // 4. Conectar audio PCM de NativeAudioEngine
+        setupAudioPipeline()
+
+        // 5. Iniciar captura de micrófono
+        NativeAudioEngine.startRecording(serviceScope)
+    }
+
+    private fun initWebSocketClient(prefs: TrekoPreferences) {
+        val client = XiaozhiWebSocketClient(
+            serverUrl = prefs.xiaozhiWsUrl,
+            macAddress = prefs.macAddress,
+            clientId = prefs.clientId,
+            token = prefs.xiaozhiToken
+        )
+
+        client.onSttReceived = { transcript ->
+            _subtitleText.value = "Tú: $transcript"
+            _serviceState.value = TrekoState.THINKING
+            _currentEmotion.value = TrekoEmotion.PIENSA
+        }
+
+        client.onLlmReceived = { text, emotionStr ->
+            _subtitleText.value = "Treko: $text"
+            _currentEmotion.value = TrekoEmotion.fromString(emotionStr)
+        }
+
+        client.onTtsStateChanged = { state, text ->
+            when (state) {
+                "start" -> {
+                    ttsDrainingJob?.cancel()
+                    _serviceState.value = TrekoState.SPEAKING
+                    _currentEmotion.value = TrekoEmotion.FELIZ_ABIERTO
+                }
+                "sentence_start" -> {
+                    if (!text.isNullOrBlank()) {
+                        _subtitleText.value = "Treko: $text"
+                    }
+                }
+                "stop" -> {
+                    ttsDrainingJob?.cancel()
+                    ttsDrainingJob = serviceScope.launch {
+                        delay(600) // Permitir que el búfer de AudioTrack termine de sonar
+                        if (_serviceState.value == TrekoState.SPEAKING) {
+                            _serviceState.value = TrekoState.IDLE
+                            _currentEmotion.value = TrekoEmotion.RELAX
+                        }
+                    }
+                }
+            }
+        }
+
+        client.onAudioPacketReceived = { opusBytes ->
+            opusCodec?.decodeAndPlay(opusBytes)
+        }
+
+        wsClient = client
+        client.connect()
+    }
+
+    private fun initWakeWordDetector(prefs: TrekoPreferences) {
         val detector = TrekoWakeWordDetector(this)
         detector.initialize(
             initialKeyword = prefs.customWakeWord,
@@ -90,27 +193,105 @@ class TrekoAssistantService : Service() {
         )
         wakeWordDetector = detector
 
-        // Conectar el buffer de audio PCM del motor nativo con el detector KWS
-        NativeAudioEngine.onPcmData = { buffer, read ->
-            detector.acceptWaveform(buffer, read)
-        }
-
-        // Suscribirse a eventos de detección del Wake Word
+        // Escuchar detecciones acústicas locales
         serviceScope.launch {
             detector.detectionEvents.collect { keyword ->
-                Log.i(TAG, "¡Palabra de activación detectada por KWS en servicio: '$keyword'! Cambiando a LISTENING.")
-                _serviceState.value = TrekoState.LISTENING
+                Log.i(TAG, "¡Wake word detectada ('$keyword')! Iniciando conversación...")
+                beginConversation(keyword)
             }
         }
+    }
 
-        // Iniciar captura continua de micrófono
-        NativeAudioEngine.startRecording(serviceScope)
+    private fun setupAudioPipeline() {
+        NativeAudioEngine.onPcmData = { buffer, read ->
+            val currentState = _serviceState.value
+
+            when (currentState) {
+                TrekoState.IDLE -> {
+                    // Alimentar detector KWS local en reposo
+                    wakeWordDetector?.acceptWaveform(buffer, read)
+                }
+                TrekoState.LISTENING -> {
+                    // 1. Codificar a Opus y enviar al servidor Xiaozhi
+                    val packets = opusCodec?.encodePcm(buffer, read) ?: emptyList()
+                    val client = wsClient
+                    if (client != null && client.isConnected) {
+                        for (packet in packets) {
+                            client.sendAudio(packet)
+                        }
+                    }
+
+                    // 2. VAD: Detección de actividad vocal y silencio
+                    val rms = NativeAudioEngine.audioLevel.value.rms
+                    val now = System.currentTimeMillis()
+
+                    if (rms > 0.02f) {
+                        speechDetected = true
+                        lastSpeechTimestamp = now
+                    }
+
+                    if (speechDetected && (now - lastSpeechTimestamp > 850L)) {
+                        // Usuario terminó de hablar tras una pausa de 850ms
+                        Log.i(TAG, "Fin de voz detectado por VAD. Solicitando respuesta...")
+                        speechDetected = false
+                        client?.stopListening()
+                        _serviceState.value = TrekoState.THINKING
+                        _currentEmotion.value = TrekoEmotion.PIENSA
+                        _subtitleText.value = "Pensando..."
+                    } else if (!speechDetected && (now - listeningStartTimestamp > 7500L)) {
+                        // Timeout sin hablar
+                        Log.i(TAG, "Tiempo de espera agotado sin voz. Volviendo a IDLE.")
+                        client?.stopListening()
+                        _serviceState.value = TrekoState.IDLE
+                        _currentEmotion.value = TrekoEmotion.RELAX
+                        _subtitleText.value = ""
+                    }
+                }
+                else -> {
+                    // THINKING o SPEAKING: no enviamos micrófono para evitar eco
+                }
+            }
+        }
+    }
+
+    fun beginConversation(keyword: String) {
+        ttsDrainingJob?.cancel()
+        opusCodec?.stopPlayback()
+
+        speechDetected = false
+        val now = System.currentTimeMillis()
+        listeningStartTimestamp = now
+        lastSpeechTimestamp = now
+
+        _serviceState.value = TrekoState.LISTENING
+        _currentEmotion.value = TrekoEmotion.ESCUCHA
+        _subtitleText.value = "Escuchando..."
+
+        val client = wsClient
+        if (client != null) {
+            if (!client.isConnected) {
+                client.connect()
+            }
+            client.startListening(keyword)
+        }
+    }
+
+    fun abortConversation() {
+        ttsDrainingJob?.cancel()
+        opusCodec?.stopPlayback()
+        wsClient?.abortSpeaking()
+        _serviceState.value = TrekoState.IDLE
+        _currentEmotion.value = TrekoEmotion.RELAX
+        _subtitleText.value = ""
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        _serviceState.value = TrekoState.IDLE
         if (!NativeAudioEngine.isRecording) {
             NativeAudioEngine.startRecording(serviceScope)
+        }
+        val client = wsClient
+        if (client != null && !client.isConnected) {
+            client.connect()
         }
         return START_STICKY
     }
@@ -119,8 +300,16 @@ class TrekoAssistantService : Service() {
         super.onDestroy()
         NativeAudioEngine.onPcmData = null
         NativeAudioEngine.stopRecording()
+
         wakeWordDetector?.release()
         wakeWordDetector = null
+
+        opusCodec?.release()
+        opusCodec = null
+
+        wsClient?.disconnect()
+        wsClient = null
+
         serviceScope.cancel()
         _serviceState.value = TrekoState.IDLE
         if (instance == this) {

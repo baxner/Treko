@@ -130,8 +130,9 @@ fun MainScreen(
     onReopenWizard: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.FACE) }
-    var currentEmotion by remember { mutableStateOf(TrekoEmotion.RELAX) }
+    val currentEmotion by TrekoAssistantService.currentEmotion.collectAsState()
     val currentState by TrekoAssistantService.serviceState.collectAsState()
+    val subtitleText by TrekoAssistantService.subtitleText.collectAsState()
     val audioLevel by NativeAudioEngine.audioLevel.collectAsState()
 
     Scaffold(
@@ -188,16 +189,14 @@ fun MainScreen(
                 NavigationTab.FACE -> FaceScreen(
                     emotion = currentEmotion,
                     state = currentState,
+                    subtitle = subtitleText,
                     audioLevel = audioLevel,
                     onToggleListen = {
-                        val next = if (currentState == TrekoState.IDLE) {
-                            currentEmotion = TrekoEmotion.ESCUCHA
-                            TrekoState.LISTENING
+                        if (currentState == TrekoState.IDLE) {
+                            TrekoAssistantService.startConversation(prefs.customWakeWord.ifBlank { "Treko" })
                         } else {
-                            currentEmotion = TrekoEmotion.RELAX
-                            TrekoState.IDLE
+                            TrekoAssistantService.stopConversation()
                         }
-                        TrekoAssistantService.setServiceState(next)
                     }
                 )
                 NavigationTab.HABITS -> HabitsScreen()
@@ -216,6 +215,7 @@ fun MainScreen(
 fun FaceScreen(
     emotion: TrekoEmotion,
     state: TrekoState,
+    subtitle: String,
     audioLevel: AudioLevel,
     onToggleListen: () -> Unit
 ) {
@@ -266,18 +266,29 @@ fun FaceScreen(
         ) {
             ReactiveEqualizer(audioLevel = audioLevel)
 
-            Text(
-                text = when (state) {
-                    TrekoState.IDLE -> stringResource(R.string.status_idle)
-                    TrekoState.LISTENING -> stringResource(R.string.status_listening)
-                    TrekoState.THINKING -> stringResource(R.string.status_thinking)
-                    TrekoState.SPEAKING -> stringResource(R.string.status_speaking)
-                    TrekoState.ERROR -> "Error de conexión"
-                },
-                color = TextSecondary,
-                fontSize = 14.sp,
-                textAlign = TextAlign.Center
-            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    color = NeonCyan,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            } else {
+                Text(
+                    text = when (state) {
+                        TrekoState.IDLE -> stringResource(R.string.status_idle)
+                        TrekoState.LISTENING -> stringResource(R.string.status_listening)
+                        TrekoState.THINKING -> stringResource(R.string.status_thinking)
+                        TrekoState.SPEAKING -> stringResource(R.string.status_speaking)
+                        TrekoState.ERROR -> "Error de conexión"
+                    },
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
 
             FloatingActionButton(
                 onClick = onToggleListen,
