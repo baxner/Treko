@@ -402,7 +402,8 @@ class HomeAssistantClient(
         deviceQuery: String,
         accion: String = "encender",
         brillo: Int = 0,
-        colorOrTemp: String = ""
+        colorOrTemp: String = "",
+        source: String = ""
     ): String = withContext(Dispatchers.IO) {
         try {
             val entity = resolveEntity(deviceQuery) 
@@ -410,6 +411,38 @@ class HomeAssistantClient(
 
             val domain = entity.domain
             val a = accion.trim().lowercase()
+            val sInput = source.trim()
+
+            // 1. Manejo especial de cambio de entrada / fuente de video (ej. HDMI)
+            if (sInput.isNotBlank() || a in listOf("hdmi", "source", "entrada", "cambiar_fuente", "select_source") || a.contains("hdmi")) {
+                val targetSource = when {
+                    sInput.isNotBlank() -> sInput
+                    a.contains("hdmi") -> "HDMI"
+                    else -> "TV"
+                }
+
+                if (domain == "media_player") {
+                    val serviceUrl = "${getBaseUrl()}/api/services/media_player/select_source"
+                    val payload = JSONObject().apply {
+                        put("entity_id", entity.id)
+                        put("source", targetSource)
+                    }
+                    val body = payload.toString().toRequestBody("application/json".toMediaType())
+                    val req = Request.Builder()
+                        .url(serviceUrl)
+                        .addHeader("Authorization", "Bearer $haToken")
+                        .post(body)
+                        .build()
+
+                    client.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            return@withContext "Entrada de '${entity.friendlyName}' cambiada a '$targetSource' correctamente."
+                        } else {
+                            return@withContext "Error cambiando entrada en Home Assistant (${resp.code}): ${resp.message}"
+                        }
+                    }
+                }
+            }
 
             val hasSettings = colorOrTemp.isNotBlank() || brillo > 0
             val isOff = a.startsWith("apa") || a in listOf("off", "desactivar", "apagar", "cerrar", "close", "detener", "stop")
@@ -543,11 +576,11 @@ class HomeAssistantClient(
             .removePrefix("remote.")
             .removePrefix("fan.")
             .removePrefix("cover.")
-            .replace(Regex("^(el|la|los|las|de|mi|del|un|una|dispositivo|aparato|apaga|prende|enciende)\\s+"), "")
+            .replace(Regex("^(el|la|los|las|de|mi|del|un|una|dispositivo|aparato|apaga|prende|enciende|pon|cambia|cambiar|a)\\s+"), "")
             .replace("_", " ")
             .trim()
 
-        val tvKeywords = listOf("tele", "television", "televisión", "televisor", "pantalla", "tv")
+        val tvKeywords = listOf("tele", "television", "televisión", "televisor", "pantalla", "tv", "hdmi", "entrada")
         val lightKeywords = listOf("luz", "luces", "foco", "focos", "bombilla", "bombillas", "lampara", "lámpara")
         val speakerKeywords = listOf("bocina", "bocinas", "altavoz", "altavoces", "parlante", "parlantes", "echo", "alexa")
         val switchKeywords = listOf("enchufe", "enchufes", "switch", "interruptor", "contacto", "tomacorriente")

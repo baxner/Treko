@@ -595,6 +595,8 @@ class TrekoAssistantService : Service() {
                         .ifBlank { args.optString("query", "") }
                     val action = args.optString("action", "turn_on")
                         .ifBlank { args.optString("service", "turn_on") }
+                    val source = args.optString("source", "")
+                        .ifBlank { args.optString("input", "") }
                     val brightness = args.optInt("brightness", 0)
                     val kelvin = args.optInt("kelvin", 0)
                     val color = args.optString("color", "").trim()
@@ -605,7 +607,8 @@ class TrekoAssistantService : Service() {
                         deviceQuery = entityId,
                         accion = action,
                         brillo = brightness,
-                        colorOrTemp = colorOrTemp
+                        colorOrTemp = colorOrTemp,
+                        source = source
                     )
                 }
                 else -> "Herramienta '$name' no implementada en Treko."

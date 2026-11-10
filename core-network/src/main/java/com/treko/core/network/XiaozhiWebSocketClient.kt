@@ -354,7 +354,7 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "home_assistant_control")
-                        put("description", "Control rápido, universal y directo para encender, apagar, alternar, cambiar color o brillo en CUALQUIER dispositivo de la casa (televisores/Samsung/Roku/Apple TV/pantallas/tele, luces, interruptores, enchufes, etc.). Resuelve nombres coloquiales en español ('la tele', 'tele samsung', 'televisión', 'luz de la sala', 'foco') sin requerir IDs exactos. ¡USA SIEMPRE ESTA HERRAMIENTA PREFERENTEMENTE para órdenes directas de encender o apagar cualquier aparato!")
+                        put("description", "Control rápido, universal y directo para encender, apagar, alternar, cambiar entrada de video (HDMI, TV), color o brillo en CUALQUIER dispositivo de la casa (televisores/Samsung/Roku/Apple TV/pantallas/tele, luces, interruptores, enchufes, etc.). Resuelve nombres coloquiales en español ('la tele', 'tele samsung', 'televisión', 'el hdmi', 'luz de la sala', 'foco') sin requerir IDs exactos. ¡USA SIEMPRE ESTA HERRAMIENTA PREFERENTEMENTE para órdenes directas de encender, apagar o cambiar entrada de cualquier aparato!")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
@@ -364,7 +364,11 @@ class XiaozhiWebSocketClient(
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'turn_on' (encender), 'turn_off' (apagar), o 'toggle' (alternar)")
+                                    put("description", "'turn_on' (encender), 'turn_off' (apagar), 'toggle' (alternar), o 'select_source' (cambiar entrada)")
+                                })
+                                put("source", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Entrada o fuente de video para televisores (ej. 'HDMI', 'TV', 'HDMI 1') (opcional)")
                                 })
                                 put("color", JSONObject().apply {
                                     put("type", "string")
