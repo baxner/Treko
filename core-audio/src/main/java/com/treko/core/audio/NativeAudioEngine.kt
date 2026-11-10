@@ -73,10 +73,11 @@ object NativeAudioEngine {
         ).coerceAtLeast(1024)
 
         try {
-            // Usar AudioSource.MIC estándar para audio prístino lineal a 16kHz
-            // sin los filtros agresivos de puerta de ruido/beamforming de Samsung Bixby
+            // Usar AudioSource.VOICE_COMMUNICATION para acoplar el AcousticEchoCanceler (AEC)
+            // de hardware (Snapdragon/Samsung) con la salida de AudioTrack (USAGE_VOICE_COMMUNICATION).
+            // Esto permite cancelación acústica de eco real en hardware sin auto-interrupciones.
             var record = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -84,10 +85,10 @@ object NativeAudioEngine {
             )
 
             if (record.state != AudioRecord.STATE_INITIALIZED) {
-                Log.w(TAG, "MIC estándar no disponible, intentando con VOICE_RECOGNITION.")
+                Log.w(TAG, "VOICE_COMMUNICATION no disponible, intentando con MIC estándar.")
                 record.release()
                 record = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC,
                     SAMPLE_RATE,
                     CHANNEL_CONFIG,
                     AUDIO_FORMAT,
