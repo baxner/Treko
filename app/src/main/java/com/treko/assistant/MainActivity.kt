@@ -1,0 +1,1073 @@
+package com.treko.assistant
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.treko.assistant.service.TrekoAssistantService
+import com.treko.assistant.ui.components.*
+import com.treko.assistant.ui.theme.*
+import com.treko.core.audio.NativeAudioEngine
+import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.AudioLevel
+import com.treko.core.common.model.TrekoEmotion
+import com.treko.core.common.model.TrekoState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+        if (recordAudioGranted) {
+            TrekoAssistantService.startService(this)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        checkAndRequestPermissions()
+
+        val prefs = TrekoPreferences(applicationContext)
+
+        setContent {
+            TrekoTheme {
+                var isOnboardingCompleted by remember { mutableStateOf(prefs.isOnboardingCompleted) }
+
+                if (!isOnboardingCompleted) {
+                    SetupWizardScreen(
+                        prefs = prefs,
+                        onFinish = {
+                            prefs.isOnboardingCompleted = true
+                            isOnboardingCompleted = true
+                        }
+                    )
+                } else {
+                    MainScreen(
+                        prefs = prefs,
+                        onReopenWizard = {
+                            prefs.isOnboardingCompleted = false
+                            isOnboardingCompleted = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun checkAndRequestPermissions() {
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        val allGranted = permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!allGranted) {
+            permissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            TrekoAssistantService.startService(this)
+        }
+    }
+}
+
+enum class NavigationTab {
+    FACE, HABITS, TASKS, TIMER, SETTINGS
+}
+
+@Composable
+fun MainScreen(
+    prefs: TrekoPreferences,
+    onReopenWizard: () -> Unit
+) {
+    var selectedTab by remember { mutableStateOf(NavigationTab.FACE) }
+    var currentEmotion by remember { mutableStateOf(TrekoEmotion.RELAX) }
+    var currentState by remember { mutableStateOf(TrekoState.IDLE) }
+    val audioLevel by NativeAudioEngine.audioLevel.collectAsState()
+
+    Scaffold(
+        bottomBar = {
+            NavigationBar(
+                containerColor = SurfaceDark,
+                contentColor = TextPrimary
+            ) {
+                NavigationBarItem(
+                    selected = selectedTab == NavigationTab.FACE,
+                    onClick = { selectedTab = NavigationTab.FACE },
+                    icon = { Icon(Icons.Default.Face, contentDescription = stringResource(R.string.tab_face)) },
+                    label = { Text(stringResource(R.string.tab_face)) },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+                )
+                NavigationBarItem(
+                    selected = selectedTab == NavigationTab.HABITS,
+                    onClick = { selectedTab = NavigationTab.HABITS },
+                    icon = { Icon(Icons.Default.TrendingUp, contentDescription = stringResource(R.string.tab_habits)) },
+                    label = { Text(stringResource(R.string.tab_habits)) },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+                )
+                NavigationBarItem(
+                    selected = selectedTab == NavigationTab.TASKS,
+                    onClick = { selectedTab = NavigationTab.TASKS },
+                    icon = { Icon(Icons.Default.CheckCircle, contentDescription = stringResource(R.string.tab_tasks)) },
+                    label = { Text(stringResource(R.string.tab_tasks)) },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+                )
+                NavigationBarItem(
+                    selected = selectedTab == NavigationTab.TIMER,
+                    onClick = { selectedTab = NavigationTab.TIMER },
+                    icon = { Icon(Icons.Default.Timer, contentDescription = stringResource(R.string.tab_timer)) },
+                    label = { Text(stringResource(R.string.tab_timer)) },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+                )
+                NavigationBarItem(
+                    selected = selectedTab == NavigationTab.SETTINGS,
+                    onClick = { selectedTab = NavigationTab.SETTINGS },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.tab_settings)) },
+                    label = { Text(stringResource(R.string.tab_settings)) },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+                )
+            }
+        }
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(DeepBackground)
+        ) {
+            when (selectedTab) {
+                NavigationTab.FACE -> FaceScreen(
+                    emotion = currentEmotion,
+                    state = currentState,
+                    audioLevel = audioLevel,
+                    onToggleListen = {
+                        currentState = if (currentState == TrekoState.IDLE) {
+                            currentEmotion = TrekoEmotion.ESCUCHA
+                            TrekoState.LISTENING
+                        } else {
+                            currentEmotion = TrekoEmotion.RELAX
+                            TrekoState.IDLE
+                        }
+                    }
+                )
+                NavigationTab.HABITS -> HabitsScreen()
+                NavigationTab.TASKS -> TasksScreen()
+                NavigationTab.TIMER -> TimerScreen()
+                NavigationTab.SETTINGS -> SettingsScreen(
+                    prefs = prefs,
+                    onReopenWizard = onReopenWizard
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun FaceScreen(
+    emotion: TrekoEmotion,
+    state: TrekoState,
+    audioLevel: AudioLevel,
+    onToggleListen: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Encabezado
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = stringResource(R.string.app_name),
+                color = NeonCyan,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            AssistChip(
+                onClick = {},
+                label = { Text(state.name, color = NeonPurple, fontSize = 12.sp) }
+            )
+        }
+
+        // Cara animada de Treko
+        Box(contentAlignment = Alignment.Center) {
+            TrekoFace(
+                emotion = emotion,
+                size = 260.dp
+            )
+        }
+
+        // Ecualizador reactivo y controles
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            ReactiveEqualizer(audioLevel = audioLevel)
+
+            Text(
+                text = when (state) {
+                    TrekoState.IDLE -> stringResource(R.string.status_idle)
+                    TrekoState.LISTENING -> stringResource(R.string.status_listening)
+                    TrekoState.THINKING -> stringResource(R.string.status_thinking)
+                    TrekoState.SPEAKING -> stringResource(R.string.status_speaking)
+                    TrekoState.ERROR -> "Error de conexión"
+                },
+                color = TextSecondary,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center
+            )
+
+            FloatingActionButton(
+                onClick = onToggleListen,
+                containerColor = if (state == TrekoState.LISTENING) NeonPurple else NeonCyan,
+                contentColor = Color.Black,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.size(64.dp)
+            ) {
+                Icon(
+                    imageVector = if (state == TrekoState.LISTENING) Icons.Default.MicOff else Icons.Default.Mic,
+                    contentDescription = "Micrófono"
+                )
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// PANTALLA DE HÁBITOS (INTERACTIVA)
+// -------------------------------------------------------------
+data class HabitItem(
+    val id: Int,
+    val title: String,
+    val icon: String,
+    var isDone: Boolean
+)
+
+@Composable
+fun HabitsScreen() {
+    var waterGlasses by remember { mutableIntStateOf(5) }
+    val habits = remember {
+        mutableStateListOf(
+            HabitItem(1, "10 min de meditación y respiración", "🧘", true),
+            HabitItem(2, "Lectura técnica o enfoque de estudio (25 min)", "📖", true),
+            HabitItem(3, "Sincronizar iluminación inteligente de descanso", "💡", false),
+            HabitItem(4, "Caminar 30 min o actividad física", "🚶", false)
+        )
+    }
+
+    val totalHabits = habits.size + 1 // +1 por la meta de agua (8 vasos)
+    val waterDone = waterGlasses >= 8
+    val completedHabits = habits.count { it.isDone } + (if (waterDone) 1 else 0)
+    val progress = (completedHabits.toFloat() / totalHabits.toFloat()).coerceIn(0f, 1f)
+
+    var showAddDialog by remember { mutableStateOf(false) }
+    var newHabitTitle by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("Hábitos Diarios", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("Seguimiento y bienestar personal", color = TextSecondary, fontSize = 13.sp)
+            }
+            IconButton(
+                onClick = { showAddDialog = true },
+                modifier = Modifier.background(SurfaceDark, CircleShape)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Añadir Hábito", tint = NeonCyan)
+            }
+        }
+
+        // Tarjeta de progreso general
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Progreso de hoy", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "$completedHabits de $totalHabits (${(progress * 100).toInt()}%)",
+                        color = NeonCyan,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+
+                LinearProgressIndicator(
+                    progress = { progress },
+                    color = NeonCyan,
+                    trackColor = CardBorder,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                )
+            }
+        }
+
+        // Contador de Hidratación interactivo
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("💧", fontSize = 28.sp)
+                    Column {
+                        Text("Hidratación Diaria", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text(
+                            text = if (waterDone) "Meta de 8 vasos cumplida 🎉" else "$waterGlasses de 8 vasos (250 ml)",
+                            color = if (waterDone) Color(0xFF00E676) else TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    IconButton(
+                        onClick = { if (waterGlasses > 0) waterGlasses-- },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(CardBorder, CircleShape)
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "Menos", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                    }
+                    Text(
+                        text = "$waterGlasses",
+                        color = NeonCyan,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                    IconButton(
+                        onClick = { waterGlasses++ },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(CardBorder, CircleShape)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Más", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
+        // Lista de hábitos interactivos
+        Text("Rutinas y Hábitos", color = NeonPurple, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+
+        habits.forEachIndexed { index, habit ->
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (habit.isDone) SurfaceDark.copy(alpha = 0.7f) else SurfaceDark
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { habits[index] = habit.copy(isDone = !habit.isDone) },
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(habit.icon, fontSize = 22.sp)
+                        Text(
+                            text = habit.title,
+                            color = if (habit.isDone) TextSecondary else TextPrimary,
+                            textDecoration = if (habit.isDone) TextDecoration.LineThrough else TextDecoration.None,
+                            fontSize = 14.sp
+                        )
+                    }
+
+                    Checkbox(
+                        checked = habit.isDone,
+                        onCheckedChange = { checked -> habits[index] = habit.copy(isDone = checked) },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = NeonCyan,
+                            checkmarkColor = Color.Black
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("Nuevo Hábito", color = NeonCyan) },
+            text = {
+                OutlinedTextField(
+                    value = newHabitTitle,
+                    onValueChange = { newHabitTitle = it },
+                    label = { Text("Nombre del hábito") },
+                    placeholder = { Text("Ej. Estiramiento 10 min") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newHabitTitle.isNotBlank()) {
+                            habits.add(HabitItem(habits.size + 1, newHabitTitle.trim(), "✨", false))
+                            newHabitTitle = ""
+                            showAddDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black)
+                ) {
+                    Text("Añadir")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) {
+                    Text("Cancelar", color = TextSecondary)
+                }
+            },
+            containerColor = SurfaceDark
+        )
+    }
+}
+
+// -------------------------------------------------------------
+// PANTALLA DE TAREAS (INTERACTIVA)
+// -------------------------------------------------------------
+data class TaskItem(
+    val id: Int,
+    val title: String,
+    var isDone: Boolean
+)
+
+@Composable
+fun TasksScreen() {
+    val tasks = remember {
+        mutableStateListOf(
+            TaskItem(1, "Revisar sensores de temperatura en Home Assistant", false),
+            TaskItem(2, "Completar sesión Pomodoro de 25 min", true),
+            TaskItem(3, "Configurar palabra de activación 'Treko' en la oficina", false)
+        )
+    }
+
+    var newTaskText by remember { mutableStateOf("") }
+    var filterMode by remember { mutableIntStateOf(0) } // 0: Todas, 1: Pendientes, 2: Hechas
+
+    val filteredTasks = tasks.filter {
+        when (filterMode) {
+            1 -> !it.isDone
+            2 -> it.isDone
+            else -> true
+        }
+    }
+
+    val doneCount = tasks.count { it.isDone }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("Tareas del Día", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("$doneCount de ${tasks.size} completadas", color = TextSecondary, fontSize = 13.sp)
+            }
+        }
+
+        // Campo para añadir tarea rápidamente
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = newTaskText,
+                onValueChange = { newTaskText = it },
+                placeholder = { Text("Escribe una nueva tarea…", fontSize = 14.sp) },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            Button(
+                onClick = {
+                    if (newTaskText.isNotBlank()) {
+                        tasks.add(0, TaskItem(System.currentTimeMillis().toInt(), newTaskText.trim(), false))
+                        newTaskText = ""
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.height(56.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Añadir")
+            }
+        }
+
+        // Filtros rápidos
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = filterMode == 0,
+                onClick = { filterMode = 0 },
+                label = { Text("Todas (${tasks.size})") }
+            )
+            FilterChip(
+                selected = filterMode == 1,
+                onClick = { filterMode = 1 },
+                label = { Text("Pendientes (${tasks.count { !it.isDone }})") }
+            )
+            FilterChip(
+                selected = filterMode == 2,
+                onClick = { filterMode = 2 },
+                label = { Text("Completadas ($doneCount)") }
+            )
+        }
+
+        // Lista de tareas
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            items(filteredTasks, key = { it.id }) { task ->
+                val taskIndex = tasks.indexOfFirst { it.id == task.id }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Checkbox(
+                                checked = task.isDone,
+                                onCheckedChange = { checked ->
+                                    if (taskIndex >= 0) {
+                                        tasks[taskIndex] = task.copy(isDone = checked)
+                                    }
+                                },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = NeonCyan,
+                                    checkmarkColor = Color.Black
+                                )
+                            )
+                            Text(
+                                text = task.title,
+                                color = if (task.isDone) TextSecondary else TextPrimary,
+                                textDecoration = if (task.isDone) TextDecoration.LineThrough else TextDecoration.None,
+                                fontSize = 14.sp
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { tasks.removeAll { it.id == task.id } }
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar", tint = TextSecondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// PANTALLA DE TEMPORIZADOR (POMODORO FUNCIONAL)
+// -------------------------------------------------------------
+enum class TimerMode(val title: String, val seconds: Int) {
+    POMODORO("Pomodoro (25m)", 25 * 60),
+    SHORT_BREAK("Descanso Corto (5m)", 5 * 60),
+    LONG_BREAK("Descanso Largo (15m)", 15 * 60)
+}
+
+@Composable
+fun TimerScreen() {
+    var selectedMode by remember { mutableStateOf(TimerMode.POMODORO) }
+    var remainingSeconds by remember { mutableIntStateOf(selectedMode.seconds) }
+    var isRunning by remember { mutableStateOf(false) }
+    var completedSessions by remember { mutableIntStateOf(2) }
+
+    LaunchedEffect(isRunning) {
+        while (isRunning && remainingSeconds > 0) {
+            delay(1000L)
+            remainingSeconds--
+        }
+        if (remainingSeconds <= 0 && isRunning) {
+            isRunning = false
+            if (selectedMode == TimerMode.POMODORO) {
+                completedSessions++
+            }
+        }
+    }
+
+    val progress = (remainingSeconds.toFloat() / selectedMode.seconds.toFloat()).coerceIn(0f, 1f)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Temporizador de Enfoque", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("Técnica Pomodoro asistida por Treko", color = TextSecondary, fontSize = 13.sp)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Selector de modo
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TimerMode.values().forEach { mode ->
+                    FilterChip(
+                        selected = selectedMode == mode,
+                        onClick = {
+                            selectedMode = mode
+                            remainingSeconds = mode.seconds
+                            isRunning = false
+                        },
+                        label = { Text(mode.title, fontSize = 11.sp) }
+                    )
+                }
+            }
+        }
+
+        // Reloj Cyber Digital
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            val minutes = remainingSeconds / 60
+            val seconds = remainingSeconds % 60
+            val timeString = String.format("%02d:%02d", minutes, seconds)
+
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(220.dp)
+                    .clip(CircleShape)
+                    .background(SurfaceDark)
+                    .border(3.dp, if (isRunning) NeonCyan else CardBorder, CircleShape)
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = timeString,
+                        color = if (isRunning) NeonCyan else TextPrimary,
+                        fontSize = 52.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = if (isRunning) "En progreso…" else "Pausado",
+                        color = if (isRunning) NeonPurple else TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            LinearProgressIndicator(
+                progress = { progress },
+                color = NeonCyan,
+                trackColor = CardBorder,
+                modifier = Modifier
+                    .width(220.dp)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+            )
+        }
+
+        // Controles y estadísticas
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Button(
+                    onClick = { isRunning = !isRunning },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isRunning) Color(0xFFFF5252) else NeonCyan,
+                        contentColor = Color.Black
+                    ),
+                    modifier = Modifier.height(50.dp).width(140.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = null
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (isRunning) "Pausar" else "Iniciar", fontWeight = FontWeight.Bold)
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        isRunning = false
+                        remainingSeconds = selectedMode.seconds
+                    },
+                    modifier = Modifier.height(50.dp).width(120.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, tint = TextPrimary)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Reiniciar", color = TextPrimary)
+                }
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceAround
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Sesiones hoy", color = TextSecondary, fontSize = 12.sp)
+                        Text("$completedSessions", color = NeonCyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Enfoque total", color = TextSecondary, fontSize = 12.sp)
+                        Text("${completedSessions * 25} min", color = NeonPurple, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// PANTALLA DE AJUSTES (DINÁMICA Y PERSISTIDA)
+// -------------------------------------------------------------
+@Composable
+fun SettingsScreen(
+    prefs: TrekoPreferences,
+    onReopenWizard: () -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    var xiaozhiUrl by remember { mutableStateOf(prefs.xiaozhiWsUrl) }
+    var xiaozhiToken by remember { mutableStateOf(prefs.xiaozhiToken) }
+    var haUrl by remember { mutableStateOf(prefs.haUrl) }
+    var haToken by remember { mutableStateOf(prefs.haToken) }
+    var sensitivity by remember { mutableFloatStateOf(prefs.wakeWordSensitivity) }
+
+    var isTokenVisible by remember { mutableStateOf(false) }
+
+    // Estados de pruebas
+    var isTestingXiaozhi by remember { mutableStateOf(false) }
+    var xiaozhiResult by remember { mutableStateOf<String?>(null) }
+    var isTestingHa by remember { mutableStateOf(false) }
+    var haResult by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text("Ajustes del Asistente", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+
+        // Tarjeta Servidor Xiaozhi
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Servidor Xiaozhi AI", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    IconButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("MAC Address", prefs.macAddress))
+                            Toast.makeText(context, "MAC copiada: ${prefs.macAddress}", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copiar MAC", tint = NeonCyan, modifier = Modifier.size(20.dp))
+                    }
+                }
+
+                AssistChip(
+                    onClick = {},
+                    label = { Text("MAC (xiaozhi.me): ${prefs.macAddress}", fontSize = 12.sp, color = NeonCyan) }
+                )
+
+                OutlinedTextField(
+                    value = xiaozhiUrl,
+                    onValueChange = { xiaozhiUrl = it },
+                    label = { Text("URL WebSocket Xiaozhi", fontSize = 12.sp) },
+                    placeholder = { Text("wss://api.tenclass.net/xiaozhi/v1/") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = xiaozhiToken,
+                    onValueChange = { xiaozhiToken = it },
+                    label = { Text("Token de Xiaozhi (opcional)", fontSize = 12.sp) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (xiaozhiResult != null) {
+                        Text(
+                            text = xiaozhiResult ?: "",
+                            color = if (xiaozhiResult?.startsWith("✓") == true) Color(0xFF00E676) else Color(0xFFFF5252),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.width(1.dp))
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                isTestingXiaozhi = true
+                                xiaozhiResult = null
+                                xiaozhiResult = testXiaozhiConnection(xiaozhiUrl, xiaozhiToken)
+                                isTestingXiaozhi = false
+                            }
+                        },
+                        enabled = !isTestingXiaozhi
+                    ) {
+                        if (isTestingXiaozhi) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Probar Servidor", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tarjeta Home Assistant
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Home Assistant (Domótica)", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+
+                OutlinedTextField(
+                    value = haUrl,
+                    onValueChange = { haUrl = it },
+                    label = { Text("URL del Servidor", fontSize = 12.sp) },
+                    placeholder = { Text("http://homeassistant.local:8123") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = haToken,
+                    onValueChange = { haToken = it },
+                    label = { Text("Token de Larga Duración", fontSize = 12.sp) },
+                    visualTransformation = if (isTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { isTokenVisible = !isTokenVisible }) {
+                            Icon(
+                                imageVector = if (isTokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = null,
+                                tint = TextSecondary
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (haResult != null) {
+                        Text(
+                            text = haResult ?: "",
+                            color = if (haResult?.startsWith("✓") == true) Color(0xFF00E676) else Color(0xFFFF5252),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.width(1.dp))
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                isTestingHa = true
+                                haResult = null
+                                haResult = testHaConnection(haUrl, haToken)
+                                isTestingHa = false
+                            }
+                        },
+                        enabled = !isTestingHa
+                    ) {
+                        if (isTestingHa) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Probar HA", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tarjeta Sensibilidad Wake Word
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Detección de Voz Local (KWS)", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("Palabra clave: 'Treko' (Zipformer Sherpa-ONNX 100% privado en tu teléfono)", color = TextSecondary, fontSize = 12.sp)
+
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Sensibilidad de escucha", color = TextPrimary, fontSize = 13.sp)
+                    Text(String.format("%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                Slider(
+                    value = sensitivity,
+                    onValueChange = { sensitivity = it },
+                    valueRange = 0.01f..0.20f,
+                    colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
+                )
+            }
+        }
+
+        // Acciones y Botones Finales
+        Button(
+            onClick = {
+                prefs.xiaozhiWsUrl = xiaozhiUrl
+                prefs.xiaozhiToken = xiaozhiToken
+                prefs.haUrl = haUrl
+                prefs.haToken = haToken
+                prefs.wakeWordSensitivity = sensitivity
+                Toast.makeText(context, "¡Ajustes guardados correctamente!", Toast.LENGTH_SHORT).show()
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+        ) {
+            Icon(Icons.Default.Save, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Guardar Ajustes", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+
+        OutlinedButton(
+            onClick = onReopenWizard,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+        ) {
+            Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = NeonPurple)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Reabrir Asistente de Configuración (Wizard)", color = NeonPurple, fontSize = 14.sp)
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+    }
+}

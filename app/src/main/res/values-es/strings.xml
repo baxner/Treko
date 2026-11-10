@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">Treko Asistente</string>
+    <string name="wake_word">Treko</string>
+    <string name="status_idle">En reposo… di \"Treko\" para despertar</string>
+    <string name="status_listening">Escuchándote…</string>
+    <string name="status_thinking">Pensando…</string>
+    <string name="status_speaking">Hablando…</string>
+    <string name="tab_face">Cara</string>
+    <string name="tab_habits">Hábitos</string>
+    <string name="tab_tasks">Tareas</string>
+    <string name="tab_timer">Temporizador</string>
+    <string name="tab_settings">Ajustes</string>
+    <string name="settings_ha_title">Home Assistant</string>
+    <string name="settings_ha_url">URL del Servidor (ej. http://homeassistant.local:8123)</string>
+    <string name="settings_ha_token">Token de Acceso de Larga Duración</string>
+    <string name="settings_xiaozhi_title">Servidor Xiaozhi AI</string>
+    <string name="settings_xiaozhi_ws_url">URL WebSocket (ej. wss://api.tenclass.net/xiaozhi/v1/)</string>
+    <string name="settings_xiaozhi_token">Token de Acceso (opcional)</string>
+    <string name="settings_device_id">ID de Dispositivo Treko (MAC)</string>
+    <string name="settings_mic_title">Micrófono y Audio</string>
+    <string name="settings_mic_test">Probar Micrófono</string>
+    <string name="settings_kws_title">Sensibilidad de Activación</string>
+    <string name="settings_reopen_wizard">Reabrir Asistente de Configuración</string>
+    <string name="action_save">Guardar Cambios</string>
+    <string name="action_test_connection">Probar Conexión</string>
+    <string name="saved_success">¡Ajustes guardados correctamente!</string>
+</resources>

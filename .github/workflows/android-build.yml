@@ -1,0 +1,94 @@
+name: Build Treko Android App
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test Treko APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Cache Sherpa-ONNX AAR
+        uses: actions/cache@v4
+        id: cache-sherpa
+        with:
+          path: local-repo/com/k2fsa/sherpa/sherpa-onnx/2.0.1/sherpa-onnx-2.0.1.aar
+          key: sherpa-onnx-2.0.1-aar
+
+      - name: Download Sherpa-ONNX AAR
+        if: steps.cache-sherpa.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p local-repo/com/k2fsa/sherpa/sherpa-onnx/2.0.1
+          if [ ! -f local-repo/com/k2fsa/sherpa/sherpa-onnx/2.0.1/sherpa-onnx-2.0.1.aar ]; then
+            curl -L -f -o local-repo/com/k2fsa/sherpa/sherpa-onnx/2.0.1/sherpa-onnx-2.0.1.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-2.0.1.aar
+          fi
+
+      - name: Make Gradlew Executable
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee build.log
+          echo "=== LOCATING GENERATED APK ==="
+          mkdir -p apk-output
+          APK_FILE=$(find . -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -n "$APK_FILE" ]; then
+            echo "Found APK at: $APK_FILE"
+            cp "$APK_FILE" apk-output/TrekoAssistant-debug.apk
+            ls -lh apk-output/TrekoAssistant-debug.apk
+          fi
+
+      - name: Write Summary and Failure Log
+        if: always()
+        run: |
+          echo "## Gradle Build Diagnostic Output" >> $GITHUB_STEP_SUMMARY
+          if [ -f build.log ]; then
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 150 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: build.log
+          retention-days: 7
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: TrekoAssistant-debug
+          path: apk-output/TrekoAssistant-debug.apk
+          retention-days: 14
