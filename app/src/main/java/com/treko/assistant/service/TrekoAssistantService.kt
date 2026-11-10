@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -17,11 +18,16 @@ import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
 import com.treko.core.kws.TrekoWakeWordDetector
+import com.treko.core.mcp.HomeAssistantClient
 import com.treko.core.network.XiaozhiWebSocketClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Servicio en segundo plano para Treko AI Assistant.
@@ -52,6 +58,9 @@ class TrekoAssistantService : Service() {
 
     @Volatile
     private var listeningStartTimestamp: Long = 0L
+
+    @Volatile
+    private var activeListeningTimeoutMs: Long = 4500L
 
     companion object {
         private val _serviceState = MutableStateFlow(TrekoState.IDLE)
@@ -116,8 +125,8 @@ class TrekoAssistantService : Service() {
 
         val prefs = TrekoPreferences(this)
 
-        // 1. Inicializar Códec Opus nativo (16kHz entrada, 24kHz salida de Xiaozhi)
-        opusCodec = OpusAudioCodec(inputSampleRate = 16000, outputSampleRate = 24000)
+        // 1. Inicializar Códec Opus nativo (16kHz entrada, 48kHz salida nativa de c2.android.opus.decoder)
+        opusCodec = OpusAudioCodec(inputSampleRate = 16000, outputSampleRate = 48000)
 
         // 2. Inicializar Cliente WebSocket Xiaozhi
         initWebSocketClient(prefs)
@@ -141,9 +150,37 @@ class TrekoAssistantService : Service() {
         )
 
         client.onSttReceived = { transcript ->
-            _subtitleText.value = "Tú: $transcript"
-            _serviceState.value = TrekoState.THINKING
-            _currentEmotion.value = TrekoEmotion.PIENSA
+            val clean = transcript.trim()
+            if (clean.equals("谢谢观看", ignoreCase = true) || clean.contains("观看") || clean.isBlank()) {
+                Log.d(TAG, "Ignorando alucinación de silencio en STT: $clean")
+            } else {
+                _subtitleText.value = "Tú: $clean"
+
+                val lower = clean.lowercase(Locale.ROOT)
+                val isSleepIntent = listOf(
+                    "adiós", "adios", "duérmete", "duermete", "cállate", "callate",
+                    "hasta luego", "descansa", "eso es todo", "nada más", "nada mas",
+                    "bye", "silencio", "apágate", "apagate", "a dormir", "buenas noches"
+                ).any { lower.contains(it) }
+
+                if (isSleepIntent) {
+                    Log.i(TAG, "Intención de despedida detectada ('$clean'). Treko va a descansar.")
+                    serviceScope.launch {
+                        client.stopListening()
+                        client.abortSpeaking()
+                        _serviceState.value = TrekoState.THINKING
+                        _subtitleText.value = "Treko: ¡Hasta luego! Zzz..."
+                        _currentEmotion.value = TrekoEmotion.SLEEPY
+                        delay(1200)
+                        _serviceState.value = TrekoState.IDLE
+                        _currentEmotion.value = TrekoEmotion.RELAX
+                        _subtitleText.value = ""
+                    }
+                } else {
+                    _serviceState.value = TrekoState.THINKING
+                    _currentEmotion.value = TrekoEmotion.PIENSA
+                }
+            }
         }
 
         client.onLlmReceived = { text, emotionStr ->
@@ -166,10 +203,10 @@ class TrekoAssistantService : Service() {
                 "stop" -> {
                     ttsDrainingJob?.cancel()
                     ttsDrainingJob = serviceScope.launch {
-                        delay(600) // Permitir que el búfer de AudioTrack termine de sonar
+                        delay(650) // Permitir que el búfer de AudioTrack termine de sonar
                         if (_serviceState.value == TrekoState.SPEAKING) {
-                            _serviceState.value = TrekoState.IDLE
-                            _currentEmotion.value = TrekoEmotion.RELAX
+                            // Escucha activa natural: espera réplica multi-turno sin tener que repetir wake word
+                            startActiveListening(prompt = "¿Deseas algo más?")
                         }
                     }
                 }
@@ -178,6 +215,10 @@ class TrekoAssistantService : Service() {
 
         client.onAudioPacketReceived = { opusBytes ->
             opusCodec?.decodeAndPlay(opusBytes)
+        }
+
+        client.onMcpToolCall = { toolName, args ->
+            handleMcpToolCall(toolName, args, prefs)
         }
 
         wsClient = client
@@ -211,6 +252,10 @@ class TrekoAssistantService : Service() {
                     // Alimentar detector KWS local en reposo
                     wakeWordDetector?.acceptWaveform(buffer, read)
                 }
+                TrekoState.SPEAKING -> {
+                    // Interrupción vocal (Barge-In): permitir que el detector KWS despierte durante habla
+                    wakeWordDetector?.acceptWaveform(buffer, read)
+                }
                 TrekoState.LISTENING -> {
                     // 1. Codificar a Opus y enviar al servidor Xiaozhi
                     val packets = opusCodec?.encodePcm(buffer, read) ?: emptyList()
@@ -238,9 +283,9 @@ class TrekoAssistantService : Service() {
                         _serviceState.value = TrekoState.THINKING
                         _currentEmotion.value = TrekoEmotion.PIENSA
                         _subtitleText.value = "Pensando..."
-                    } else if (!speechDetected && (now - listeningStartTimestamp > 7500L)) {
+                    } else if (!speechDetected && (now - listeningStartTimestamp > activeListeningTimeoutMs)) {
                         // Timeout sin hablar
-                        Log.i(TAG, "Tiempo de espera agotado sin voz. Volviendo a IDLE.")
+                        Log.i(TAG, "Tiempo de espera agotado sin voz ($activeListeningTimeoutMs ms). Volviendo a IDLE (a dormir).")
                         client?.stopListening()
                         _serviceState.value = TrekoState.IDLE
                         _currentEmotion.value = TrekoEmotion.RELAX
@@ -248,20 +293,22 @@ class TrekoAssistantService : Service() {
                     }
                 }
                 else -> {
-                    // THINKING o SPEAKING: no enviamos micrófono para evitar eco
+                    // THINKING: esperando respuesta del servidor
                 }
             }
         }
     }
 
-    fun beginConversation(keyword: String) {
+    fun beginConversation(keyword: String = "Treko") {
         ttsDrainingJob?.cancel()
         opusCodec?.stopPlayback()
+        wsClient?.abortSpeaking()
 
         speechDetected = false
         val now = System.currentTimeMillis()
         listeningStartTimestamp = now
         lastSpeechTimestamp = now
+        activeListeningTimeoutMs = 5000L
 
         _serviceState.value = TrekoState.LISTENING
         _currentEmotion.value = TrekoEmotion.ESCUCHA
@@ -272,7 +319,109 @@ class TrekoAssistantService : Service() {
             if (!client.isConnected) {
                 client.connect()
             }
-            client.startListening(keyword)
+            client.startListening()
+        }
+    }
+
+    fun startActiveListening(prompt: String = "¿Deseas algo más?") {
+        ttsDrainingJob?.cancel()
+        speechDetected = false
+        val now = System.currentTimeMillis()
+        listeningStartTimestamp = now
+        lastSpeechTimestamp = now
+        activeListeningTimeoutMs = 7000L // 7 segundos para réplica multi-turno
+
+        _serviceState.value = TrekoState.LISTENING
+        _currentEmotion.value = TrekoEmotion.ESCUCHA
+        _subtitleText.value = prompt
+
+        val client = wsClient
+        if (client != null) {
+            if (!client.isConnected) {
+                client.connect()
+            }
+            client.startListening()
+        }
+    }
+
+    private suspend fun handleMcpToolCall(
+        name: String,
+        args: JSONObject,
+        prefs: TrekoPreferences
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            when (name) {
+                "get_device_status" -> {
+                    val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                    val batteryLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                    val isCharging = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        bm?.isCharging == true
+                    } else false
+                    val sdf = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy, HH:mm", Locale("es", "ES"))
+                    val currentTime = sdf.format(Date())
+                    "Dispositivo Treko: Batería al $batteryLevel% (Cargando: $isCharging). Fecha y hora actual: $currentTime."
+                }
+                "manage_vault_memory" -> {
+                    val action = args.optString("action", "list").lowercase(Locale.ROOT)
+                    val key = args.optString("key", "").trim()
+                    val value = args.optString("value", "").trim()
+                    val vaultPrefs = getSharedPreferences("treko_vault_memory", Context.MODE_PRIVATE)
+
+                    when (action) {
+                        "set" -> {
+                            if (key.isBlank()) return@withContext "Error: Se requiere una clave ('key') para guardar en Vault."
+                            vaultPrefs.edit().putString(key, value).apply()
+                            "Recuerdo guardado con éxito en Vault: '$key' = '$value'."
+                        }
+                        "get" -> {
+                            if (key.isBlank()) return@withContext "Error: Se requiere una clave ('key') para consultar Vault."
+                            val stored = vaultPrefs.getString(key, null)
+                            if (stored != null) {
+                                "Vault[$key]: $stored"
+                            } else {
+                                "No se encontró ningún registro para '$key' en la memoria Vault."
+                            }
+                        }
+                        "list" -> {
+                            val all = vaultPrefs.all
+                            if (all.isEmpty()) {
+                                "La memoria Vault está vacía actualmente."
+                            } else {
+                                val items = all.entries.joinToString("; ") { "${it.key}: ${it.value}" }
+                                "Memorias guardadas en Vault: $items"
+                            }
+                        }
+                        "delete" -> {
+                            vaultPrefs.edit().remove(key).apply()
+                            "Recuerdo '$key' eliminado de la memoria Vault."
+                        }
+                        else -> "Acción '$action' no reconocida para manage_vault_memory."
+                    }
+                }
+                "home_assistant_control" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko. Por favor ingresa la URL y el Token en Ajustes."
+                    }
+
+                    val entityId = args.optString("entity_id", "")
+                    val action = args.optString("action", "turn_on")
+                    val brightness = args.optInt("brightness", 0)
+                    val kelvin = args.optInt("kelvin", 0)
+
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.controlDevice(
+                        deviceQuery = entityId,
+                        accion = action,
+                        brillo = if (brightness > 0) (brightness * 100 / 255).coerceIn(1, 100) else 0,
+                        colorOrTemp = if (kelvin > 0) "${kelvin}k" else ""
+                    )
+                }
+                else -> "Herramienta '$name' no implementada en Treko."
+            }
+        } catch (e: Exception) {
+            "Error ejecutando $name: ${e.message}"
         }
     }
 

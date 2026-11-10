@@ -12,12 +12,12 @@ import java.nio.ByteOrder
 /**
  * Motor nativo de codificación y decodificación Opus acelerado por hardware (MediaCodec / c2.android.opus).
  * - Codificador: 16000 Hz mono (micrófono -> paquetes Opus a 60ms).
- * - Decodificador: 24000 Hz mono (paquetes Opus del servidor Xiaozhi -> PCM 16-bit).
- * - Reproductor: AudioTrack de baja latencia a 24000 Hz.
+ * - Decodificador: Decodifica paquetes Opus a 48000 Hz PCM (tasa nativa de salida de c2.android.opus.decoder).
+ * - Reproductor: AudioTrack a 48000 Hz con control de flujo para reproducción natural a velocidad 1.0x.
  */
 class OpusAudioCodec(
     val inputSampleRate: Int = 16000,
-    val outputSampleRate: Int = 24000
+    var outputSampleRate: Int = 48000
 ) {
     private val TAG = "TrekoOpus"
 
@@ -34,7 +34,7 @@ class OpusAudioCodec(
     init {
         initEncoder()
         initDecoder()
-        initAudioTrack()
+        initAudioTrack(outputSampleRate)
     }
 
     private fun initEncoder() {
@@ -56,21 +56,17 @@ class OpusAudioCodec(
     private fun initDecoder() {
         try {
             val dec = MediaCodec.createDecoderByType("audio/opus")
-            val decFormat = MediaFormat.createAudioFormat("audio/opus", outputSampleRate, 1)
+            // Android Opus decoder nativo opera y emite a 48000 Hz
+            val decFormat = MediaFormat.createAudioFormat("audio/opus", 48000, 1)
 
-            // CSD-0: OpusHead RFC 7845 con tasa de muestreo de salida (24000 Hz LE = 0xC0, 0x5D, 0x00, 0x00)
-            val rateByte0 = (outputSampleRate and 0xFF).toByte()
-            val rateByte1 = ((outputSampleRate shr 8) and 0xFF).toByte()
-            val rateByte2 = ((outputSampleRate shr 16) and 0xFF).toByte()
-            val rateByte3 = ((outputSampleRate shr 24) and 0xFF).toByte()
-
+            // CSD-0: OpusHead RFC 7845 a 48000 Hz (48000 LE = 0x80, 0xBB, 0x00, 0x00)
             val opusHead = byteArrayOf(
                 'O'.code.toByte(), 'p'.code.toByte(), 'u'.code.toByte(), 's'.code.toByte(),
                 'H'.code.toByte(), 'e'.code.toByte(), 'a'.code.toByte(), 'd'.code.toByte(),
                 1, // Versión 1
                 1, // 1 canal mono
                 0, 0, // Pre-skip
-                rateByte0, rateByte1, rateByte2, rateByte3,
+                0x80.toByte(), 0xBB.toByte(), 0, 0, // 48000 Hz LE
                 0, 0, // Ganancia 0
                 0 // Mapeo de canal
             )
@@ -82,19 +78,22 @@ class OpusAudioCodec(
             dec.configure(decFormat, null, null, 0)
             dec.start()
             decoder = dec
-            Log.i(TAG, "Decodificador Opus inicializado exitosamente a $outputSampleRate Hz.")
+            Log.i(TAG, "Decodificador Opus inicializado con salida a 48000 Hz.")
         } catch (e: Exception) {
             Log.e(TAG, "Error inicializando decodificador Opus: ${e.message}", e)
         }
     }
 
-    private fun initAudioTrack() {
+    private fun initAudioTrack(sampleRate: Int) {
         try {
+            audioTrack?.release()
+            outputSampleRate = sampleRate
+
             val minBuf = AudioTrack.getMinBufferSize(
-                outputSampleRate,
+                sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(4096)
+            ).coerceAtLeast(8192)
 
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -106,19 +105,19 @@ class OpusAudioCodec(
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(outputSampleRate)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(minBuf * 2)
+                .setBufferSizeInBytes(minBuf * 4)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
             track.play()
             audioTrack = track
-            Log.i(TAG, "Reproductor AudioTrack iniciado a $outputSampleRate Hz.")
+            Log.i(TAG, "AudioTrack configurado y reproduciendo a $sampleRate Hz (velocidad normal 1.0x).")
         } catch (e: Exception) {
-            Log.e(TAG, "Error iniciando AudioTrack: ${e.message}", e)
+            Log.e(TAG, "Error iniciando AudioTrack a $sampleRate Hz: ${e.message}", e)
         }
     }
 
@@ -186,7 +185,7 @@ class OpusAudioCodec(
     }
 
     /**
-     * Decodifica un paquete Opus recibido del servidor Xiaozhi y lo envía de inmediato al altavoz.
+     * Decodifica un paquete Opus recibido del servidor Xiaozhi y lo envía de inmediato al altavoz a 48000 Hz.
      */
     fun decodeAndPlay(opusPacket: ByteArray) {
         synchronized(lock) {
@@ -207,12 +206,18 @@ class OpusAudioCodec(
                 val info = MediaCodec.BufferInfo()
                 var outIdx = dec.dequeueOutputBuffer(info, 20_000)
                 while (outIdx >= 0 || outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    if (outIdx >= 0) {
+                    if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        val realRate = dec.outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        Log.i(TAG, "Formato decodificador actualizado: $realRate Hz")
+                        if (realRate != outputSampleRate) {
+                            initAudioTrack(realRate)
+                        }
+                    } else if (outIdx >= 0) {
                         val outBuf = dec.getOutputBuffer(outIdx)
                         if (outBuf != null && info.size > 0) {
                             val pcmBytes = ByteArray(info.size)
                             outBuf.get(pcmBytes)
-                            track.write(pcmBytes, 0, pcmBytes.size)
+                            audioTrack?.write(pcmBytes, 0, pcmBytes.size)
                         }
                         dec.releaseOutputBuffer(outIdx, false)
                     }

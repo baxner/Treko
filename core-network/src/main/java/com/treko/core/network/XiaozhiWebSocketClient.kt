@@ -2,18 +2,25 @@ package com.treko.core.network
 
 import android.util.Log
 import com.treko.core.common.model.TrekoState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import okhttp3.*
 import okio.ByteString
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
  * Cliente WebSocket oficial para el protocolo Xiaozhi AI v1/v2.
- * Maneja autenticación por MAC/Client-Id, negociación de audio Opus a 16/24kHz,
- * control conversacional (detect, start, stop) y recepción de audio TTS + STT/LLM.
+ * Maneja:
+ * - Autenticación por MAC y Client-ID.
+ * - Negociación Opus a 16kHz captura y 48kHz reproducción.
+ * - Escucha activa natural sin eco ni auto-disparo de la palabra clave.
+ * - Soporte para herramientas MCP (Model Context Protocol).
  */
 class XiaozhiWebSocketClient(
     private val serverUrl: String,
@@ -23,10 +30,13 @@ class XiaozhiWebSocketClient(
 ) {
     private val TAG = "TrekoNetwork"
     private var webSocket: WebSocket? = null
+    private val scope = CoroutineScope(Dispatchers.IO)
+
     private val client = OkHttpClient.Builder()
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .pingInterval(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .pingInterval(25, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val _connectionState = MutableStateFlow(TrekoState.IDLE)
@@ -40,18 +50,23 @@ class XiaozhiWebSocketClient(
     var isConnected: Boolean = false
         private set
 
+    @Volatile
+    private var isConnecting: Boolean = false
+
     var onSessionStarted: ((String) -> Unit)? = null
     var onSttReceived: ((String) -> Unit)? = null
     var onLlmReceived: ((text: String, emotion: String?) -> Unit)? = null
     var onTtsStateChanged: ((state: String, text: String?) -> Unit)? = null
     var onAudioPacketReceived: ((ByteArray) -> Unit)? = null
     var onConnectionStateChanged: ((TrekoState) -> Unit)? = null
+    var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
 
     fun connect() {
-        if (isConnected && webSocket != null) {
-            Log.d(TAG, "WebSocket ya se encuentra conectado.")
+        if (isConnected || isConnecting) {
+            Log.d(TAG, "Conexión WebSocket ya se encuentra activa o en progreso.")
             return
         }
+        isConnecting = true
 
         val requestBuilder = Request.Builder()
             .url(serverUrl)
@@ -69,6 +84,7 @@ class XiaozhiWebSocketClient(
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.i(TAG, "Conexión WebSocket establecida con Xiaozhi.")
+                isConnecting = false
                 isConnected = true
                 sendHello()
             }
@@ -78,12 +94,12 @@ class XiaozhiWebSocketClient(
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                // Trama Opus recibida desde el servidor Xiaozhi
                 onAudioPacketReceived?.invoke(bytes.toByteArray())
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "WebSocket cerrándose: $code / $reason")
+                isConnecting = false
                 isConnected = false
                 _connectionState.value = TrekoState.IDLE
                 onConnectionStateChanged?.invoke(TrekoState.IDLE)
@@ -91,6 +107,7 @@ class XiaozhiWebSocketClient(
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "Fallo en conexión WebSocket Xiaozhi: ${t.message}", t)
+                isConnecting = false
                 isConnected = false
                 _connectionState.value = TrekoState.ERROR
                 onConnectionStateChanged?.invoke(TrekoState.ERROR)
@@ -167,7 +184,6 @@ class XiaozhiWebSocketClient(
             val id = payload.optLong("id", -1)
 
             if (method == "initialize" && id != -1L) {
-                // Responder a la inicialización de herramientas MCP
                 val response = JSONObject().apply {
                     put("session_id", sessionId ?: "")
                     put("type", "mcp")
@@ -188,6 +204,65 @@ class XiaozhiWebSocketClient(
                 }
                 sendJson(response.toString())
             } else if (method == "tools/list" && id != -1L) {
+                val toolsArray = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("name", "get_device_status")
+                        put("description", "Obtiene el nivel de batería, hora actual y estado del asistente Treko en el teléfono.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject())
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "manage_vault_memory")
+                        put("description", "Gestiona la memoria permanente (Vault) del usuario: guarda recuerdos, gustos personales o consulta lo almacenado.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'set' para guardar, 'get' para consultar o 'list' para listar todos")
+                                })
+                                put("key", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Clave del recuerdo (ej. 'comida_favorita', 'cumpleanos')")
+                                })
+                                put("value", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Contenido o dato a guardar")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_assistant_control")
+                        put("description", "Controla dispositivos en Home Assistant (encender/apagar luces o switches, brillo, blanco Kelvin).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("entity_id", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Entidad de Home Assistant (ej. 'light.sala', 'switch.ventilador')")
+                                })
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'turn_on', 'turn_off', o 'toggle'")
+                                })
+                                put("brightness", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Brillo 0 a 255 (opcional)")
+                                })
+                                put("kelvin", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Temperatura blanco 2700 a 6500 K (opcional)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("entity_id"); put("action") })
+                        })
+                    })
+                }
+
                 val toolsResp = JSONObject().apply {
                     put("session_id", sessionId ?: "")
                     put("type", "mcp")
@@ -195,27 +270,50 @@ class XiaozhiWebSocketClient(
                         put("jsonrpc", "2.0")
                         put("id", id)
                         put("result", JSONObject().apply {
-                            put("tools", org.json.JSONArray())
+                            put("tools", toolsArray)
                         })
                     })
                 }
                 sendJson(toolsResp.toString())
+            } else if (method == "tools/call" && id != -1L) {
+                val params = payload.optJSONObject("params")
+                val toolName = params?.optString("name") ?: ""
+                val arguments = params?.optJSONObject("arguments") ?: JSONObject()
+                Log.i(TAG, "Ejecutando herramienta MCP: $toolName con argumentos: $arguments")
+
+                scope.launch {
+                    val resultText = onMcpToolCall?.invoke(toolName, arguments)
+                        ?: "Herramienta $toolName ejecutada correctamente."
+
+                    val callResp = JSONObject().apply {
+                        put("session_id", sessionId ?: "")
+                        put("type", "mcp")
+                        put("payload", JSONObject().apply {
+                            put("jsonrpc", "2.0")
+                            put("id", id)
+                            put("result", JSONObject().apply {
+                                put("content", JSONArray().apply {
+                                    put(JSONObject().apply {
+                                        put("type", "text")
+                                        put("text", resultText)
+                                    })
+                                })
+                            })
+                        })
+                    }
+                    sendJson(callResp.toString())
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error manejando mensaje MCP: ${e.message}")
         }
     }
 
-    fun startListening(wakeWord: String) {
+    /**
+     * Inicia la captura de audio en vivo sin auto-enviar la palabra de activación como texto prompt.
+     */
+    fun startListening() {
         val sId = sessionId ?: ""
-        val detect = JSONObject().apply {
-            put("session_id", sId)
-            put("type", "listen")
-            put("state", "detect")
-            put("text", wakeWord)
-        }
-        sendJson(detect.toString())
-
         val start = JSONObject().apply {
             put("session_id", sId)
             put("type", "listen")
@@ -223,7 +321,7 @@ class XiaozhiWebSocketClient(
             put("mode", "auto")
         }
         sendJson(start.toString())
-        Log.i(TAG, "Iniciada sesión de escucha para '$wakeWord' en Xiaozhi.")
+        Log.i(TAG, "Iniciada sesión de escucha para voz del usuario en Xiaozhi.")
     }
 
     fun stopListening() {
@@ -234,7 +332,7 @@ class XiaozhiWebSocketClient(
             put("state", "stop")
         }
         sendJson(stop.toString())
-        Log.i(TAG, "Detenida sesión de escucha en Xiaozhi (esperando respuesta LLM/TTS).")
+        Log.i(TAG, "Detenida sesión de escucha en Xiaozhi (esperando respuesta).")
     }
 
     fun abortSpeaking() {
@@ -245,6 +343,7 @@ class XiaozhiWebSocketClient(
             put("reason", "wake_word_detected")
         }
         sendJson(abort.toString())
+        Log.i(TAG, "Interrupción de habla enviada al servidor Xiaozhi.")
     }
 
     fun sendAudio(opusData: ByteArray) {

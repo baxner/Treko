@@ -194,6 +194,9 @@ fun MainScreen(
                     onToggleListen = {
                         if (currentState == TrekoState.IDLE) {
                             TrekoAssistantService.startConversation(prefs.customWakeWord.ifBlank { "Treko" })
+                        } else if (currentState == TrekoState.SPEAKING) {
+                            // Interrupción táctil durante habla (Barge-In)
+                            TrekoAssistantService.startConversation(prefs.customWakeWord.ifBlank { "Treko" })
                         } else {
                             TrekoAssistantService.stopConversation()
                         }
@@ -251,7 +254,10 @@ fun FaceScreen(
             else -> emotion
         }
 
-        Box(contentAlignment = Alignment.Center) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.clickable { onToggleListen() }
+        ) {
             TrekoFace(
                 emotion = dynamicEmotion,
                 size = 260.dp
@@ -1056,13 +1062,16 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(2.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Potencia de Detección (/boost)", color = TextPrimary, fontSize = 13.sp)
-                    Text(String.format(java.util.Locale.US, "%.1f", wakeWordBoost), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Sensibilidad al Susurro (Ganancia)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(String.format(java.util.Locale.US, "%.1fx", wakeWordBoost), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    Text("Multiplicador acústico para despertar a Treko hablando suave o de lejos (def: 2.5x)", color = TextSecondary, fontSize = 11.sp)
                 }
 
                 Slider(
@@ -1072,13 +1081,16 @@ fun SettingsScreen(
                     colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Sensibilidad (Threshold)", color = TextPrimary, fontSize = 13.sp)
-                    Text(String.format(java.util.Locale.US, "%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Umbral de Ruido (Filtro Acústico)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(String.format(java.util.Locale.US, "%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    Text("Menor valor = más sensible. Mayor valor = evita falsos positivos con ruidos (def: 0.05)", color = TextSecondary, fontSize = 11.sp)
                 }
 
                 Slider(
