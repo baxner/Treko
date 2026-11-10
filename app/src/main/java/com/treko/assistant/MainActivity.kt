@@ -60,11 +60,6 @@ class MainActivity : ComponentActivity() {
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
         if (recordAudioGranted) {
             TrekoAssistantService.startService(this)
-            lifecycleScope.launch {
-                if (!NativeAudioEngine.isRecording) {
-                    NativeAudioEngine.startRecording(this)
-                }
-            }
         }
     }
 
@@ -104,11 +99,6 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             TrekoAssistantService.startService(this)
-            lifecycleScope.launch {
-                if (!NativeAudioEngine.isRecording) {
-                    NativeAudioEngine.startRecording(this)
-                }
-            }
         }
     }
 
@@ -126,11 +116,6 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(permissions.toTypedArray())
         } else {
             TrekoAssistantService.startService(this)
-            lifecycleScope.launch {
-                if (!NativeAudioEngine.isRecording) {
-                    NativeAudioEngine.startRecording(this)
-                }
-            }
         }
     }
 }
@@ -146,7 +131,7 @@ fun MainScreen(
 ) {
     var selectedTab by remember { mutableStateOf(NavigationTab.FACE) }
     var currentEmotion by remember { mutableStateOf(TrekoEmotion.RELAX) }
-    var currentState by remember { mutableStateOf(TrekoState.IDLE) }
+    val currentState by TrekoAssistantService.serviceState.collectAsState()
     val audioLevel by NativeAudioEngine.audioLevel.collectAsState()
 
     Scaffold(
@@ -205,13 +190,14 @@ fun MainScreen(
                     state = currentState,
                     audioLevel = audioLevel,
                     onToggleListen = {
-                        currentState = if (currentState == TrekoState.IDLE) {
+                        val next = if (currentState == TrekoState.IDLE) {
                             currentEmotion = TrekoEmotion.ESCUCHA
                             TrekoState.LISTENING
                         } else {
                             currentEmotion = TrekoEmotion.RELAX
                             TrekoState.IDLE
                         }
+                        TrekoAssistantService.setServiceState(next)
                     }
                 )
                 NavigationTab.HABITS -> HabitsScreen()
@@ -865,6 +851,8 @@ fun SettingsScreen(
     var xiaozhiToken by remember { mutableStateOf(prefs.xiaozhiToken) }
     var haUrl by remember { mutableStateOf(prefs.haUrl) }
     var haToken by remember { mutableStateOf(prefs.haToken) }
+    var customWakeWord by remember { mutableStateOf(prefs.customWakeWord) }
+    var wakeWordBoost by remember { mutableFloatStateOf(prefs.wakeWordBoost) }
     var sensitivity by remember { mutableFloatStateOf(prefs.wakeWordSensitivity) }
 
     var isTokenVisible by remember { mutableStateOf(false) }
@@ -1036,23 +1024,50 @@ fun SettingsScreen(
             }
         }
 
-        // Tarjeta Sensibilidad Wake Word
+        // Tarjeta Sensibilidad Wake Word y Personalización KWS
         Card(
             colors = CardDefaults.cardColors(containerColor = SurfaceDark),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Detección de Voz Local (KWS)", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("Palabra clave: 'Treko' (Zipformer Sherpa-ONNX 100% privado en tu teléfono)", color = TextSecondary, fontSize = 12.sp)
+                Text("Motor neuronal Sherpa-ONNX Zipformer (100% privado en tu teléfono)", color = TextSecondary, fontSize = 12.sp)
 
-                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = customWakeWord,
+                    onValueChange = { customWakeWord = it },
+                    label = { Text("Palabra de Activación Personalizada", fontSize = 12.sp) },
+                    placeholder = { Text("Treko, Jarvis, Alexa, etc.") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(2.dp))
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Sensibilidad de escucha", color = TextPrimary, fontSize = 13.sp)
-                    Text(String.format("%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Potencia de Detección (/boost)", color = TextPrimary, fontSize = 13.sp)
+                    Text(String.format(java.util.Locale.US, "%.1f", wakeWordBoost), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                Slider(
+                    value = wakeWordBoost,
+                    onValueChange = { wakeWordBoost = it },
+                    valueRange = 1.0f..5.0f,
+                    colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Sensibilidad (Threshold)", color = TextPrimary, fontSize = 13.sp)
+                    Text(String.format(java.util.Locale.US, "%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
 
                 Slider(
@@ -1071,8 +1086,18 @@ fun SettingsScreen(
                 prefs.xiaozhiToken = xiaozhiToken
                 prefs.haUrl = haUrl
                 prefs.haToken = haToken
+                prefs.customWakeWord = customWakeWord
+                prefs.wakeWordBoost = wakeWordBoost
                 prefs.wakeWordSensitivity = sensitivity
-                Toast.makeText(context, "¡Ajustes guardados correctamente!", Toast.LENGTH_SHORT).show()
+
+                TrekoAssistantService.updateWakeWordConfig(
+                    context = context,
+                    keyword = prefs.customWakeWord,
+                    boost = prefs.wakeWordBoost,
+                    threshold = prefs.wakeWordSensitivity
+                )
+
+                Toast.makeText(context, "¡Ajustes guardados y KWS actualizado!", Toast.LENGTH_SHORT).show()
             },
             colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
             shape = RoundedCornerShape(12.dp),

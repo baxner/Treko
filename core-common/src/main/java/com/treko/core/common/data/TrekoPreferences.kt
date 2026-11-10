@@ -23,6 +23,8 @@ class TrekoPreferences(context: Context) {
         private const val KEY_CLIENT_ID = "client_id"
         private const val KEY_HA_URL = "ha_url"
         private const val KEY_HA_TOKEN = "ha_token"
+        private const val KEY_CUSTOM_WAKE_WORD = "custom_wake_word"
+        private const val KEY_WAKE_WORD_BOOST = "wake_word_boost"
         private const val KEY_WAKE_WORD_SENSITIVITY = "wake_word_sensitivity"
 
         const val DEFAULT_XIAOZHI_WS_URL = "wss://api.tenclass.net/xiaozhi/v1/"
@@ -89,9 +91,17 @@ class TrekoPreferences(context: Context) {
         get() = prefs.getString(KEY_HA_TOKEN, "") ?: ""
         set(value) = prefs.edit().putString(KEY_HA_TOKEN, value.trim()).apply()
 
+    var customWakeWord: String
+        get() = prefs.getString(KEY_CUSTOM_WAKE_WORD, "Treko")?.takeIf { it.isNotBlank() } ?: "Treko"
+        set(value) = prefs.edit().putString(KEY_CUSTOM_WAKE_WORD, value.trim().ifEmpty { "Treko" }).apply()
+
+    var wakeWordBoost: Float
+        get() = prefs.getFloat(KEY_WAKE_WORD_BOOST, 3.0f)
+        set(value) = prefs.edit().putFloat(KEY_WAKE_WORD_BOOST, value.coerceIn(1.0f, 5.0f)).apply()
+
     var wakeWordSensitivity: Float
         get() = prefs.getFloat(KEY_WAKE_WORD_SENSITIVITY, 0.05f)
-        set(value) = prefs.edit().putFloat(KEY_WAKE_WORD_SENSITIVITY, value).apply()
+        set(value) = prefs.edit().putFloat(KEY_WAKE_WORD_SENSITIVITY, value.coerceIn(0.01f, 0.20f)).apply()
 
     fun clearAll() {
         prefs.edit().clear().apply()
