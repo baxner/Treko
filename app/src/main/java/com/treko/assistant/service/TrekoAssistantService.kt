@@ -49,6 +49,7 @@ class TrekoAssistantService : Service() {
     private var opusCodec: OpusAudioCodec? = null
     private var wsClient: XiaozhiWebSocketClient? = null
     private var ttsDrainingJob: Job? = null
+    private var thinkingTimeoutJob: Job? = null
 
     @Volatile
     private var speechDetected: Boolean = false
@@ -179,11 +180,13 @@ class TrekoAssistantService : Service() {
                 } else {
                     _serviceState.value = TrekoState.THINKING
                     _currentEmotion.value = TrekoEmotion.PIENSA
+                    startThinkingTimeout()
                 }
             }
         }
 
         client.onLlmReceived = { text, emotionStr ->
+            thinkingTimeoutJob?.cancel()
             _subtitleText.value = "Treko: $text"
             _currentEmotion.value = TrekoEmotion.fromString(emotionStr)
         }
@@ -191,6 +194,7 @@ class TrekoAssistantService : Service() {
         client.onTtsStateChanged = { state, text ->
             when (state) {
                 "start" -> {
+                    thinkingTimeoutJob?.cancel()
                     ttsDrainingJob?.cancel()
                     _serviceState.value = TrekoState.SPEAKING
                     _currentEmotion.value = TrekoEmotion.FELIZ_ABIERTO
@@ -283,6 +287,7 @@ class TrekoAssistantService : Service() {
                         _serviceState.value = TrekoState.THINKING
                         _currentEmotion.value = TrekoEmotion.PIENSA
                         _subtitleText.value = "Pensando..."
+                        startThinkingTimeout()
                     } else if (!speechDetected && (now - listeningStartTimestamp > activeListeningTimeoutMs)) {
                         // Timeout sin hablar
                         Log.i(TAG, "Tiempo de espera agotado sin voz ($activeListeningTimeoutMs ms). Volviendo a IDLE (a dormir).")
@@ -299,7 +304,26 @@ class TrekoAssistantService : Service() {
         }
     }
 
+    private fun startThinkingTimeout() {
+        thinkingTimeoutJob?.cancel()
+        thinkingTimeoutJob = serviceScope.launch {
+            delay(12000L) // 12s de espera máxima para respuesta del LLM
+            if (_serviceState.value == TrekoState.THINKING) {
+                Log.w(TAG, "Watchdog: Tiempo de espera agotado en THINKING. Recuperando a IDLE.")
+                _subtitleText.value = "Sin respuesta del servidor. Intenta de nuevo."
+                _currentEmotion.value = TrekoEmotion.CONFUSED
+                delay(2500L)
+                if (_serviceState.value == TrekoState.THINKING) {
+                    _serviceState.value = TrekoState.IDLE
+                    _currentEmotion.value = TrekoEmotion.RELAX
+                    _subtitleText.value = ""
+                }
+            }
+        }
+    }
+
     fun beginConversation(keyword: String = "Treko") {
+        thinkingTimeoutJob?.cancel()
         ttsDrainingJob?.cancel()
         opusCodec?.stopPlayback()
         wsClient?.abortSpeaking()
@@ -324,6 +348,7 @@ class TrekoAssistantService : Service() {
     }
 
     fun startActiveListening(prompt: String = "¿Deseas algo más?") {
+        thinkingTimeoutJob?.cancel()
         ttsDrainingJob?.cancel()
         speechDetected = false
         val now = System.currentTimeMillis()
@@ -426,6 +451,7 @@ class TrekoAssistantService : Service() {
     }
 
     fun abortConversation() {
+        thinkingTimeoutJob?.cancel()
         ttsDrainingJob?.cancel()
         opusCodec?.stopPlayback()
         wsClient?.abortSpeaking()

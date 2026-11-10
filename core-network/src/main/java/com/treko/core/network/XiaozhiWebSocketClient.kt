@@ -4,6 +4,8 @@ import android.util.Log
 import com.treko.core.common.model.TrekoState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,9 +35,9 @@ class XiaozhiWebSocketClient(
     private val scope = CoroutineScope(Dispatchers.IO)
 
     private val client = OkHttpClient.Builder()
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .pingInterval(25, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .pingInterval(0, TimeUnit.SECONDS) // 0 desactiva la desconexión agresiva por pongs perdidos del gateway
         .retryOnConnectionFailure(true)
         .build()
 
@@ -53,6 +55,14 @@ class XiaozhiWebSocketClient(
     @Volatile
     private var isConnecting: Boolean = false
 
+    @Volatile
+    private var isExplicitDisconnect: Boolean = false
+
+    @Volatile
+    private var pendingListenStart: Boolean = false
+
+    private var reconnectJob: Job? = null
+
     var onSessionStarted: ((String) -> Unit)? = null
     var onSttReceived: ((String) -> Unit)? = null
     var onLlmReceived: ((text: String, emotion: String?) -> Unit)? = null
@@ -61,7 +71,20 @@ class XiaozhiWebSocketClient(
     var onConnectionStateChanged: ((TrekoState) -> Unit)? = null
     var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
 
+    private fun scheduleReconnect() {
+        if (isExplicitDisconnect) return
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(2000)
+            if (!isConnected && !isConnecting && !isExplicitDisconnect) {
+                Log.i(TAG, "Reconectando automáticamente a Xiaozhi...")
+                connect()
+            }
+        }
+    }
+
     fun connect() {
+        isExplicitDisconnect = false
         if (isConnected || isConnecting) {
             Log.d(TAG, "Conexión WebSocket ya se encuentra activa o en progreso.")
             return
@@ -101,16 +124,20 @@ class XiaozhiWebSocketClient(
                 Log.i(TAG, "WebSocket cerrándose: $code / $reason")
                 isConnecting = false
                 isConnected = false
+                sessionId = null
                 _connectionState.value = TrekoState.IDLE
                 onConnectionStateChanged?.invoke(TrekoState.IDLE)
+                scheduleReconnect()
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "Fallo en conexión WebSocket Xiaozhi: ${t.message}", t)
+                Log.e(TAG, "Fallo en conexión WebSocket Xiaozhi: ${t.message}")
                 isConnecting = false
                 isConnected = false
+                sessionId = null
                 _connectionState.value = TrekoState.ERROR
                 onConnectionStateChanged?.invoke(TrekoState.ERROR)
+                scheduleReconnect()
             }
         })
     }
@@ -148,6 +175,12 @@ class XiaozhiWebSocketClient(
                     _connectionState.value = TrekoState.IDLE
                     onConnectionStateChanged?.invoke(TrekoState.IDLE)
                     sessionId?.let { onSessionStarted?.invoke(it) }
+
+                    if (pendingListenStart) {
+                        pendingListenStart = false
+                        Log.i(TAG, "Iniciando escucha diferida tras negociación exitosa...")
+                        startListening()
+                    }
                 }
                 "mcp" -> {
                     handleMcpMessage(json)
@@ -313,7 +346,14 @@ class XiaozhiWebSocketClient(
      * Inicia la captura de audio en vivo sin auto-enviar la palabra de activación como texto prompt.
      */
     fun startListening() {
-        val sId = sessionId ?: ""
+        val sId = sessionId
+        if (sId == null || !isConnected) {
+            Log.i(TAG, "Sesión no lista al iniciar escucha. Marcando inicio diferido y conectando...")
+            pendingListenStart = true
+            connect()
+            return
+        }
+        pendingListenStart = false
         val start = JSONObject().apply {
             put("session_id", sId)
             put("type", "listen")
@@ -321,11 +361,16 @@ class XiaozhiWebSocketClient(
             put("mode", "auto")
         }
         sendJson(start.toString())
-        Log.i(TAG, "Iniciada sesión de escucha para voz del usuario en Xiaozhi.")
+        Log.i(TAG, "Iniciada sesión de escucha para voz del usuario en Xiaozhi (Session: $sId).")
     }
 
     fun stopListening() {
-        val sId = sessionId ?: ""
+        val sId = sessionId
+        if (sId == null || !isConnected) {
+            Log.w(TAG, "Ignorando stopListening: sesión aún no lista.")
+            pendingListenStart = false
+            return
+        }
         val stop = JSONObject().apply {
             put("session_id", sId)
             put("type", "listen")
@@ -347,7 +392,12 @@ class XiaozhiWebSocketClient(
     }
 
     fun sendAudio(opusData: ByteArray) {
-        webSocket?.send(ByteString.of(*opusData))
+        if (!isConnected || sessionId == null) return
+        try {
+            webSocket?.send(ByteString.of(*opusData))
+        } catch (e: Exception) {
+            Log.w(TAG, "Error enviando paquete Opus: ${e.message}")
+        }
     }
 
     fun sendJson(json: String) {
@@ -355,7 +405,14 @@ class XiaozhiWebSocketClient(
     }
 
     fun disconnect() {
-        webSocket?.close(1000, "Desconexión normal")
+        isExplicitDisconnect = true
+        reconnectJob?.cancel()
+        pendingListenStart = false
+        try {
+            webSocket?.close(1000, "Desconexión normal")
+        } catch (e: Exception) {
+            // ignore
+        }
         webSocket = null
         isConnected = false
         sessionId = null
