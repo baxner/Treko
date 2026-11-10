@@ -69,9 +69,10 @@ object NativeAudioEngine {
         ).coerceAtLeast(1024)
 
         try {
-            // Intentar con VOICE_RECOGNITION para cancelación de eco por hardware
+            // Usar AudioSource.MIC estándar para audio prístino lineal a 16kHz
+            // sin los filtros agresivos de puerta de ruido/beamforming de Samsung Bixby
             var record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -79,10 +80,10 @@ object NativeAudioEngine {
             )
 
             if (record.state != AudioRecord.STATE_INITIALIZED) {
-                Log.w(TAG, "VOICE_RECOGNITION no disponible, usando fuente MIC estándar.")
+                Log.w(TAG, "MIC estándar no disponible, intentando con VOICE_RECOGNITION.")
                 record.release()
                 record = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
                     SAMPLE_RATE,
                     CHANNEL_CONFIG,
                     AUDIO_FORMAT,
@@ -99,10 +100,10 @@ object NativeAudioEngine {
             record.startRecording()
             audioRecord = record
             isRecording = true
-            Log.i(TAG, "Captura de micrófono iniciada exitosamente a $SAMPLE_RATE Hz.")
+            Log.i(TAG, "Captura de micrófono iniciada exitosamente a $SAMPLE_RATE Hz (Fuente: ${record.audioSource}).")
 
             recordingJob = scope.launch(Dispatchers.IO) {
-                val buffer = ShortArray(640) // ~40ms a 16kHz
+                val buffer = ShortArray(960) // 960 muestras = exactamente 60ms a 16kHz para alineación Opus perfecta
                 while (isActive && isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {

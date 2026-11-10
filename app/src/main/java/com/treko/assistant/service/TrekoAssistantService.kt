@@ -270,19 +270,24 @@ class TrekoAssistantService : Service() {
                         }
                     }
 
-                    // 2. VAD: Detección de actividad vocal y silencio
+                    // 2. VAD: Detección de actividad vocal y pausa natural
                     val rms = NativeAudioEngine.audioLevel.value.rms
                     val now = System.currentTimeMillis()
 
-                    if (rms > 0.02f) {
+                    if (rms > 0.015f) {
                         speechDetected = true
                         lastSpeechTimestamp = now
                     }
 
-                    if (speechDetected && (now - lastSpeechTimestamp > 850L)) {
-                        // Usuario terminó de hablar tras una pausa de 850ms
-                        Log.i(TAG, "Fin de voz detectado por VAD. Solicitando respuesta...")
+                    if (speechDetected && (now - lastSpeechTimestamp > 1250L)) {
+                        // Usuario terminó de hablar tras una pausa natural de 1250ms
+                        Log.i(TAG, "Fin de voz detectado por VAD. Drenando buffers y solicitando respuesta...")
                         speechDetected = false
+                        // Enviar paquetes finales de Opus para no cortar la última sílaba
+                        val finalPackets = opusCodec?.flushEncoder() ?: emptyList()
+                        for (packet in finalPackets) {
+                            client?.sendAudio(packet)
+                        }
                         client?.stopListening()
                         _serviceState.value = TrekoState.THINKING
                         _currentEmotion.value = TrekoEmotion.PIENSA
@@ -326,6 +331,7 @@ class TrekoAssistantService : Service() {
         thinkingTimeoutJob?.cancel()
         ttsDrainingJob?.cancel()
         opusCodec?.stopPlayback()
+        opusCodec?.resetEncoder()
         wsClient?.abortSpeaking()
 
         speechDetected = false
@@ -350,6 +356,7 @@ class TrekoAssistantService : Service() {
     fun startActiveListening(prompt: String = "¿Deseas algo más?") {
         thinkingTimeoutJob?.cancel()
         ttsDrainingJob?.cancel()
+        opusCodec?.resetEncoder()
         speechDetected = false
         val now = System.currentTimeMillis()
         listeningStartTimestamp = now

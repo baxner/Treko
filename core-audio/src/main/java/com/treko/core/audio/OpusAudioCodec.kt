@@ -28,6 +28,7 @@ class OpusAudioCodec(
     private val inputFrameSamples = inputSampleRate * 60 / 1000 // 960 muestras para 60ms a 16kHz
     private val sampleBuffer = ShortArray(inputFrameSamples)
     private var sampleCount = 0
+    private var encoderPtsUs: Long = 0L
 
     private val lock = Any()
 
@@ -122,7 +123,22 @@ class OpusAudioCodec(
     }
 
     /**
-     * Acumula muestras PCM de 16-bit a 16kHz y genera paquetes Opus de 60ms según se completen.
+     * Reinicia el buffer y los timestamps del codificador al iniciar una nueva interacción de voz.
+     */
+    fun resetEncoder() {
+        synchronized(lock) {
+            sampleCount = 0
+            encoderPtsUs = 0L
+            try {
+                encoder?.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "Excepción reseteando encoder: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Acumula muestras PCM de 16-bit a 16kHz y genera paquetes Opus de 60ms con timestamps estrictos.
      */
     fun encodePcm(samples: ShortArray, read: Int): List<ByteArray> {
         val result = mutableListOf<ByteArray>()
@@ -139,49 +155,76 @@ class OpusAudioCodec(
                 offset += toCopy
 
                 if (sampleCount == inputFrameSamples) {
-                    val opusPacket = encodeSingleFrame(enc, sampleBuffer)
-                    if (opusPacket != null) {
-                        result.add(opusPacket)
-                    }
+                    queueFrame(enc, sampleBuffer, inputFrameSamples)
                     sampleCount = 0
                 }
             }
+            drainEncoder(enc, result)
         }
         return result
     }
 
-    private fun encodeSingleFrame(enc: MediaCodec, frameSamples: ShortArray): ByteArray? {
+    private fun queueFrame(enc: MediaCodec, frameSamples: ShortArray, count: Int) {
         try {
-            val inIdx = enc.dequeueInputBuffer(20_000)
+            val inIdx = enc.dequeueInputBuffer(10_000)
             if (inIdx >= 0) {
-                val inBuf = enc.getInputBuffer(inIdx) ?: return null
+                val inBuf = enc.getInputBuffer(inIdx) ?: return
                 inBuf.clear()
-                val byteBuffer = inBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                byteBuffer.put(frameSamples)
-                val bytesSize = frameSamples.size * 2
-                enc.queueInputBuffer(inIdx, 0, bytesSize, 0, 0)
-            }
-
-            val info = MediaCodec.BufferInfo()
-            var outIdx = enc.dequeueOutputBuffer(info, 20_000)
-            if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                outIdx = enc.dequeueOutputBuffer(info, 20_000)
-            }
-
-            if (outIdx >= 0) {
-                val outBuf = enc.getOutputBuffer(outIdx)
-                val packet = if (outBuf != null && info.size > 0) {
-                    val data = ByteArray(info.size)
-                    outBuf.get(data)
-                    data
-                } else null
-                enc.releaseOutputBuffer(outIdx, false)
-                return packet
+                val shortBuf = inBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                shortBuf.put(frameSamples, 0, count)
+                val bytesSize = count * 2
+                val pts = encoderPtsUs
+                encoderPtsUs += (count * 1_000_000L) / inputSampleRate
+                enc.queueInputBuffer(inIdx, 0, bytesSize, pts, 0)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error en encodeSingleFrame: ${e.message}")
+            Log.e(TAG, "Error enviando frame al encoder Opus: ${e.message}")
         }
-        return null
+    }
+
+    private fun drainEncoder(enc: MediaCodec, result: MutableList<ByteArray>) {
+        try {
+            val info = MediaCodec.BufferInfo()
+            while (true) {
+                val outIdx = enc.dequeueOutputBuffer(info, 0)
+                if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    break
+                }
+                if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    continue
+                }
+                if (outIdx >= 0) {
+                    val outBuf = enc.getOutputBuffer(outIdx)
+                    if (outBuf != null && info.size > 0) {
+                        val packet = ByteArray(info.size)
+                        outBuf.position(info.offset)
+                        outBuf.limit(info.offset + info.size)
+                        outBuf.get(packet)
+                        result.add(packet)
+                    }
+                    enc.releaseOutputBuffer(outIdx, false)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error drenando encoder Opus: ${e.message}")
+        }
+    }
+
+    /**
+     * Envía las muestras restantes rellenadas con ceros para no cortar la última sílaba hablada.
+     */
+    fun flushEncoder(): List<ByteArray> {
+        val result = mutableListOf<ByteArray>()
+        synchronized(lock) {
+            val enc = encoder ?: return result
+            if (sampleCount > 0) {
+                java.util.Arrays.fill(sampleBuffer, sampleCount, inputFrameSamples, 0.toShort())
+                queueFrame(enc, sampleBuffer, inputFrameSamples)
+                sampleCount = 0
+            }
+            drainEncoder(enc, result)
+        }
+        return result
     }
 
     /**
