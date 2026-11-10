@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.treko.assistant.R
+import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.common.model.TrekoState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,15 +57,22 @@ class TrekoAssistantService : Service() {
         val notification = buildNotification(getString(R.string.status_idle))
         startForeground(NOTIFICATION_ID, notification)
         Log.i(TAG, "TrekoAssistantService iniciado en primer plano.")
+
+        // Iniciar captura continua de micrófono
+        NativeAudioEngine.startRecording(serviceScope)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         _serviceState.value = TrekoState.IDLE
+        if (!NativeAudioEngine.isRecording) {
+            NativeAudioEngine.startRecording(serviceScope)
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        NativeAudioEngine.stopRecording()
         serviceScope.cancel()
         _serviceState.value = TrekoState.IDLE
         Log.i(TAG, "TrekoAssistantService destruido.")

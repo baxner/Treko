@@ -26,8 +26,15 @@ import com.treko.core.common.model.AudioLevel
 fun ReactiveEqualizer(
     audioLevel: AudioLevel,
     modifier: Modifier = Modifier,
-    barHeightMax: Dp = 48.dp
+    barHeightMax: Dp = 52.dp
 ) {
+    val bar0 by animateFloatAsState(targetValue = audioLevel.bands.getOrElse(0) { 0.1f }, animationSpec = tween(70), label = "b0")
+    val bar1 by animateFloatAsState(targetValue = audioLevel.bands.getOrElse(1) { 0.1f }, animationSpec = tween(70), label = "b1")
+    val bar2 by animateFloatAsState(targetValue = audioLevel.bands.getOrElse(2) { 0.1f }, animationSpec = tween(70), label = "b2")
+    val bar3 by animateFloatAsState(targetValue = audioLevel.bands.getOrElse(3) { 0.1f }, animationSpec = tween(70), label = "b3")
+    val bar4 by animateFloatAsState(targetValue = audioLevel.bands.getOrElse(4) { 0.1f }, animationSpec = tween(70), label = "b4")
+    val animatedBands = listOf(bar0, bar1, bar2, bar3, bar4)
+
     Canvas(
         modifier = modifier
             .fillMaxWidth()
@@ -43,9 +50,9 @@ fun ReactiveEqualizer(
         )
 
         for (i in 0 until barCount) {
-            val rawFactor = if (i < audioLevel.bands.size) audioLevel.bands[i] else 0f
-            val baseHeight = 6.dp.toPx()
-            val animatedHeight = baseHeight + (size.height - baseHeight) * rawFactor.coerceIn(0f, 1f)
+            val factor = animatedBands[i].coerceIn(0.08f, 1f)
+            val baseHeight = 8.dp.toPx()
+            val animatedHeight = baseHeight + (size.height - baseHeight) * factor
             val x = startX + i * (barWidth + spacing)
             val y = (size.height - animatedHeight) / 2
 

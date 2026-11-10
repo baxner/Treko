@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.ui.components.*
 import com.treko.assistant.ui.theme.*
@@ -59,6 +60,11 @@ class MainActivity : ComponentActivity() {
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
         if (recordAudioGranted) {
             TrekoAssistantService.startService(this)
+            lifecycleScope.launch {
+                if (!NativeAudioEngine.isRecording) {
+                    NativeAudioEngine.startRecording(this)
+                }
+            }
         }
     }
 
@@ -94,6 +100,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            TrekoAssistantService.startService(this)
+            lifecycleScope.launch {
+                if (!NativeAudioEngine.isRecording) {
+                    NativeAudioEngine.startRecording(this)
+                }
+            }
+        }
+    }
+
     private fun checkAndRequestPermissions() {
         val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -108,6 +126,11 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(permissions.toTypedArray())
         } else {
             TrekoAssistantService.startService(this)
+            lifecycleScope.launch {
+                if (!NativeAudioEngine.isRecording) {
+                    NativeAudioEngine.startRecording(this)
+                }
+            }
         }
     }
 }
@@ -235,10 +258,16 @@ fun FaceScreen(
             )
         }
 
-        // Cara animada de Treko
+        // Cara animada de Treko con respuesta dinámica a la voz
+        val dynamicEmotion = when {
+            state == TrekoState.LISTENING -> TrekoEmotion.ESCUCHA
+            audioLevel.isSpeaking -> TrekoEmotion.ESCUCHA
+            else -> emotion
+        }
+
         Box(contentAlignment = Alignment.Center) {
             TrekoFace(
-                emotion = emotion,
+                emotion = dynamicEmotion,
                 size = 260.dp
             )
         }
