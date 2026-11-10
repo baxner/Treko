@@ -1087,6 +1087,7 @@ fun SettingsScreen(
                 prefs.haUrl = haUrl
                 prefs.haToken = haToken
                 prefs.customWakeWord = customWakeWord
+                customWakeWord = prefs.customWakeWord
                 prefs.wakeWordBoost = wakeWordBoost
                 prefs.wakeWordSensitivity = sensitivity
 

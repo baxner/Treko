@@ -48,7 +48,8 @@ class TrekoAssistantService : Service() {
             if (current != null) {
                 current.wakeWordDetector?.updateKeywords(keyword, boost, threshold)
             } else {
-                Log.d("TrekoService", "Servicio inactivo al actualizar KWS, los cambios se cargarán al iniciar.")
+                Log.d("TrekoService", "Servicio inactivo al actualizar KWS, iniciando servicio...")
+                startService(context)
             }
         }
 

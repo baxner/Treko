@@ -121,10 +121,12 @@ class TrekoWakeWordDetector(private val context: Context) {
                 "▁TO RE CO",
                 "▁TO RE K O",
                 "▁HE Y ▁T RE K O",
-                "▁HE Y ▁T RE CO"
+                "▁HE Y ▁T RE CO",
+                "▁O Y E ▁T RE K O",
+                "▁O Y E ▁T RE CO"
             )
             for (v in variants) {
-                lines.add("$v :$boost #$threshold @TREKO")
+                lines.add(String.format(java.util.Locale.US, "%s :%.1f #%.2f @TREKO", v, boost, threshold))
             }
         } else {
             val tok = tokenizer ?: KwsTokenizer.loadFromAssets(context)
@@ -132,10 +134,18 @@ class TrekoWakeWordDetector(private val context: Context) {
             if (mainLine.isNotEmpty()) {
                 lines.add(mainLine)
             }
-            if (!clean.startsWith("hey", ignoreCase = true)) {
-                val heyLine = tok.formatKeywordLine("Hey $clean", boost, threshold, clean.uppercase())
+            val isHey = clean.startsWith("hey", ignoreCase = true)
+            val isOye = clean.startsWith("oye", ignoreCase = true)
+            if (!isHey) {
+                val heyLine = tok.formatKeywordLine("Hey $clean", boost, threshold, clean)
                 if (heyLine.isNotEmpty()) {
                     lines.add(heyLine)
+                }
+            }
+            if (!isOye && !isHey) {
+                val oyeLine = tok.formatKeywordLine("Oye $clean", boost, threshold, clean)
+                if (oyeLine.isNotEmpty()) {
+                    lines.add(oyeLine)
                 }
             }
         }
@@ -152,7 +162,13 @@ class TrekoWakeWordDetector(private val context: Context) {
             currentBoost = boost
             currentThreshold = threshold
 
-            val activeSpotter = spotter ?: return
+            val activeSpotter = spotter
+            if (activeSpotter == null) {
+                Log.d(TAG, "KeywordSpotter no inicializado aún, procediendo a inicializar...")
+                initialize(newKeyword, boost, threshold)
+                return
+            }
+
             val kwString = buildKeywordsString(newKeyword, boost, threshold)
             Log.i(TAG, "Actualizando KWS en caliente ($newKeyword, boost=$boost, threshold=$threshold)")
 
@@ -169,15 +185,15 @@ class TrekoWakeWordDetector(private val context: Context) {
      * Procesa un buffer de audio PCM de entrada de 16 kHz mono.
      */
     fun acceptWaveform(samples: ShortArray, read: Int = samples.size) {
-        if (!isInitialized) return
         if (read <= 0) return
-
-        val activeSpotter = spotter ?: return
-        val activeStream = stream ?: return
 
         val floatSamples = FloatArray(read) { i -> samples[i] / 32768.0f }
 
         synchronized(lock) {
+            if (!isInitialized) return
+            val activeSpotter = spotter ?: return
+            val activeStream = stream ?: return
+
             try {
                 activeStream.acceptWaveform(floatSamples, 16000)
                 while (activeSpotter.isReady(activeStream)) {

@@ -39,4 +39,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation("com.k2fsa.sherpa:sherpa-onnx:2.0.1")
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
 }

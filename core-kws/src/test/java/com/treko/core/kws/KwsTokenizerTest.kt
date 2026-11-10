@@ -109,4 +109,51 @@ class KwsTokenizerTest {
         val maxBoostMaxThresh = tokenizer.formatKeywordLine("Treko", 5.0f, 0.20f)
         assertEquals("\u2581T RE K O :5.0 #0.20 @TREKO", maxBoostMaxThresh)
     }
+
+    @Test
+    fun testDiacriticsAndAccentedNames() {
+        // "María" -> "MARIA" -> ▁MAR IA
+        val mariaTokens = tokenizer.tokenizePhrase("María")
+        assertEquals(listOf("\u2581MAR", "IA"), mariaTokens)
+        val formattedMaria = tokenizer.formatKeywordLine("María", 3.0f, 0.05f)
+        assertEquals("\u2581MAR IA :3.0 #0.05 @MARIA", formattedMaria)
+
+        // "Álex" -> "ALEX" -> ▁A LE X
+        val alexTokens = tokenizer.tokenizePhrase("Álex")
+        assertEquals(listOf("\u2581A", "LE", "X"), alexTokens)
+        val formattedAlex = tokenizer.formatKeywordLine("Álex", 3.2f, 0.04f)
+        assertEquals("\u2581A LE X :3.2 #0.04 @ALEX", formattedAlex)
+
+        // "Mónica" -> "MONICA" -> ▁MO N IC A
+        val monicaTokens = tokenizer.tokenizePhrase("Mónica")
+        assertEquals(listOf("\u2581MO", "N", "IC", "A"), monicaTokens)
+
+        // "José" -> "JOSE" -> ▁JO SE
+        val joseTokens = tokenizer.tokenizePhrase("José")
+        assertEquals(listOf("\u2581JO", "SE"), joseTokens)
+
+        // "Niño" -> "NINO" -> ▁ N IN O
+        val ninoTokens = tokenizer.tokenizePhrase("Niño")
+        assertEquals(listOf("\u2581", "N", "IN", "O"), ninoTokens)
+    }
+
+    @Test
+    fun testDigitExpansion() {
+        // "Treko 2" -> "TREKO TWO" -> ▁T RE K O ▁TWO
+        val tokens = tokenizer.tokenizePhrase("Treko 2")
+        assertEquals(listOf("\u2581T", "RE", "K", "O", "\u2581TWO"), tokens)
+
+        val formatted = tokenizer.formatKeywordLine("Treko 2", 3.0f, 0.05f)
+        assertEquals("\u2581T RE K O \u2581TWO :3.0 #0.05 @TREKO_2", formatted)
+    }
+
+    @Test
+    fun testSpanishPhrases() {
+        // "Oye Treko" -> ▁O Y E ▁T RE K O
+        val tokens = tokenizer.tokenizePhrase("Oye Treko")
+        assertEquals(listOf("\u2581O", "Y", "E", "\u2581T", "RE", "K", "O"), tokens)
+
+        val formatted = tokenizer.formatKeywordLine("Oye Treko", 3.0f, 0.05f)
+        assertEquals("\u2581O Y E \u2581T RE K O :3.0 #0.05 @OYE_TREKO", formatted)
+    }
 }
