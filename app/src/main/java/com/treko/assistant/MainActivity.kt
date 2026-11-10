@@ -121,6 +121,14 @@ class MainActivity : ComponentActivity() {
             TrekoAssistantService.startService(this)
         }
     }
+
+    override fun onDestroy() {
+        val prefs = TrekoPreferences(applicationContext)
+        if (!prefs.isAlwaysListeningInBackground) {
+            TrekoAssistantService.stopService(this)
+        }
+        super.onDestroy()
+    }
 }
 
 enum class NavigationTab {
@@ -1038,6 +1046,7 @@ fun SettingsScreen(
     var customWakeWord by remember { mutableStateOf(prefs.customWakeWord) }
     var wakeWordBoost by remember { mutableFloatStateOf(prefs.wakeWordBoost) }
     var sensitivity by remember { mutableFloatStateOf(prefs.wakeWordSensitivity) }
+    var alwaysListenInBackground by remember { mutableStateOf(prefs.isAlwaysListeningInBackground) }
 
     var isTokenVisible by remember { mutableStateOf(false) }
 
@@ -1269,6 +1278,56 @@ fun SettingsScreen(
             }
         }
 
+        // Tarjeta Escucha en Segundo Plano
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            "Escuchar con app cerrada",
+                            color = NeonPurple,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            if (alwaysListenInBackground)
+                                "Treko continúa escuchando 'Treko' en segundo plano aunque cierres la app o apagues la pantalla."
+                            else
+                                "Treko solo escuchará mientras la app esté abierta. Al cerrar la app se detiene el micrófono.",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = alwaysListenInBackground,
+                        onCheckedChange = { checked ->
+                            alwaysListenInBackground = checked
+                            prefs.isAlwaysListeningInBackground = checked
+                            if (checked) {
+                                TrekoAssistantService.startService(context)
+                                Toast.makeText(context, "Escucha en segundo plano activada", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Treko se detendrá al cerrar la app", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = NeonCyan,
+                            checkedTrackColor = NeonPurple.copy(alpha = 0.5f)
+                        )
+                    )
+                }
+            }
+        }
+
         // Acciones y Botones Finales
         Button(
             onClick = {
@@ -1280,6 +1339,7 @@ fun SettingsScreen(
                 customWakeWord = prefs.customWakeWord
                 prefs.wakeWordBoost = wakeWordBoost
                 prefs.wakeWordSensitivity = sensitivity
+                prefs.isAlwaysListeningInBackground = alwaysListenInBackground
 
                 TrekoAssistantService.updateWakeWordConfig(
                     context = context,
@@ -1288,7 +1348,11 @@ fun SettingsScreen(
                     threshold = prefs.wakeWordSensitivity
                 )
 
-                Toast.makeText(context, "¡Ajustes guardados y KWS actualizado!", Toast.LENGTH_SHORT).show()
+                if (alwaysListenInBackground) {
+                    TrekoAssistantService.startService(context)
+                }
+
+                Toast.makeText(context, "¡Ajustes guardados!", Toast.LENGTH_SHORT).show()
             },
             colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
             shape = RoundedCornerShape(12.dp),

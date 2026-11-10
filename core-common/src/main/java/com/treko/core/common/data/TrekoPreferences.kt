@@ -26,6 +26,7 @@ class TrekoPreferences(context: Context) {
         private const val KEY_CUSTOM_WAKE_WORD = "custom_wake_word"
         private const val KEY_WAKE_WORD_BOOST = "wake_word_boost"
         private const val KEY_WAKE_WORD_SENSITIVITY = "wake_word_sensitivity"
+        private const val KEY_ALWAYS_LISTEN_IN_BACKGROUND = "always_listen_in_background"
 
         const val DEFAULT_XIAOZHI_WS_URL = "wss://api.tenclass.net/xiaozhi/v1/"
     }
@@ -102,6 +103,10 @@ class TrekoPreferences(context: Context) {
     var wakeWordSensitivity: Float
         get() = prefs.getFloat(KEY_WAKE_WORD_SENSITIVITY, 0.05f)
         set(value) = prefs.edit().putFloat(KEY_WAKE_WORD_SENSITIVITY, value.coerceIn(0.01f, 0.20f)).apply()
+
+    var isAlwaysListeningInBackground: Boolean
+        get() = prefs.getBoolean(KEY_ALWAYS_LISTEN_IN_BACKGROUND, true)
+        set(value) = prefs.edit().putBoolean(KEY_ALWAYS_LISTEN_IN_BACKGROUND, value).apply()
 
     fun clearAll() {
         prefs.edit().clear().apply()

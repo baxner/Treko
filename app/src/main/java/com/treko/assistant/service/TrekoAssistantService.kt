@@ -639,6 +639,17 @@ class TrekoAssistantService : Service() {
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val prefs = TrekoPreferences(this)
+        if (!prefs.isAlwaysListeningInBackground) {
+            Log.i(TAG, "Aplicación cerrada desde recientes y escucha en segundo plano desactivada. Deteniendo servicio...")
+            stopSelf()
+        } else {
+            Log.d(TAG, "Aplicación cerrada pero 'Siempre en escucha' está activo. Treko continúa en segundo plano.")
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         NativeAudioEngine.onPcmData = null
