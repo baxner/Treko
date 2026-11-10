@@ -15,6 +15,7 @@ import com.treko.assistant.R
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.audio.OpusAudioCodec
 import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.ChatMessage
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
 import com.treko.core.kws.TrekoWakeWordDetector
@@ -51,6 +52,9 @@ class TrekoAssistantService : Service() {
     private var ttsDrainingJob: Job? = null
     private var thinkingTimeoutJob: Job? = null
 
+    private var lastSoundTimestamp: Long = System.currentTimeMillis()
+    private var consecutiveSpeakingFrames: Int = 0
+
     @Volatile
     private var speechDetected: Boolean = false
 
@@ -72,6 +76,29 @@ class TrekoAssistantService : Service() {
 
         private val _subtitleText = MutableStateFlow("")
         val subtitleText: StateFlow<String> = _subtitleText.asStateFlow()
+
+        private val _conversationHistory = MutableStateFlow<List<ChatMessage>>(emptyList())
+        val conversationHistory: StateFlow<List<ChatMessage>> = _conversationHistory.asStateFlow()
+
+        fun addChatMessage(sender: String, text: String) {
+            val clean = text.trim()
+            if (clean.isBlank()) return
+            val current = _conversationHistory.value.toMutableList()
+            val last = current.lastOrNull()
+            val now = System.currentTimeMillis()
+            if (sender == "Treko" && last != null && last.sender == "Treko" && (now - last.timestamp < 10000L)) {
+                // Concatenar oraciones continuas de la misma respuesta
+                current[current.lastIndex] = last.copy(text = "${last.text} $clean", timestamp = now)
+                _conversationHistory.value = current
+            } else {
+                current.add(ChatMessage(sender = sender, text = clean, timestamp = now))
+                _conversationHistory.value = current.takeLast(60)
+            }
+        }
+
+        fun clearHistory() {
+            _conversationHistory.value = emptyList()
+        }
 
         @Volatile
         private var instance: TrekoAssistantService? = null
@@ -156,6 +183,7 @@ class TrekoAssistantService : Service() {
                 Log.d(TAG, "Ignorando alucinación de silencio en STT: $clean")
             } else {
                 _subtitleText.value = "Tú: $clean"
+                addChatMessage("Tú", clean)
 
                 val lower = clean.lowercase(Locale.ROOT)
                 val isSleepIntent = listOf(
@@ -171,6 +199,7 @@ class TrekoAssistantService : Service() {
                         client.abortSpeaking()
                         _serviceState.value = TrekoState.THINKING
                         _subtitleText.value = "Treko: ¡Hasta luego! Zzz..."
+                        addChatMessage("Treko", "¡Hasta luego! Zzz...")
                         _currentEmotion.value = TrekoEmotion.SLEEPY
                         delay(1200)
                         _serviceState.value = TrekoState.IDLE
@@ -202,6 +231,7 @@ class TrekoAssistantService : Service() {
                 "sentence_start" -> {
                     if (!text.isNullOrBlank()) {
                         _subtitleText.value = "Treko: $text"
+                        addChatMessage("Treko", text)
                     }
                 }
                 "stop" -> {
@@ -255,12 +285,45 @@ class TrekoAssistantService : Service() {
                 TrekoState.IDLE -> {
                     // Alimentar detector KWS local en reposo
                     wakeWordDetector?.acceptWaveform(buffer, read)
+
+                    val rms = NativeAudioEngine.audioLevel.value.rms
+                    val now = System.currentTimeMillis()
+
+                    if (rms > 0.015f) {
+                        // Sonido ambiente o presencia: despertar a expresión relajada
+                        lastSoundTimestamp = now
+                        if (_currentEmotion.value == TrekoEmotion.SLEEPY) {
+                            _currentEmotion.value = TrekoEmotion.RELAX
+                        }
+                    } else if (now - lastSoundTimestamp > 5000L) {
+                        // Silencio absoluto prolongado (> 5s): Treko se duerme
+                        if (_currentEmotion.value != TrekoEmotion.SLEEPY) {
+                            _currentEmotion.value = TrekoEmotion.SLEEPY
+                        }
+                    }
                 }
                 TrekoState.SPEAKING -> {
-                    // Interrupción vocal (Barge-In): permitir que el detector KWS despierte durante habla
+                    // Interrupción vocal (Barge-In):
+                    // 1. KWS escucha durante el habla de Treko
                     wakeWordDetector?.acceptWaveform(buffer, read)
+
+                    // 2. Interrupción por voz: si el usuario habla por encima de Treko (> 240ms continuos)
+                    val rms = NativeAudioEngine.audioLevel.value.rms
+                    if (rms > 0.038f) {
+                        consecutiveSpeakingFrames++
+                        if (consecutiveSpeakingFrames >= 4) {
+                            consecutiveSpeakingFrames = 0
+                            Log.i(TAG, "Interrupción por voz detectada mientras Treko habla (Barge-In). Escuchando al usuario...")
+                            beginConversation("Barge-In")
+                        }
+                    } else {
+                        consecutiveSpeakingFrames = 0
+                    }
                 }
                 TrekoState.LISTENING -> {
+                    consecutiveSpeakingFrames = 0
+                    lastSoundTimestamp = System.currentTimeMillis()
+
                     // 1. Codificar a Opus y enviar al servidor Xiaozhi
                     val packets = opusCodec?.encodePcm(buffer, read) ?: emptyList()
                     val client = wsClient
@@ -341,8 +404,20 @@ class TrekoAssistantService : Service() {
         activeListeningTimeoutMs = 5000L
 
         _serviceState.value = TrekoState.LISTENING
-        _currentEmotion.value = TrekoEmotion.ESCUCHA
         _subtitleText.value = "Escuchando..."
+
+        if (keyword.equals("Treko", ignoreCase = true)) {
+            // Reacción visual instantánea de alegría al escuchar 'Treko'
+            _currentEmotion.value = TrekoEmotion.FELIZ_ABIERTO
+            serviceScope.launch {
+                delay(350)
+                if (_serviceState.value == TrekoState.LISTENING) {
+                    _currentEmotion.value = TrekoEmotion.ESCUCHA
+                }
+            }
+        } else {
+            _currentEmotion.value = TrekoEmotion.ESCUCHA
+        }
 
         val client = wsClient
         if (client != null) {

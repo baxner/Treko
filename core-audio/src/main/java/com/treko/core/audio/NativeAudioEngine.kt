@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import com.treko.core.common.model.AudioLevel
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +46,8 @@ object NativeAudioEngine {
 
     private var recordingJob: Job? = null
     private var audioRecord: AudioRecord? = null
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
 
     // Callback para entregar muestras de audio a detectores KWS o red
     var onPcmData: ((ShortArray, Int) -> Unit)? = null
@@ -97,6 +101,31 @@ object NativeAudioEngine {
                 return
             }
 
+            val sessionId = record.audioSessionId
+            if (AcousticEchoCanceler.isAvailable()) {
+                try {
+                    aec = AcousticEchoCanceler.create(sessionId)?.apply {
+                        enabled = true
+                    }
+                    Log.i(TAG, "AcousticEchoCanceler de hardware habilitado con éxito (sessionId=$sessionId).")
+                } catch (e: Exception) {
+                    Log.w(TAG, "No fue posible habilitar AcousticEchoCanceler: ${e.message}")
+                }
+            } else {
+                Log.d(TAG, "AcousticEchoCanceler no disponible en este hardware.")
+            }
+
+            if (NoiseSuppressor.isAvailable()) {
+                try {
+                    ns = NoiseSuppressor.create(sessionId)?.apply {
+                        enabled = true
+                    }
+                    Log.i(TAG, "NoiseSuppressor de hardware habilitado con éxito (sessionId=$sessionId).")
+                } catch (e: Exception) {
+                    Log.w(TAG, "No fue posible habilitar NoiseSuppressor: ${e.message}")
+                }
+            }
+
             record.startRecording()
             audioRecord = record
             isRecording = true
@@ -134,6 +163,14 @@ object NativeAudioEngine {
         isRecording = false
         recordingJob?.cancel()
         recordingJob = null
+        try {
+            aec?.release()
+            aec = null
+            ns?.release()
+            ns = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Error liberando efectos de audio: ${e.message}")
+        }
         try {
             audioRecord?.stop()
             audioRecord?.release()

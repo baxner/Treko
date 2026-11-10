@@ -12,12 +12,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +49,7 @@ import com.treko.assistant.ui.theme.*
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.model.AudioLevel
+import com.treko.core.common.model.ChatMessage
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
 import kotlinx.coroutines.delay
@@ -222,53 +225,181 @@ fun FaceScreen(
     audioLevel: AudioLevel,
     onToggleListen: () -> Unit
 ) {
+    var showHistory by remember { mutableStateOf(false) }
+    val history by TrekoAssistantService.conversationHistory.collectAsState()
+    val listState = rememberLazyListState()
+
+    // Auto-scroll al final del historial cuando llega un mensaje nuevo
+    LaunchedEffect(history.size) {
+        if (history.isNotEmpty()) {
+            listState.animateScrollToItem(history.size - 1)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Encabezado
+        // Encabezado con título, chip de estado y botón para ver/ocultar historial
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = stringResource(R.string.app_name),
-                color = NeonCyan,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            AssistChip(
-                onClick = {},
-                label = { Text(state.name, color = NeonPurple, fontSize = 12.sp) }
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.app_name),
+                    color = NeonCyan,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                AssistChip(
+                    onClick = {},
+                    label = { Text(state.name, color = NeonPurple, fontSize = 11.sp) }
+                )
+            }
+
+            // Botón interactivo para ver u ocultar el historial con badge contador
+            FilledTonalIconButton(
+                onClick = { showHistory = !showHistory },
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = if (showHistory) NeonCyan.copy(alpha = 0.2f) else SurfaceDark,
+                    contentColor = if (showHistory) NeonCyan else TextSecondary
+                )
+            ) {
+                BadgedBox(
+                    badge = {
+                        if (history.isNotEmpty() && !showHistory) {
+                            Badge(containerColor = NeonPurple, contentColor = Color.White) {
+                                Text(history.size.toString(), fontSize = 9.sp)
+                            }
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (showHistory) Icons.Default.Face else Icons.Default.Forum,
+                        contentDescription = if (showHistory) "Ocultar historial" else "Ver historial"
+                    )
+                }
+            }
         }
 
-        // Cara animada de Treko con respuesta dinámica a la voz
+        // Lógica facial reactiva: NUNCA cortar la animación de habla con el micrófono
         val dynamicEmotion = when {
+            state == TrekoState.SPEAKING -> emotion // NUNCA cortar animación de respuesta por micro
+            state == TrekoState.THINKING -> TrekoEmotion.PIENSA
             state == TrekoState.LISTENING -> TrekoEmotion.ESCUCHA
-            audioLevel.isSpeaking -> TrekoEmotion.ESCUCHA
             else -> emotion
         }
 
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier.clickable { onToggleListen() }
-        ) {
-            TrekoFace(
-                emotion = dynamicEmotion,
-                size = 260.dp
-            )
+        if (showHistory) {
+            // Modo Historial: Cara compacta superior + Lista de conversación interactiva
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clickable { onToggleListen() }
+                        .padding(top = 4.dp)
+                ) {
+                    TrekoFace(
+                        emotion = dynamicEmotion,
+                        size = 110.dp
+                    )
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDark.copy(alpha = 0.88f)),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, CardBorder)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Conversación (${history.size})",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (history.isNotEmpty()) {
+                                TextButton(
+                                    onClick = { TrekoAssistantService.clearHistory() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Limpiar", color = Color(0xFFFF5252), fontSize = 11.sp)
+                                }
+                            }
+                        }
+
+                        if (history.isEmpty()) {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No hay mensajes en esta sesión.\nDi 'Treko' para comenzar a hablar.",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(history, key = { it.id }) { msg ->
+                                    ChatBubble(msg = msg)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Modo Cara Principal: Cara grande de 260dp
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .clickable { onToggleListen() }
+                    .padding(vertical = 16.dp)
+            ) {
+                TrekoFace(
+                    emotion = dynamicEmotion,
+                    size = 260.dp
+                )
+            }
         }
 
-        // Ecualizador reactivo y controles
+        // Ecualizador reactivo, subtítulo y control táctil
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             ReactiveEqualizer(audioLevel = audioLevel)
 
@@ -284,14 +415,14 @@ fun FaceScreen(
             } else {
                 Text(
                     text = when (state) {
-                        TrekoState.IDLE -> stringResource(R.string.status_idle)
+                        TrekoState.IDLE -> if (dynamicEmotion == TrekoEmotion.SLEEPY) "Treko durmiendo (Zzz... di 'Treko' para despertar)" else stringResource(R.string.status_idle)
                         TrekoState.LISTENING -> stringResource(R.string.status_listening)
                         TrekoState.THINKING -> stringResource(R.string.status_thinking)
                         TrekoState.SPEAKING -> stringResource(R.string.status_speaking)
                         TrekoState.ERROR -> "Error de conexión"
                     },
                     color = TextSecondary,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     textAlign = TextAlign.Center
                 )
             }
@@ -301,11 +432,47 @@ fun FaceScreen(
                 containerColor = if (state == TrekoState.LISTENING) NeonPurple else NeonCyan,
                 contentColor = Color.Black,
                 shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.size(64.dp)
+                modifier = Modifier.size(60.dp)
             ) {
                 Icon(
                     imageVector = if (state == TrekoState.LISTENING) Icons.Default.MicOff else Icons.Default.Mic,
                     contentDescription = "Micrófono"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ChatBubble(msg: ChatMessage) {
+    val isUser = msg.sender.equals("Tú", ignoreCase = true)
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+    ) {
+        Surface(
+            color = if (isUser) NeonPurple.copy(alpha = 0.22f) else SurfaceDark,
+            border = BorderStroke(1.dp, if (isUser) NeonPurple.copy(alpha = 0.5f) else CardBorder),
+            shape = RoundedCornerShape(
+                topStart = 14.dp,
+                topEnd = 14.dp,
+                bottomStart = if (isUser) 14.dp else 3.dp,
+                bottomEnd = if (isUser) 3.dp else 14.dp
+            )
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                Text(
+                    text = msg.sender,
+                    color = if (isUser) NeonPurple else NeonCyan,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = msg.text,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    lineHeight = 17.sp
                 )
             }
         }
