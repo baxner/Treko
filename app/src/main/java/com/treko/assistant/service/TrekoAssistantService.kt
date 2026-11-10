@@ -589,7 +589,12 @@ class TrekoAssistantService : Service() {
                     }
 
                     val entityId = args.optString("entity_id", "")
+                        .ifBlank { args.optString("device", "") }
+                        .ifBlank { args.optString("name", "") }
+                        .ifBlank { args.optString("target", "") }
+                        .ifBlank { args.optString("query", "") }
                     val action = args.optString("action", "turn_on")
+                        .ifBlank { args.optString("service", "turn_on") }
                     val brightness = args.optInt("brightness", 0)
                     val kelvin = args.optInt("kelvin", 0)
                     val color = args.optString("color", "").trim()

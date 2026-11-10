@@ -270,7 +270,7 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "home_assistant_call_service")
-                        put("description", "Llama a cualquier servicio o acción en Home Assistant. Permite controlar absolutamente cualquier dispositivo o integración disponible (enviar anuncios o hablar por altavoces Alexa/Google/media_players con 'notify' o 'media_player', reproducir música, pausar, cambiar volumen, activar escenas, scripts, automatizaciones, abrir/cerrar persianas, controlar clima o termostatos, aspiradoras, cerraduras, etc.).")
+                        put("description", "Llama a cualquier servicio o acción avanzada en Home Assistant. Permite controlar absolutamente cualquier dispositivo o integración disponible (enviar anuncios o hablar por altavoces Alexa/Google/media_players con 'notify' o 'media_player', reproducir música, pausar, cambiar volumen, activar escenas, scripts, automatizaciones, abrir/cerrar persianas, controlar clima o termostatos, aspiradoras, cerraduras, etc.). NOTA: Para prender o apagar televisores o luces por nombre ('la tele', 'luz'), usa prioritariamente 'home_assistant_control'.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
@@ -354,17 +354,17 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "home_assistant_control")
-                        put("description", "Control rápido de encendido/apagado, color, brillo y temperatura de color en dispositivos (luces, interruptores, enchufes). Resuelve nombres comunes en lenguaje natural dinámicamente sin requerir entity_ids exactos.")
+                        put("description", "Control rápido, universal y directo para encender, apagar, alternar, cambiar color o brillo en CUALQUIER dispositivo de la casa (televisores/Samsung/Roku/Apple TV/pantallas/tele, luces, interruptores, enchufes, etc.). Resuelve nombres coloquiales en español ('la tele', 'tele samsung', 'televisión', 'luz de la sala', 'foco') sin requerir IDs exactos. ¡USA SIEMPRE ESTA HERRAMIENTA PREFERENTEMENTE para órdenes directas de encender o apagar cualquier aparato!")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("entity_id", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre común o ID de entidad (ej. 'luz de la sala', 'luz ambiente', 'foco del cuarto', 'switch')")
+                                    put("description", "Nombre coloquial o ID del dispositivo (ej. 'tele samsung', 'la tele', 'televisión', 'luz de la sala', 'foco')")
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'turn_on', 'turn_off', o 'toggle'")
+                                    put("description", "'turn_on' (encender), 'turn_off' (apagar), o 'toggle' (alternar)")
                                 })
                                 put("color", JSONObject().apply {
                                     put("type", "string")
