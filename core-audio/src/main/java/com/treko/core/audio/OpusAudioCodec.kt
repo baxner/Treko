@@ -99,7 +99,7 @@ class OpusAudioCodec(
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -114,6 +114,7 @@ class OpusAudioCodec(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
+            track.setVolume(1.0f)
             track.play()
             audioTrack = track
             Log.i(TAG, "AudioTrack configurado y reproduciendo a $sampleRate Hz (velocidad normal 1.0x).")

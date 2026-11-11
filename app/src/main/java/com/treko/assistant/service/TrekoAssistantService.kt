@@ -14,7 +14,9 @@ import androidx.core.app.NotificationCompat
 import com.treko.assistant.R
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.audio.OpusAudioCodec
+import com.treko.core.common.data.TrekoHabitManager
 import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.data.TrekoTaskManager
 import com.treko.core.common.model.ChatMessage
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
@@ -609,6 +611,88 @@ class TrekoAssistantService : Service() {
                         colorOrTemp = colorOrTemp,
                         source = source
                     )
+                }
+                "manage_habits" -> {
+                    val habitManager = TrekoHabitManager(this@TrekoAssistantService)
+                    val action = args.optString("action", "list").lowercase(Locale.ROOT)
+                    val title = args.optString("title", "").trim()
+                    val id = args.optInt("id", -1)
+                    val waterCount = args.optInt("water_count", -1)
+
+                    when (action) {
+                        "add", "create" -> {
+                            if (title.isBlank()) return@withContext "Error: Se requiere el nombre o título del hábito a registrar."
+                            val item = habitManager.addHabit(title)
+                            "Hábito registrado exitosamente: '${item.title}' con icono ${item.icon} (ID: ${item.id})."
+                        }
+                        "toggle", "check", "complete" -> {
+                            val targetId = if (id != -1) id else {
+                                val found = TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }
+                                found?.id ?: -1
+                            }
+                            if (targetId == -1) return@withContext "No se encontró ningún hábito que coincida con '$title'."
+                            habitManager.toggleHabit(targetId)
+                            val item = TrekoHabitManager.habitsFlow.value.find { it.id == targetId }
+                            val state = if (item?.isDone == true) "completado" else "pendiente"
+                            "Hábito '${item?.title}' marcado como $state."
+                        }
+                        "delete", "remove" -> {
+                            val targetId = if (id != -1) id else {
+                                val found = TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }
+                                found?.id ?: -1
+                            }
+                            if (targetId == -1) return@withContext "No se encontró ningún hábito que coincida con '$title'."
+                            habitManager.deleteHabit(targetId)
+                            "Hábito eliminado correctamente."
+                        }
+                        "set_water" -> {
+                            if (waterCount < 0) return@withContext "Se requiere indicar la cantidad de vasos de agua (water_count)."
+                            habitManager.setWaterGlasses(waterCount)
+                            "Contador de agua actualizado a $waterCount vasos."
+                        }
+                        "list", "get" -> {
+                            habitManager.listHabitsSummary()
+                        }
+                        else -> "Acción '$action' no reconocida para manage_habits."
+                    }
+                }
+                "manage_tasks" -> {
+                    val taskManager = TrekoTaskManager(this@TrekoAssistantService)
+                    val action = args.optString("action", "list").lowercase(Locale.ROOT)
+                    val title = args.optString("title", "").trim()
+                    val id = args.optInt("id", -1)
+
+                    when (action) {
+                        "add", "create" -> {
+                            if (title.isBlank()) return@withContext "Error: Se requiere el título de la tarea a registrar."
+                            val item = taskManager.addTask(title)
+                            "Tarea registrada exitosamente: '${item.title}' (ID: ${item.id})."
+                        }
+                        "toggle", "check", "complete" -> {
+                            val targetId = if (id != -1) id else {
+                                val found = TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }
+                                found?.id ?: -1
+                            }
+                            if (targetId == -1) return@withContext "No se encontró ninguna tarea que coincida con '$title'."
+                            taskManager.toggleTask(targetId)
+                            val item = TrekoTaskManager.tasksFlow.value.find { it.id == targetId }
+                            val state = if (item?.isDone == true) "completada" else "pendiente"
+                            "Tarea '${item?.title}' marcada como $state."
+                        }
+                        "delete", "remove" -> {
+                            val targetId = if (id != -1) id else {
+                                val found = TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }
+                                found?.id ?: -1
+                            }
+                            if (targetId == -1) return@withContext "No se encontró ninguna tarea que coincida con '$title'."
+                            taskManager.deleteTask(targetId)
+                            "Tarea eliminada correctamente."
+                        }
+                        "list", "get" -> {
+                            taskManager.listTasksSummary()
+                        }
+                        else -> "Acción '$action' no reconocida para manage_tasks."
+                    }
                 }
                 else -> "Herramienta '$name' no implementada en Treko."
             }

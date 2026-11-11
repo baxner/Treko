@@ -47,7 +47,11 @@ import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.ui.components.*
 import com.treko.assistant.ui.theme.*
 import com.treko.core.audio.NativeAudioEngine
+import com.treko.core.common.data.TrekoHabitManager
+import com.treko.core.common.data.TrekoTaskManager
 import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.HabitItem
+import com.treko.core.common.model.TaskItem
 import com.treko.core.common.model.AudioLevel
 import com.treko.core.common.model.ChatMessage
 import com.treko.core.common.model.TrekoEmotion
@@ -488,28 +492,16 @@ fun ChatBubble(msg: ChatMessage) {
 }
 
 // -------------------------------------------------------------
-// PANTALLA DE HÁBITOS (INTERACTIVA)
+// PANTALLA DE HÁBITOS (INTERACTIVA Y PERSISTENTE)
 // -------------------------------------------------------------
-data class HabitItem(
-    val id: Int,
-    val title: String,
-    val icon: String,
-    var isDone: Boolean
-)
-
 @Composable
 fun HabitsScreen() {
-    var waterGlasses by remember { mutableIntStateOf(5) }
-    val habits = remember {
-        mutableStateListOf(
-            HabitItem(1, "10 min de meditación y respiración", "🧘", true),
-            HabitItem(2, "Lectura técnica o enfoque de estudio (25 min)", "📖", true),
-            HabitItem(3, "Sincronizar iluminación inteligente de descanso", "💡", false),
-            HabitItem(4, "Caminar 30 min o actividad física", "🚶", false)
-        )
-    }
+    val context = LocalContext.current
+    val habitManager = remember { TrekoHabitManager(context) }
+    val habits by TrekoHabitManager.habitsFlow.collectAsState()
+    val waterGlasses by TrekoHabitManager.waterGlassesFlow.collectAsState()
 
-    val totalHabits = habits.size + 1 // +1 por la meta de agua (8 vasos)
+    val totalHabits = (habits.size + 1).coerceAtLeast(1) // +1 por la meta de agua (8 vasos)
     val waterDone = waterGlasses >= 8
     val completedHabits = habits.count { it.isDone } + (if (waterDone) 1 else 0)
     val progress = (completedHabits.toFloat() / totalHabits.toFloat()).coerceIn(0f, 1f)
@@ -601,7 +593,7 @@ fun HabitsScreen() {
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     IconButton(
-                        onClick = { if (waterGlasses > 0) waterGlasses-- },
+                        onClick = { if (waterGlasses > 0) habitManager.setWaterGlasses(waterGlasses - 1) },
                         modifier = Modifier
                             .size(36.dp)
                             .background(CardBorder, CircleShape)
@@ -616,7 +608,7 @@ fun HabitsScreen() {
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
                     IconButton(
-                        onClick = { waterGlasses++ },
+                        onClick = { habitManager.setWaterGlasses(waterGlasses + 1) },
                         modifier = Modifier
                             .size(36.dp)
                             .background(CardBorder, CircleShape)
@@ -630,14 +622,14 @@ fun HabitsScreen() {
         // Lista de hábitos interactivos
         Text("Rutinas y Hábitos", color = NeonPurple, fontSize = 16.sp, fontWeight = FontWeight.Bold)
 
-        habits.forEachIndexed { index, habit ->
+        habits.forEach { habit ->
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = if (habit.isDone) SurfaceDark.copy(alpha = 0.7f) else SurfaceDark
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { habits[index] = habit.copy(isDone = !habit.isDone) },
+                    .clickable { habitManager.toggleHabit(habit.id) },
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Row(
@@ -661,14 +653,22 @@ fun HabitsScreen() {
                         )
                     }
 
-                    Checkbox(
-                        checked = habit.isDone,
-                        onCheckedChange = { checked -> habits[index] = habit.copy(isDone = checked) },
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = NeonCyan,
-                            checkmarkColor = Color.Black
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = habit.isDone,
+                            onCheckedChange = { _ -> habitManager.toggleHabit(habit.id) },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = NeonCyan,
+                                checkmarkColor = Color.Black
+                            )
                         )
-                    )
+                        IconButton(
+                            onClick = { habitManager.deleteHabit(habit.id) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar Hábito", tint = TextSecondary.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
+                        }
+                    }
                 }
             }
         }
@@ -691,7 +691,7 @@ fun HabitsScreen() {
                 Button(
                     onClick = {
                         if (newHabitTitle.isNotBlank()) {
-                            habits.add(HabitItem(habits.size + 1, newHabitTitle.trim(), "✨", false))
+                            habitManager.addHabit(newHabitTitle.trim())
                             newHabitTitle = ""
                             showAddDialog = false
                         }
@@ -712,23 +712,13 @@ fun HabitsScreen() {
 }
 
 // -------------------------------------------------------------
-// PANTALLA DE TAREAS (INTERACTIVA)
+// PANTALLA DE TAREAS (INTERACTIVA Y PERSISTENTE)
 // -------------------------------------------------------------
-data class TaskItem(
-    val id: Int,
-    val title: String,
-    var isDone: Boolean
-)
-
 @Composable
 fun TasksScreen() {
-    val tasks = remember {
-        mutableStateListOf(
-            TaskItem(1, "Revisar sensores de temperatura en Home Assistant", false),
-            TaskItem(2, "Completar sesión Pomodoro de 25 min", true),
-            TaskItem(3, "Configurar palabra de activación 'Treko' en la oficina", false)
-        )
-    }
+    val context = LocalContext.current
+    val taskManager = remember { TrekoTaskManager(context) }
+    val tasks by TrekoTaskManager.tasksFlow.collectAsState()
 
     var newTaskText by remember { mutableStateOf("") }
     var filterMode by remember { mutableIntStateOf(0) } // 0: Todas, 1: Pendientes, 2: Hechas
@@ -778,7 +768,7 @@ fun TasksScreen() {
             Button(
                 onClick = {
                     if (newTaskText.isNotBlank()) {
-                        tasks.add(0, TaskItem(System.currentTimeMillis().toInt(), newTaskText.trim(), false))
+                        taskManager.addTask(newTaskText.trim())
                         newTaskText = ""
                     }
                 },
@@ -815,7 +805,6 @@ fun TasksScreen() {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(filteredTasks, key = { it.id }) { task ->
-                val taskIndex = tasks.indexOfFirst { it.id == task.id }
                 Card(
                     colors = CardDefaults.cardColors(containerColor = SurfaceDark),
                     shape = RoundedCornerShape(14.dp),
@@ -829,16 +818,16 @@ fun TasksScreen() {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { taskManager.toggleTask(task.id) },
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Checkbox(
                                 checked = task.isDone,
-                                onCheckedChange = { checked ->
-                                    if (taskIndex >= 0) {
-                                        tasks[taskIndex] = task.copy(isDone = checked)
-                                    }
+                                onCheckedChange = { _ ->
+                                    taskManager.toggleTask(task.id)
                                 },
                                 colors = CheckboxDefaults.colors(
                                     checkedColor = NeonCyan,
@@ -854,7 +843,7 @@ fun TasksScreen() {
                         }
 
                         IconButton(
-                            onClick = { tasks.removeAll { it.id == task.id } }
+                            onClick = { taskManager.deleteTask(task.id) }
                         ) {
                             Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar", tint = TextSecondary)
                         }

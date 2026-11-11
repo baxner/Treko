@@ -386,6 +386,54 @@ class XiaozhiWebSocketClient(
                             put("required", JSONArray().apply { put("entity_id"); put("action") })
                         })
                     })
+                    put(JSONObject().apply {
+                        put("name", "manage_habits")
+                        put("description", "Gestiona los hábitos y rutinas diarias del usuario en la pantalla de Hábitos de Treko. Permite agregar un nuevo hábito ('add', ej. 'hacer la cama todas las mañanas'), marcar como hecho/pendiente ('toggle'), eliminar ('delete'), listar hábitos ('list'), o registrar vasos de agua ('set_water'). ¡ÚSALO SIEMPRE cuando el usuario mencione hábitos, rutinas diarias o registrar vasos de agua!")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'add' para registrar nuevo hábito, 'list' para consultar hábitos actuales, 'toggle' para marcar/desmarcar hecho, 'delete' para eliminar, o 'set_water' para actualizar vasos de agua")
+                                })
+                                put("title", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre o descripción del hábito (ej. 'Hacer la cama todas las mañanas', 'Leer 20 min') (requerido para 'add')")
+                                })
+                                put("id", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "ID numérico del hábito a modificar o eliminar (opcional)")
+                                })
+                                put("water_count", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Cantidad de vasos de agua tomados hoy (requerido para 'set_water')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "manage_tasks")
+                        put("description", "Gestiona la lista de tareas del día del usuario en la pantalla de Tareas de Treko. Permite crear tareas ('add'), marcar como completadas ('toggle'), eliminar ('delete') o listar ('list'). ¡ÚSALO SIEMPRE que el usuario pida agendar, apuntar o gestionar tareas o pendientes!")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'add' para agregar tarea, 'list' para consultar tareas, 'toggle' para marcar/desmarcar hecha, 'delete' para eliminar")
+                                })
+                                put("title", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Descripción de la tarea (ej. 'Comprar fruta', 'Revisar servidor') (requerido para 'add')")
+                                })
+                                put("id", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "ID numérico de la tarea a modificar o eliminar (opcional)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
                 }
 
                 val toolsResp = JSONObject().apply {

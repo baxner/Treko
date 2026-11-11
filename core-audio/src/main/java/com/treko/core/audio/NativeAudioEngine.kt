@@ -73,11 +73,10 @@ object NativeAudioEngine {
         ).coerceAtLeast(1024)
 
         try {
-            // Usar AudioSource.VOICE_COMMUNICATION para acoplar el AcousticEchoCanceler (AEC)
-            // de hardware (Snapdragon/Samsung) con la salida de AudioTrack (USAGE_VOICE_COMMUNICATION).
-            // Esto permite cancelación acústica de eco real en hardware sin auto-interrupciones.
+            // Usar AudioSource.VOICE_RECOGNITION para captura de alta fidelidad optimizada para asistentes
+            // sin filtros de telefonía/llamada que degraden la calidad acústica o bajen el volumen
             var record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -85,7 +84,7 @@ object NativeAudioEngine {
             )
 
             if (record.state != AudioRecord.STATE_INITIALIZED) {
-                Log.w(TAG, "VOICE_COMMUNICATION no disponible, intentando con MIC estándar.")
+                Log.w(TAG, "VOICE_RECOGNITION no disponible, intentando con MIC estándar.")
                 record.release()
                 record = AudioRecord(
                     MediaRecorder.AudioSource.MIC,
