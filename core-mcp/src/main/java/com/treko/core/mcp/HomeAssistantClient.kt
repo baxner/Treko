@@ -1060,7 +1060,7 @@ class HomeAssistantClient(
         try {
             val visionClient = client.newBuilder()
                 .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(35, TimeUnit.SECONDS)
+                .readTimeout(50, TimeUnit.SECONDS)
                 .build()
 
             // 1. Descubrir proveedor llmvision dinámicamente en la instancia de Home Assistant

@@ -37,7 +37,7 @@ class XiaozhiWebSocketClient(
     private val client = OkHttpClient.Builder()
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
-        .pingInterval(0, TimeUnit.SECONDS) // 0 desactiva la desconexión agresiva por pongs perdidos del gateway
+        .pingInterval(20, TimeUnit.SECONDS) // Keepalive cada 20s para evitar timeout de inactividad de 60s en el gateway
         .retryOnConnectionFailure(true)
         .build()
 
