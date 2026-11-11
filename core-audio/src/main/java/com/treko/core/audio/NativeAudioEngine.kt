@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import com.treko.core.common.model.AudioLevel
@@ -48,6 +49,7 @@ object NativeAudioEngine {
     private var audioRecord: AudioRecord? = null
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
 
     // Callback para entregar muestras de audio a detectores KWS o red
     var onPcmData: ((ShortArray, Int) -> Unit)? = null
@@ -126,6 +128,17 @@ object NativeAudioEngine {
                 }
             }
 
+            if (AutomaticGainControl.isAvailable()) {
+                try {
+                    agc = AutomaticGainControl.create(sessionId)?.apply {
+                        enabled = true
+                    }
+                    Log.i(TAG, "AutomaticGainControl de hardware habilitado con éxito (sessionId=$sessionId).")
+                } catch (e: Exception) {
+                    Log.w(TAG, "No fue posible habilitar AutomaticGainControl: ${e.message}")
+                }
+            }
+
             record.startRecording()
             audioRecord = record
             isRecording = true
@@ -168,6 +181,8 @@ object NativeAudioEngine {
             aec = null
             ns?.release()
             ns = null
+            agc?.release()
+            agc = null
         } catch (e: Exception) {
             Log.w(TAG, "Error liberando efectos de audio: ${e.message}")
         }

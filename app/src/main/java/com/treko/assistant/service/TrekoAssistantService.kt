@@ -284,10 +284,12 @@ class TrekoAssistantService : Service() {
 
     private fun initWakeWordDetector(prefs: TrekoPreferences) {
         val detector = TrekoWakeWordDetector(this)
+        val effectiveBoost = prefs.wakeWordBoost.coerceAtLeast(3.2f)
+        val effectiveThreshold = prefs.wakeWordSensitivity.coerceIn(0.01f, 0.05f)
         detector.initialize(
             initialKeyword = prefs.customWakeWord,
-            boost = prefs.wakeWordBoost,
-            threshold = prefs.wakeWordSensitivity
+            boost = effectiveBoost,
+            threshold = effectiveThreshold
         )
         wakeWordDetector = detector
 

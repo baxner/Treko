@@ -72,7 +72,7 @@ class TrekoWakeWordDetector(private val context: Context) {
                 val config = KeywordSpotterConfig(
                     featConfig = featConfig,
                     modelConfig = modelConfig,
-                    maxActivePaths = 4,
+                    maxActivePaths = 10,
                     keywordsFile = "models/en/keywords.txt",
                     keywordsScore = boost,
                     keywordsThreshold = threshold,
@@ -111,6 +111,7 @@ class TrekoWakeWordDetector(private val context: Context) {
 
         if (clean.equals("Treko", ignoreCase = true)) {
             val variants = listOf(
+                // Variantes estándar Treko / Treco
                 "▁T RE K O",
                 "▁T RE CO",
                 "▁T RE CK O",
@@ -120,10 +121,33 @@ class TrekoWakeWordDetector(private val context: Context) {
                 "▁T R E CO",
                 "▁TO RE CO",
                 "▁TO RE K O",
+                // Variantes fonéticas hispanas (Traco / Trako acústico)
+                "▁TRA CO",
+                "▁TRA K O",
+                "▁TRA CK O",
+                "▁TRA C K O",
+                "▁T RA CO",
+                "▁T RA K O",
+                // Variantes dentales suaves comunes en español
+                "▁TH RE CO",
+                "▁TH RE K O",
+                "▁THE RE CO",
+                "▁DR E CO",
+                "▁DR E K O",
+                "▁DR A CO",
+                "▁G RE CO",
+                "▁G RE K O",
+                // Terminación corta o suave
+                "▁T RE K",
+                "▁T RE CK",
+                "▁T RE C",
+                // Prefijos coloquiales "Hey Treko", "Oye Treko"
                 "▁HE Y ▁T RE K O",
                 "▁HE Y ▁T RE CO",
+                "▁HE Y ▁TRA CO",
                 "▁O Y E ▁T RE K O",
-                "▁O Y E ▁T RE CO"
+                "▁O Y E ▁T RE CO",
+                "▁O Y E ▁TRA CO"
             )
             for (v in variants) {
                 lines.add(String.format(java.util.Locale.US, "%s :%.1f #%.2f @TREKO", v, boost, threshold))
@@ -187,7 +211,12 @@ class TrekoWakeWordDetector(private val context: Context) {
     fun acceptWaveform(samples: ShortArray, read: Int = samples.size) {
         if (read <= 0) return
 
-        val floatSamples = FloatArray(read) { i -> samples[i] / 32768.0f }
+        // Pre-amplificación inteligente (1.4x) para nivelar el volumen de voces lejanas o suaves
+        val gain = 1.4f
+        val floatSamples = FloatArray(read) { i ->
+            val s = (samples[i] / 32768.0f) * gain
+            s.coerceIn(-1.0f, 1.0f)
+        }
 
         synchronized(lock) {
             if (!isInitialized) return
