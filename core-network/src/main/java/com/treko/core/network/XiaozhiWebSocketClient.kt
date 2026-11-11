@@ -434,6 +434,176 @@ class XiaozhiWebSocketClient(
                             put("required", JSONArray().apply { put("action") })
                         })
                     })
+                    put(JSONObject().apply {
+                        put("name", "manage_timer")
+                        put("description", "Gestiona el temporizador de enfoque y técnica Pomodoro en la pantalla de Temporizador de Treko. Permite iniciar ('start'), pausar ('pause'), alternar ('toggle'), reiniciar ('reset'), consultar el tiempo restante ('status') o fijar minutos ('set').")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'start' para iniciar, 'pause' para pausar, 'reset' para reiniciar, 'status' para consultar tiempo restante, 'set' para fijar minutos personalizados")
+                                })
+                                put("minutes", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Minutos a temporizar (ej. 15, 25, 5) (opcional)")
+                                })
+                                put("mode", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'pomodoro' (25m), 'short_break' (5m), o 'long_break' (15m)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "control_flashlight")
+                        put("description", "Enciende o apaga la linterna / flash del teléfono móvil.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'turn_on' (encender), 'turn_off' (apagar) o 'toggle' (alternar)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "open_app")
+                        put("description", "Abre cualquier aplicación instalada en el celular del usuario (ej. Spotify, YouTube, WhatsApp, Netflix, Home Assistant, Maps, Cámara, Ajustes, etc.).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("app_name", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre de la aplicación a abrir (ej. 'spotify', 'youtube', 'whatsapp', 'netflix', 'maps', 'camara', 'ajustes')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("app_name") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "set_device_volume")
+                        put("description", "Controla el volumen multimedia y del asistente en el teléfono celular (subir, bajar, silenciar o fijar un porcentaje de volumen).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'up' (subir), 'down' (bajar), 'mute' (silenciar), 'set' (fijar porcentaje), 'get' (consultar)")
+                                })
+                                put("level", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Porcentaje de volumen de 0 a 100 (para action='set')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "set_alarm")
+                        put("description", "Programa una alarma en el reloj del sistema de Android.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("hour", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Hora de la alarma en formato 24h (0 a 23)")
+                                })
+                                put("minute", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Minuto de la alarma (0 a 59)")
+                                })
+                                put("message", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Etiqueta o descripción de la alarma (ej. 'Despertador', 'Reunión') (opcional)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("hour"); put("minute") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "get_weather")
+                        put("description", "Consulta el estado del clima actual y pronóstico (temperatura, lluvia, viento, humedad) desde Home Assistant.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject())
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "media_player_playback")
+                        put("description", "Control de reproducción multimedia para televisores, Alexas y reproductores (pausar, reproducir, play/pause, canción siguiente, anterior, detener, silenciar o cambiar volumen).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'play', 'pause', 'play_pause', 'next', 'previous', 'stop', 'volume_up', 'volume_down', 'mute', 'unmute', 'volume_set'")
+                                })
+                                put("device", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre del dispositivo o tele (ej. 'tele', 'samsung', 'alexa', 'cocina', 'sala') (opcional)")
+                                })
+                                put("volume_level", JSONObject().apply {
+                                    put("type", "number")
+                                    put("description", "Nivel de volumen de 0.0 a 1.0 (opcional para volume_set)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "trigger_scene")
+                        put("description", "Activa una escena de ambiente en Home Assistant (ej. 'cine', 'modo noche', 'relajación').")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("scene", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre de la escena a activar (ej. 'cine', 'noche', 'descanso')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("scene") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "view_camera")
+                        put("description", "Muestra una cámara de seguridad dentro de la aplicación Treko en tiempo real (instantánea o live stream), o lista las cámaras disponibles en Home Assistant.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("camera", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre o ID de la cámara (ej. 'puerta', 'china', 'puerta principal', 'octoprint', 'todas')")
+                                })
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'view' (mostrar en pantalla), 'live' (transmisión en vivo), 'list' (listar cámaras), 'dismiss' (cerrar)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("camera") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "analyze_camera")
+                        put("description", "Obtiene la captura de una cámara de seguridad para que el modelo la interprete visualmente y responda preguntas del usuario sobre qué ocurre en esa área (ej. '¿hay alguien afuera?', '¿qué hay en la cochera?'), mostrándola simultáneamente en la app.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("camera", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre de la cámara (ej. 'puerta', 'china')")
+                                })
+                                put("question", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Pregunta o instrucción de lo que se desea verificar en la imagen")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("camera") })
+                        })
+                    })
                 }
 
                 val toolsResp = JSONObject().apply {

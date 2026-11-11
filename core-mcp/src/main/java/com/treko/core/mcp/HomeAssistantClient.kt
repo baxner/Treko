@@ -762,4 +762,233 @@ class HomeAssistantClient(
             emptyList()
         }
     }
+
+    data class CameraInfo(
+        val entityId: String,
+        val friendlyName: String,
+        val state: String,
+        val snapshotUrl: String
+    )
+
+    suspend fun getWeatherSummary(): String = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("${getBaseUrl()}/api/states")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext "No se pudo obtener el estado del clima de Home Assistant (${resp.code})."
+                val jsonArray = JSONArray(resp.body?.string().orEmpty())
+                var weatherObj: JSONObject? = null
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.getJSONObject(i)
+                    if (item.getString("entity_id").startsWith("weather.")) {
+                        weatherObj = item
+                        break
+                    }
+                }
+                if (weatherObj == null) {
+                    return@withContext "No se encontró ninguna entidad de clima (weather.*) en Home Assistant."
+                }
+
+                val attrs = weatherObj.optJSONObject("attributes") ?: JSONObject()
+                val friendlyName = attrs.optString("friendly_name", "Casa")
+                val state = weatherObj.optString("state", "desconocido")
+                val temp = attrs.optDouble("temperature", Double.NaN)
+                val tempUnit = attrs.optString("temperature_unit", "°C")
+                val humidity = attrs.optDouble("humidity", Double.NaN)
+                val windSpeed = attrs.optDouble("wind_speed", Double.NaN)
+                val windSpeedUnit = attrs.optString("wind_speed_unit", "km/h")
+
+                val conditionSpanish = when (state.lowercase()) {
+                    "clear-night" -> "cielo despejado nocturno"
+                    "cloudy" -> "nublado"
+                    "exceptional" -> "condición excepcional"
+                    "fog" -> "con niebla"
+                    "hail" -> "granizo"
+                    "lightning" -> "tormenta eléctrica"
+                    "lightning-rainy" -> "tormenta eléctrica con lluvia"
+                    "partlycloudy" -> "parcialmente nublado"
+                    "pouring" -> "lluvia intensa"
+                    "rainy" -> "lluvioso"
+                    "snowy" -> "nevando"
+                    "snowy-rainy" -> "aguanieve"
+                    "sunny" -> "soleado y despejado"
+                    "windy" -> "ventoso"
+                    "windy-variant" -> "ventoso variable"
+                    else -> state
+                }
+
+                val sb = StringBuilder("Pronóstico de $friendlyName: Actualmente está $conditionSpanish")
+                if (!temp.isNaN()) sb.append(" con una temperatura de $temp$tempUnit")
+                if (!humidity.isNaN()) sb.append(", humedad del ${humidity.toInt()}%")
+                if (!windSpeed.isNaN()) sb.append(" y vientos de $windSpeed $windSpeedUnit")
+                sb.append(".")
+                sb.toString()
+            }
+        } catch (e: Exception) {
+            "Error consultando el clima: ${e.message}"
+        }
+    }
+
+    suspend fun mediaPlayerPlayback(
+        deviceQuery: String,
+        action: String,
+        volume: Float? = null
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            val q = deviceQuery.ifBlank { "media_player" }
+            val entity = resolveEntity(q)
+            val targetEid = if (entity != null && entity.domain == "media_player") {
+                entity.id
+            } else {
+                findActiveMediaPlayer() ?: entity?.id ?: "media_player"
+            }
+
+            val act = action.lowercase().trim()
+            val (service, data) = when (act) {
+                "play", "reproducir", "resume", "reanudar" -> "media_play" to JSONObject().put("entity_id", targetEid)
+                "pause", "pausar" -> "media_pause" to JSONObject().put("entity_id", targetEid)
+                "play_pause", "toggle" -> "media_play_pause" to JSONObject().put("entity_id", targetEid)
+                "next", "siguiente" -> "media_next_track" to JSONObject().put("entity_id", targetEid)
+                "previous", "anterior" -> "media_previous_track" to JSONObject().put("entity_id", targetEid)
+                "stop", "detener" -> "media_stop" to JSONObject().put("entity_id", targetEid)
+                "volume_up", "subir_volumen" -> "volume_up" to JSONObject().put("entity_id", targetEid)
+                "volume_down", "bajar_volumen" -> "volume_down" to JSONObject().put("entity_id", targetEid)
+                "mute", "silenciar" -> "volume_mute" to JSONObject().put("entity_id", targetEid).put("is_volume_muted", true)
+                "unmute", "desilenciar" -> "volume_mute" to JSONObject().put("entity_id", targetEid).put("is_volume_muted", false)
+                "volume_set", "fijar_volumen" -> {
+                    val lvl = (volume ?: 0.5f).coerceIn(0f, 1f)
+                    "volume_set" to JSONObject().put("entity_id", targetEid).put("volume_level", lvl)
+                }
+                else -> "media_play_pause" to JSONObject().put("entity_id", targetEid)
+            }
+
+            callService("media_player", service, data)
+        } catch (e: Exception) {
+            "Error en control multimedia: ${e.message}"
+        }
+    }
+
+    private fun findActiveMediaPlayer(): String? {
+        return try {
+            val req = Request.Builder()
+                .url("${getBaseUrl()}/api/states")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val array = JSONArray(resp.body?.string().orEmpty())
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    val eid = item.getString("entity_id")
+                    if (eid.startsWith("media_player.")) {
+                        val state = item.optString("state", "")
+                        if (state == "playing" || state == "on") {
+                            return eid
+                        }
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun triggerScene(sceneQuery: String): String = withContext(Dispatchers.IO) {
+        try {
+            val clean = sceneQuery.trim().lowercase().replace("escena", "").trim()
+            val req = Request.Builder()
+                .url("${getBaseUrl()}/api/states")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext "Error consultando escenas en Home Assistant (${resp.code})."
+                val array = JSONArray(resp.body?.string().orEmpty())
+                var targetEid: String? = null
+                var friendlyName = ""
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    val eid = item.getString("entity_id")
+                    if (eid.startsWith("scene.")) {
+                        val fn = item.optJSONObject("attributes")?.optString("friendly_name", "") ?: ""
+                        if (eid.contains(clean, ignoreCase = true) || fn.contains(clean, ignoreCase = true)) {
+                            targetEid = eid
+                            friendlyName = fn.ifBlank { eid }
+                            break
+                        }
+                    }
+                }
+                if (targetEid == null) {
+                    return@withContext "No se encontró ninguna escena que coincida con '$sceneQuery'."
+                }
+                callService("scene", "turn_on", JSONObject().put("entity_id", targetEid))
+                "Escena '$friendlyName' activada con éxito."
+            }
+        } catch (e: Exception) {
+            "Error activando escena: ${e.message}"
+        }
+    }
+
+    suspend fun getCameras(): List<CameraInfo> = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("${getBaseUrl()}/api/states")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val array = JSONArray(resp.body?.string().orEmpty())
+                val list = mutableListOf<CameraInfo>()
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    val eid = item.getString("entity_id")
+                    if (eid.startsWith("camera.")) {
+                        val fn = item.optJSONObject("attributes")?.optString("friendly_name", eid) ?: eid
+                        val st = item.optString("state", "idle")
+                        val snapUrl = "${getBaseUrl()}/api/camera_proxy/$eid"
+                        list.add(CameraInfo(eid, fn, st, snapUrl))
+                    }
+                }
+                list
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun getCameraSnapshot(cameraQuery: String): Pair<CameraInfo, ByteArray>? = withContext(Dispatchers.IO) {
+        try {
+            val cams = getCameras()
+            if (cams.isEmpty()) return@withContext null
+            val clean = cameraQuery.trim().lowercase().replace("cámara", "").replace("camara", "").trim()
+            val chosen = if (clean.isBlank()) {
+                cams.firstOrNull { it.state != "unavailable" } ?: cams.first()
+            } else {
+                cams.find { it.entityId.contains(clean, ignoreCase = true) || it.friendlyName.contains(clean, ignoreCase = true) }
+                    ?: cams.firstOrNull { it.state != "unavailable" }
+                    ?: cams.first()
+            }
+
+            val req = Request.Builder()
+                .url(chosen.snapshotUrl)
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val bytes = resp.body?.bytes() ?: return@withContext null
+                chosen to bytes
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error obteniendo snapshot de cámara: ${e.message}")
+            null
+        }
+    }
 }

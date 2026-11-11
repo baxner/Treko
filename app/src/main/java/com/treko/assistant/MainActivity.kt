@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.treko.assistant.service.TrekoAssistantService
@@ -49,10 +52,15 @@ import com.treko.assistant.ui.theme.*
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.common.data.TrekoHabitManager
 import com.treko.core.common.data.TrekoTaskManager
+import com.treko.core.common.data.TrekoTimerManager
 import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.AudioLevel
+import com.treko.core.common.model.CameraFeedState
 import com.treko.core.common.model.HabitItem
 import com.treko.core.common.model.TaskItem
-import com.treko.core.common.model.AudioLevel
+import com.treko.core.common.model.TimerMode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.treko.core.common.model.ChatMessage
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
@@ -223,6 +231,15 @@ fun MainScreen(
                 NavigationTab.SETTINGS -> SettingsScreen(
                     prefs = prefs,
                     onReopenWizard = onReopenWizard
+                )
+            }
+
+            // Visor de Cámara de Seguridad (En vivo / Instantánea)
+            val activeCameraFeed by TrekoAssistantService.activeCameraFeed.collectAsState()
+            activeCameraFeed?.let { feed ->
+                CameraViewerDialog(
+                    feed = feed,
+                    onDismiss = { TrekoAssistantService.dismissCameraFeed() }
                 )
             }
         }
@@ -855,35 +872,14 @@ fun TasksScreen() {
 }
 
 // -------------------------------------------------------------
-// PANTALLA DE TEMPORIZADOR (POMODORO FUNCIONAL)
+// PANTALLA DE TEMPORIZADOR (POMODORO ASISTIDO POR VOZ)
 // -------------------------------------------------------------
-enum class TimerMode(val title: String, val seconds: Int) {
-    POMODORO("Pomodoro (25m)", 25 * 60),
-    SHORT_BREAK("Descanso Corto (5m)", 5 * 60),
-    LONG_BREAK("Descanso Largo (15m)", 15 * 60)
-}
-
 @Composable
 fun TimerScreen() {
-    var selectedMode by remember { mutableStateOf(TimerMode.POMODORO) }
-    var remainingSeconds by remember { mutableIntStateOf(selectedMode.seconds) }
-    var isRunning by remember { mutableStateOf(false) }
-    var completedSessions by remember { mutableIntStateOf(2) }
-
-    LaunchedEffect(isRunning) {
-        while (isRunning && remainingSeconds > 0) {
-            delay(1000L)
-            remainingSeconds--
-        }
-        if (remainingSeconds <= 0 && isRunning) {
-            isRunning = false
-            if (selectedMode == TimerMode.POMODORO) {
-                completedSessions++
-            }
-        }
-    }
-
-    val progress = (remainingSeconds.toFloat() / selectedMode.seconds.toFloat()).coerceIn(0f, 1f)
+    val timerState by TrekoTimerManager.timerState.collectAsState()
+    val progress = if (timerState.totalSeconds > 0) {
+        (timerState.remainingSeconds.toFloat() / timerState.totalSeconds.toFloat()).coerceIn(0f, 1f)
+    } else 0f
 
     Column(
         modifier = Modifier
@@ -900,14 +896,10 @@ fun TimerScreen() {
 
             // Selector de modo
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TimerMode.values().forEach { mode ->
+                listOf(TimerMode.POMODORO, TimerMode.SHORT_BREAK, TimerMode.LONG_BREAK).forEach { mode ->
                     FilterChip(
-                        selected = selectedMode == mode,
-                        onClick = {
-                            selectedMode = mode
-                            remainingSeconds = mode.seconds
-                            isRunning = false
-                        },
+                        selected = timerState.selectedMode == mode,
+                        onClick = { TrekoTimerManager.setMode(mode) },
                         label = { Text(mode.title, fontSize = 11.sp) }
                     )
                 }
@@ -916,9 +908,9 @@ fun TimerScreen() {
 
         // Reloj Cyber Digital
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            val minutes = remainingSeconds / 60
-            val seconds = remainingSeconds % 60
-            val timeString = String.format("%02d:%02d", minutes, seconds)
+            val minutes = timerState.remainingSeconds / 60
+            val seconds = timerState.remainingSeconds % 60
+            val timeString = String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds)
 
             Box(
                 contentAlignment = Alignment.Center,
@@ -926,18 +918,18 @@ fun TimerScreen() {
                     .size(220.dp)
                     .clip(CircleShape)
                     .background(SurfaceDark)
-                    .border(3.dp, if (isRunning) NeonCyan else CardBorder, CircleShape)
+                    .border(3.dp, if (timerState.isRunning) NeonCyan else CardBorder, CircleShape)
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         text = timeString,
-                        color = if (isRunning) NeonCyan else TextPrimary,
+                        color = if (timerState.isRunning) NeonCyan else TextPrimary,
                         fontSize = 52.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (isRunning) "En progreso…" else "Pausado",
-                        color = if (isRunning) NeonPurple else TextSecondary,
+                        text = if (timerState.isRunning) "En progreso…" else "Pausado",
+                        color = if (timerState.isRunning) NeonPurple else TextSecondary,
                         fontSize = 13.sp
                     )
                 }
@@ -962,27 +954,24 @@ fun TimerScreen() {
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Button(
-                    onClick = { isRunning = !isRunning },
+                    onClick = { TrekoTimerManager.toggle() },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRunning) Color(0xFFFF5252) else NeonCyan,
+                        containerColor = if (timerState.isRunning) Color(0xFFFF5252) else NeonCyan,
                         contentColor = Color.Black
                     ),
                     modifier = Modifier.height(50.dp).width(140.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(
-                        imageVector = if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        imageVector = if (timerState.isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = null
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isRunning) "Pausar" else "Iniciar", fontWeight = FontWeight.Bold)
+                    Text(if (timerState.isRunning) "Pausar" else "Iniciar", fontWeight = FontWeight.Bold)
                 }
 
                 OutlinedButton(
-                    onClick = {
-                        isRunning = false
-                        remainingSeconds = selectedMode.seconds
-                    },
+                    onClick = { TrekoTimerManager.reset() },
                     modifier = Modifier.height(50.dp).width(120.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
@@ -1005,11 +994,150 @@ fun TimerScreen() {
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Sesiones hoy", color = TextSecondary, fontSize = 12.sp)
-                        Text("$completedSessions", color = NeonCyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text("${timerState.completedSessions}", color = NeonCyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Enfoque total", color = TextSecondary, fontSize = 12.sp)
-                        Text("${completedSessions * 25} min", color = NeonPurple, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text("${timerState.completedSessions * 25} min", color = NeonPurple, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// VISOR DE CÁMARA DE SEGURIDAD (EN VIVO / CAPTURA)
+// -------------------------------------------------------------
+@Composable
+fun CameraViewerDialog(
+    feed: CameraFeedState,
+    onDismiss: () -> Unit
+) {
+    var bitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var refreshTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(feed.entityId, refreshTrigger) {
+        withContext(Dispatchers.IO) {
+            try {
+                val client = okhttp3.OkHttpClient()
+                val req = okhttp3.Request.Builder()
+                    .url(feed.snapshotUrl)
+                    .addHeader("Authorization", "Bearer ${feed.haToken}")
+                    .get()
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null) {
+                            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (decoded != null) {
+                                bitmap = decoded.asImageBitmap()
+                                errorMessage = null
+                            }
+                        }
+                    } else {
+                        errorMessage = "Error ${resp.code} al obtener imagen de la cámara"
+                    }
+                }
+            } catch (e: Exception) {
+                errorMessage = e.message
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    if (feed.isLive) {
+        LaunchedEffect(feed.entityId) {
+            while (true) {
+                delay(2000L)
+                refreshTrigger++
+            }
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            border = BorderStroke(1.dp, NeonCyan),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("📹", fontSize = 20.sp)
+                        Column {
+                            Text(feed.friendlyName, color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(
+                                if (feed.isLive) "En vivo (Actualizando cada 2s)" else "Instantánea de cámara",
+                                color = if (feed.isLive) Color(0xFF00E676) else TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = TextSecondary)
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val bmp = bitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp,
+                            contentDescription = feed.friendlyName,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    } else if (isLoading) {
+                        CircularProgressIndicator(color = NeonCyan)
+                    } else {
+                        Text(
+                            text = errorMessage ?: "Sin señal de video",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { refreshTrigger++ }) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Actualizar", color = NeonCyan, fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceDark, contentColor = TextPrimary),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Cerrar")
                     }
                 }
             }

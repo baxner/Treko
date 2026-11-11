@@ -6,9 +6,12 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
+import android.provider.AlarmClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.treko.assistant.R
@@ -17,7 +20,10 @@ import com.treko.core.audio.OpusAudioCodec
 import com.treko.core.common.data.TrekoHabitManager
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.data.TrekoTaskManager
+import com.treko.core.common.data.TrekoTimerManager
+import com.treko.core.common.model.CameraFeedState
 import com.treko.core.common.model.ChatMessage
+import com.treko.core.common.model.TimerMode
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
 import com.treko.core.kws.TrekoWakeWordDetector
@@ -55,6 +61,7 @@ class TrekoAssistantService : Service() {
     private var thinkingTimeoutJob: Job? = null
 
     private var lastSoundTimestamp: Long = System.currentTimeMillis()
+    private var isTorchOn: Boolean = false
 
     @Volatile
     private var speechDetected: Boolean = false
@@ -130,6 +137,17 @@ class TrekoAssistantService : Service() {
 
         fun setServiceState(state: TrekoState) {
             _serviceState.value = state
+        }
+
+        private val _activeCameraFeed = MutableStateFlow<CameraFeedState?>(null)
+        val activeCameraFeed: StateFlow<CameraFeedState?> = _activeCameraFeed.asStateFlow()
+
+        fun showCameraFeed(state: CameraFeedState) {
+            _activeCameraFeed.value = state
+        }
+
+        fun dismissCameraFeed() {
+            _activeCameraFeed.value = null
         }
 
         fun startService(context: Context) {
@@ -693,6 +711,287 @@ class TrekoAssistantService : Service() {
                         }
                         else -> "Acción '$action' no reconocida para manage_tasks."
                     }
+                }
+                "manage_timer" -> {
+                    val action = args.optString("action", "status").lowercase(Locale.ROOT)
+                    val minutes = args.optInt("minutes", 0)
+                    val modeStr = args.optString("mode", "").lowercase(Locale.ROOT)
+
+                    when (action) {
+                        "start", "iniciar" -> {
+                            if (minutes > 0) {
+                                TrekoTimerManager.setCustomMinutes(minutes)
+                                "Temporizador de $minutes minutos iniciado."
+                            } else {
+                                when {
+                                    modeStr.contains("pomo") -> TrekoTimerManager.setMode(TimerMode.POMODORO)
+                                    modeStr.contains("corto") || modeStr.contains("short") -> TrekoTimerManager.setMode(TimerMode.SHORT_BREAK)
+                                    modeStr.contains("largo") || modeStr.contains("long") -> TrekoTimerManager.setMode(TimerMode.LONG_BREAK)
+                                }
+                                TrekoTimerManager.start()
+                                "Temporizador iniciado: ${TrekoTimerManager.getStatusDescription()}"
+                            }
+                        }
+                        "pause", "pausar", "detener" -> {
+                            TrekoTimerManager.pause()
+                            "Temporizador pausado. ${TrekoTimerManager.getStatusDescription()}"
+                        }
+                        "toggle", "alternar" -> {
+                            TrekoTimerManager.toggle()
+                            TrekoTimerManager.getStatusDescription()
+                        }
+                        "reset", "reiniciar" -> {
+                            TrekoTimerManager.reset()
+                            "Temporizador reiniciado. ${TrekoTimerManager.getStatusDescription()}"
+                        }
+                        "set", "fijar", "poner" -> {
+                            val mins = if (minutes > 0) minutes else 10
+                            TrekoTimerManager.setCustomMinutes(mins)
+                            "Temporizador configurado a $mins minutos e iniciado."
+                        }
+                        else -> {
+                            TrekoTimerManager.getStatusDescription()
+                        }
+                    }
+                }
+                "control_flashlight" -> {
+                    val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                    if (cm == null) {
+                        "El servicio de cámara no está disponible en este dispositivo."
+                    } else {
+                        val cameraId = cm.cameraIdList.firstOrNull() ?: return@withContext "No se encontró flash en el dispositivo."
+                        val action = args.optString("action", "toggle").lowercase(Locale.ROOT)
+                        val newState = when (action) {
+                            "turn_on", "on", "encender", "prender" -> true
+                            "turn_off", "off", "apagar" -> false
+                            else -> !isTorchOn
+                        }
+                        try {
+                            cm.setTorchMode(cameraId, newState)
+                            isTorchOn = newState
+                            if (newState) "Linterna encendida." else "Linterna apagada."
+                        } catch (e: Exception) {
+                            "Error al controlar la linterna: ${e.message}"
+                        }
+                    }
+                }
+                "open_app" -> {
+                    val appName = args.optString("app_name", "").trim().lowercase(Locale.ROOT)
+                    if (appName.isBlank()) return@withContext "Error: Se requiere el nombre de la aplicación a abrir."
+                    val pm = packageManager
+                    val knownPackages = mapOf(
+                        "spotify" to "com.spotify.music",
+                        "youtube" to "com.google.android.youtube",
+                        "whatsapp" to "com.whatsapp",
+                        "netflix" to "com.netflix.mediaclient",
+                        "home assistant" to "io.homeassistant.companion.android",
+                        "chrome" to "com.android.chrome",
+                        "maps" to "com.google.android.apps.maps",
+                        "google maps" to "com.google.android.apps.maps",
+                        "telegram" to "org.telegram.messenger",
+                        "instagram" to "com.instagram.android",
+                        "tiktok" to "com.zhiliaoapp.musically",
+                        "camara" to "com.sec.android.app.camera",
+                        "cámara" to "com.sec.android.app.camera",
+                        "galeria" to "com.sec.android.gallery3d",
+                        "galería" to "com.sec.android.gallery3d",
+                        "reloj" to "com.sec.android.app.clockpackage",
+                        "ajustes" to "com.android.settings",
+                        "configuracion" to "com.android.settings",
+                        "configuración" to "com.android.settings"
+                    )
+
+                    var targetPkg = knownPackages[appName]
+                    if (targetPkg == null) {
+                        for ((k, v) in knownPackages) {
+                            if (appName.contains(k) || k.contains(appName)) {
+                                targetPkg = v
+                                break
+                            }
+                        }
+                    }
+
+                    if (targetPkg == null) {
+                        val installed = pm.getInstalledApplications(0)
+                        val match = installed.find { appInfo ->
+                            val label = pm.getApplicationLabel(appInfo).toString().lowercase(Locale.ROOT)
+                            label.contains(appName) || appName.contains(label)
+                        }
+                        targetPkg = match?.packageName
+                    }
+
+                    if (targetPkg == null) {
+                        return@withContext "No encontré ninguna aplicación instalada llamada '$appName'."
+                    }
+
+                    val launchIntent = pm.getLaunchIntentForPackage(targetPkg)
+                    if (launchIntent != null) {
+                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(launchIntent)
+                        "Abriendo $appName..."
+                    } else {
+                        "No se pudo iniciar '$appName'."
+                    }
+                }
+                "set_device_volume" -> {
+                    val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    if (am == null) {
+                        "Control de volumen no disponible."
+                    } else {
+                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                        val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        val action = args.optString("action", "set").lowercase(Locale.ROOT)
+                        val level = args.optInt("level", -1)
+
+                        when (action) {
+                            "up", "subir" -> {
+                                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                                val newVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                "Volumen subido al ${(newVol * 100) / maxVol}%."
+                            }
+                            "down", "bajar" -> {
+                                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                                val newVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                "Volumen bajado al ${(newVol * 100) / maxVol}%."
+                            }
+                            "mute", "silenciar" -> {
+                                am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, AudioManager.FLAG_SHOW_UI)
+                                "Volumen silenciado."
+                            }
+                            "set", "fijar" -> {
+                                if (level in 0..100) {
+                                    val target = ((level / 100.0) * maxVol).toInt()
+                                    am.setStreamVolume(AudioManager.STREAM_MUSIC, target, AudioManager.FLAG_SHOW_UI)
+                                    "Volumen fijado al $level%."
+                                } else {
+                                    "Indica un porcentaje de volumen válido entre 0 y 100."
+                                }
+                            }
+                            else -> "Volumen actual al ${(currentVol * 100) / maxVol}%."
+                        }
+                    }
+                }
+                "set_alarm" -> {
+                    val hour = args.optInt("hour", -1)
+                    val minute = args.optInt("minute", 0)
+                    val message = args.optString("message", "Alarma Treko").trim()
+                    if (hour !in 0..23 || minute !in 0..59) {
+                        return@withContext "Por favor especifica una hora válida (0-23) y minutos (0-59)."
+                    }
+                    val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                        putExtra(AlarmClock.EXTRA_HOUR, hour)
+                        putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                        putExtra(AlarmClock.EXTRA_MESSAGE, message)
+                        putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    try {
+                        startActivity(intent)
+                        val timeStr = String.format(Locale.US, "%02d:%02d", hour, minute)
+                        "Alarma programada con éxito para las $timeStr ($message)."
+                    } catch (e: Exception) {
+                        "Error al programar la alarma: ${e.message}"
+                    }
+                }
+                "get_weather" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.getWeatherSummary()
+                }
+                "media_player_playback" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val action = args.optString("action", "play_pause").trim()
+                    val device = args.optString("device", "").trim()
+                    val volume = if (args.has("volume_level")) args.optDouble("volume_level", 0.5).toFloat() else null
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.mediaPlayerPlayback(device, action, volume)
+                }
+                "trigger_scene" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val scene = args.optString("scene", "").trim()
+                    if (scene.isBlank()) return@withContext "Se requiere el nombre de la escena."
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+                    haClient.triggerScene(scene)
+                }
+                "view_camera" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val cameraQuery = args.optString("camera", "").trim()
+                    val action = args.optString("action", "view").lowercase(Locale.ROOT)
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+
+                    if (action == "dismiss" || action == "close" || action == "cerrar") {
+                        dismissCameraFeed()
+                        return@withContext "Cámara cerrada en pantalla."
+                    }
+
+                    if (action == "list" || cameraQuery.equals("todas", ignoreCase = true)) {
+                        val cams = haClient.getCameras()
+                        if (cams.isEmpty()) return@withContext "No se encontraron cámaras disponibles en Home Assistant."
+                        val sb = StringBuilder("Cámaras encontradas (${cams.size}):\n")
+                        cams.forEach { sb.append("• ${it.friendlyName} (${it.entityId}) [${it.state}]\n") }
+                        return@withContext sb.toString().trim()
+                    }
+
+                    val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
+                    if (snapshotPair == null) {
+                        return@withContext "No fue posible conectar con la cámara '$cameraQuery' en Home Assistant."
+                    }
+
+                    val (camInfo, _) = snapshotPair
+                    val isLive = action == "live" || action == "stream" || cameraQuery.contains("vivo")
+                    _activeCameraFeed.value = CameraFeedState(
+                        entityId = camInfo.entityId,
+                        friendlyName = camInfo.friendlyName,
+                        snapshotUrl = camInfo.snapshotUrl,
+                        haUrl = haUrl,
+                        haToken = haToken,
+                        isLive = isLive
+                    )
+                    "Mostrando la cámara '${camInfo.friendlyName}' en pantalla."
+                }
+                "analyze_camera" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant no está configurado en los ajustes de Treko."
+                    }
+                    val cameraQuery = args.optString("camera", "").trim()
+                    val question = args.optString("question", "Describe lo que se ve en la cámara.")
+                    val haClient = HomeAssistantClient(haUrl, haToken)
+
+                    val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
+                    if (snapshotPair == null) {
+                        return@withContext "No fue posible obtener la captura de la cámara '$cameraQuery'."
+                    }
+
+                    val (camInfo, bytes) = snapshotPair
+                    _activeCameraFeed.value = CameraFeedState(
+                        entityId = camInfo.entityId,
+                        friendlyName = camInfo.friendlyName,
+                        snapshotUrl = camInfo.snapshotUrl,
+                        haUrl = haUrl,
+                        haToken = haToken,
+                        isLive = false
+                    )
+
+                    val sizeKb = bytes.size / 1024
+                    "Captura de la cámara '${camInfo.friendlyName}' obtenida con éxito (${sizeKb} KB, estado: ${camInfo.state}). La cámara está visible en la pantalla. Responde a la pregunta del usuario: '$question' confirmando que la imagen está en pantalla y describiendo el estado de la cámara."
                 }
                 else -> "Herramienta '$name' no implementada en Treko."
             }
