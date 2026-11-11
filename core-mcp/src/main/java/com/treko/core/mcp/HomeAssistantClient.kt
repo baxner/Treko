@@ -963,31 +963,182 @@ class HomeAssistantClient(
         }
     }
 
+    private fun getSynonymsForQuery(query: String): List<String> {
+        val q = query.lowercase().trim()
+        val synonyms = mutableListOf(q)
+        if (q.contains("ring") || q.contains("timbre") || q.contains("doorbell") || q.contains("intercom")) {
+            synonyms.addAll(listOf("puerta", "puerta_principal", "doorbell", "ring", "timbre", "frente", "entrada"))
+        }
+        if (q.contains("puerta") || q.contains("entrada") || q.contains("frente") || q.contains("fachada") || q.contains("acceso")) {
+            synonyms.addAll(listOf("puerta", "puerta_principal", "entrada", "doorbell", "front", "door"))
+        }
+        if (q.contains("jardin") || q.contains("jardín") || q.contains("patio") || q.contains("china") || q.contains("trasero") || q.contains("backyard")) {
+            synonyms.addAll(listOf("china", "jardin", "jardín", "patio", "garden", "backyard"))
+        }
+        if (q.contains("cochera") || q.contains("garaje") || q.contains("garage") || q.contains("auto") || q.contains("carro") || q.contains("estacionamiento")) {
+            synonyms.addAll(listOf("cochera", "garage", "garaje", "driveway", "parking"))
+        }
+        if (q.contains("impresora") || q.contains("3d") || q.contains("octoprint")) {
+            synonyms.addAll(listOf("octoprint", "impresora", "printer"))
+        }
+        return synonyms.distinct()
+    }
+
+    private fun rankCameraCandidates(cams: List<CameraInfo>, cameraQuery: String, preferSnapshot: Boolean = true): List<CameraInfo> {
+        if (cams.isEmpty()) return emptyList()
+        val clean = cameraQuery.trim().lowercase()
+            .replace("cámara", "").replace("camara", "")
+            .replace("la", "").replace("el", "").replace("de", "").trim()
+
+        val synonyms = if (clean.isNotBlank()) getSynonymsForQuery(clean) else emptyList()
+
+        val matching = if (clean.isBlank()) {
+            cams
+        } else {
+            val filtered = cams.filter { cam ->
+                synonyms.any { syn ->
+                    cam.entityId.contains(syn, ignoreCase = true) ||
+                    cam.friendlyName.contains(syn, ignoreCase = true)
+                }
+            }
+            if (filtered.isNotEmpty()) filtered else cams
+        }
+
+        return matching.sortedWith { a, b ->
+            val aAvail = if (a.state != "unavailable") 0 else 1
+            val bAvail = if (b.state != "unavailable") 0 else 1
+            if (aAvail != bAvail) return@sortedWith aAvail.compareTo(bAvail)
+
+            if (preferSnapshot) {
+                val aSnap = if (a.entityId.contains("snapshot") || a.friendlyName.contains("snapshot", ignoreCase = true)) 0 else 1
+                val bSnap = if (b.entityId.contains("snapshot") || b.friendlyName.contains("snapshot", ignoreCase = true)) 0 else 1
+                if (aSnap != bSnap) return@sortedWith aSnap.compareTo(bSnap)
+
+                val aLive = if (a.entityId.contains("vista_en_vivo") || a.entityId.contains("live")) 1 else 0
+                val bLive = if (b.entityId.contains("vista_en_vivo") || b.entityId.contains("live")) 1 else 0
+                if (aLive != bLive) return@sortedWith aLive.compareTo(bLive)
+            }
+            0
+        }
+    }
+
     suspend fun getCameraSnapshot(cameraQuery: String): Pair<CameraInfo, ByteArray>? = withContext(Dispatchers.IO) {
         try {
             val cams = getCameras()
             if (cams.isEmpty()) return@withContext null
-            val clean = cameraQuery.trim().lowercase().replace("cámara", "").replace("camara", "").trim()
-            val chosen = if (clean.isBlank()) {
-                cams.firstOrNull { it.state != "unavailable" } ?: cams.first()
-            } else {
-                cams.find { it.entityId.contains(clean, ignoreCase = true) || it.friendlyName.contains(clean, ignoreCase = true) }
-                    ?: cams.firstOrNull { it.state != "unavailable" }
-                    ?: cams.first()
-            }
+            val candidates = rankCameraCandidates(cams, cameraQuery, preferSnapshot = true)
 
-            val req = Request.Builder()
-                .url(chosen.snapshotUrl)
-                .addHeader("Authorization", "Bearer $haToken")
-                .get()
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext null
-                val bytes = resp.body?.bytes() ?: return@withContext null
-                chosen to bytes
+            for (candidate in candidates) {
+                try {
+                    val req = Request.Builder()
+                        .url(candidate.snapshotUrl)
+                        .addHeader("Authorization", "Bearer $haToken")
+                        .get()
+                        .build()
+                    client.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val bytes = resp.body?.bytes()
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                return@withContext candidate to bytes
+                            }
+                        } else {
+                            Log.w(TAG, "Snapshot falló para ${candidate.entityId} (HTTP ${resp.code}), probando siguiente candidato...")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Excepción al consultar snapshot de ${candidate.entityId}: ${e.message}")
+                }
             }
+            null
         } catch (e: Exception) {
             Log.e(TAG, "Error obteniendo snapshot de cámara: ${e.message}")
+            null
+        }
+    }
+
+    suspend fun analyzeCameraWithLlmVision(cameraEntityId: String, question: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val visionClient = client.newBuilder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(35, TimeUnit.SECONDS)
+                .build()
+
+            // 1. Descubrir proveedor llmvision dinámicamente en la instancia de Home Assistant
+            var providerId: String? = null
+            try {
+                val reqEntries = Request.Builder()
+                    .url("${getBaseUrl()}/api/config/config_entries/entry")
+                    .addHeader("Authorization", "Bearer $haToken")
+                    .get()
+                    .build()
+                client.newCall(reqEntries).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val arr = JSONArray(resp.body?.string().orEmpty())
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.getJSONObject(i)
+                            if (obj.optString("domain") == "llmvision") {
+                                val title = obj.optString("title", "")
+                                val entryId = obj.optString("entry_id", "")
+                                if (title.contains("Provider", ignoreCase = true) || entryId != "01KQXAJ92F47JVWEH9JA7AF55B") {
+                                    providerId = entryId
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "No se pudo consultar config_entries para llmvision: ${e.message}")
+            }
+
+            if (providerId.isNullOrBlank()) {
+                providerId = "01KQXB773AZRVMEANJTA2ZW04K"
+            }
+
+            // Preparar entidades candidatas: priorizar la entidad de snapshot si es cámara de batería o live view
+            val entitiesToTry = mutableListOf<String>()
+            if (cameraEntityId.contains("vista_en_vivo") || cameraEntityId.contains("live")) {
+                val snapshotEid = cameraEntityId.replace("vista_en_vivo", "snapshot").replace("live", "snapshot")
+                entitiesToTry.add(snapshotEid)
+            }
+            entitiesToTry.add(cameraEntityId)
+
+            for (eid in entitiesToTry) {
+                try {
+                    val prompt = if (question.isBlank()) "Describe lo que ves en la cámara con detalle y concisión en español." else question
+                    val payload = JSONObject().apply {
+                        put("provider", providerId)
+                        put("image_entity", JSONArray().apply { put(eid) })
+                        put("message", prompt)
+                        put("include_filename", false)
+                    }
+
+                    val req = Request.Builder()
+                        .url("${getBaseUrl()}/api/services/llmvision/image_analyzer?return_response")
+                        .addHeader("Authorization", "Bearer $haToken")
+                        .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+
+                    visionClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val bodyStr = resp.body?.string().orEmpty()
+                            val json = JSONObject(bodyStr)
+                            val serviceResponse = json.optJSONObject("service_response")
+                            val responseText = serviceResponse?.optString("response_text")
+                            if (!responseText.isNullOrBlank()) {
+                                return@withContext responseText.trim()
+                            }
+                        } else {
+                            Log.w(TAG, "llmvision falló para $eid (HTTP ${resp.code})")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error llamando llmvision para $eid: ${e.message}")
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error general en analyzeCameraWithLlmVision: ${e.message}")
             null
         }
     }

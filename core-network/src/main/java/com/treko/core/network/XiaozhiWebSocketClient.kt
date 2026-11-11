@@ -570,13 +570,13 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "view_camera")
-                        put("description", "Muestra una cámara de seguridad dentro de la aplicación Treko en tiempo real (instantánea o live stream), o lista las cámaras disponibles en Home Assistant.")
+                        put("description", "Muestra una cámara de seguridad dentro de la aplicación Treko en tiempo real (instantánea o live stream). Soporta nombres coloquiales como 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera', 'patio', 'entrada', etc. ¡ÚSALO SIEMPRE que el usuario pida ver, mostrar o poner una cámara!")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("camera", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre o ID de la cámara (ej. 'puerta', 'china', 'puerta principal', 'octoprint', 'todas')")
+                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera', 'entrada')")
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
@@ -588,17 +588,17 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "analyze_camera")
-                        put("description", "Obtiene la captura de una cámara de seguridad para que el modelo la interprete visualmente y responda preguntas del usuario sobre qué ocurre en esa área (ej. '¿hay alguien afuera?', '¿qué hay en la cochera?'), mostrándola simultáneamente en la app.")
+                        put("description", "Analiza e interpreta visualmente con Inteligencia Artificial lo que está sucediendo en una cámara de seguridad en tiempo real (ej. '¿quién está en la puerta?', '¿hay alguien en el jardín?', '¿puedes ver la cámara del timbre?', '¿qué ves en el ring?', '¿hay paquetes o autos?'), y la despliega en pantalla.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("camera", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre de la cámara (ej. 'puerta', 'china')")
+                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera')")
                                 })
                                 put("question", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Pregunta o instrucción de lo que se desea verificar en la imagen")
+                                    put("description", "Pregunta o instrucción de lo que se desea verificar o identificar en la imagen")
                                 })
                             })
                             put("required", JSONArray().apply { put("camera") })

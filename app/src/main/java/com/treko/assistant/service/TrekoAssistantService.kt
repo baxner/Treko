@@ -972,12 +972,12 @@ class TrekoAssistantService : Service() {
                         return@withContext "Home Assistant no está configurado en los ajustes de Treko."
                     }
                     val cameraQuery = args.optString("camera", "").trim()
-                    val question = args.optString("question", "Describe lo que se ve en la cámara.")
+                    val question = args.optString("question", "Describe detalladamente lo que se observa en la cámara.")
                     val haClient = HomeAssistantClient(haUrl, haToken)
 
                     val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
                     if (snapshotPair == null) {
-                        return@withContext "No fue posible obtener la captura de la cámara '$cameraQuery'."
+                        return@withContext "No fue posible obtener la captura de la cámara '$cameraQuery' en Home Assistant."
                     }
 
                     val (camInfo, bytes) = snapshotPair
@@ -990,8 +990,13 @@ class TrekoAssistantService : Service() {
                         isLive = false
                     )
 
-                    val sizeKb = bytes.size / 1024
-                    "Captura de la cámara '${camInfo.friendlyName}' obtenida con éxito (${sizeKb} KB, estado: ${camInfo.state}). La cámara está visible en la pantalla. Responde a la pregunta del usuario: '$question' confirmando que la imagen está en pantalla y describiendo el estado de la cámara."
+                    val visionAnalysis = haClient.analyzeCameraWithLlmVision(camInfo.entityId, question)
+                    if (!visionAnalysis.isNullOrBlank()) {
+                        "Análisis visual con Inteligencia Artificial de la cámara '${camInfo.friendlyName}': $visionAnalysis. (La imagen también se ha desplegado en pantalla para el usuario). Responde directamente al usuario explicando lo que se ve."
+                    } else {
+                        val sizeKb = bytes.size / 1024
+                        "Captura de la cámara '${camInfo.friendlyName}' obtenida con éxito (${sizeKb} KB, estado: ${camInfo.state}) y mostrada en pantalla. Explica al usuario que la imagen está visible en pantalla y la cámara se encuentra en estado '${camInfo.state}'."
+                    }
                 }
                 else -> "Herramienta '$name' no implementada en Treko."
             }
