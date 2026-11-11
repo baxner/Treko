@@ -95,13 +95,8 @@ class HomeAssistantClient(
             client.newCall(req).execute().use { resp ->
                 val respBody = resp.body?.string().orEmpty()
                 if (resp.isSuccessful) {
-                    val trimmed = respBody.trim()
-                    if (trimmed == "[]" && requestedEid.isNotBlank()) {
-                        "Aviso: El servicio '$d.$s' se ejecutó pero Home Assistant reportó 0 cambios en '$correctedEid'. Verifica si el dispositivo ya estaba en ese estado o está desconectado."
-                    } else {
-                        val correctionNote = if (correctedEid.isNotBlank() && correctedEid != requestedEid) " (corregido a '$correctedEid')" else ""
-                        "Servicio '$d.$s' ejecutado correctamente en Home Assistant$correctionNote."
-                    }
+                    val correctionNote = if (correctedEid.isNotBlank() && correctedEid != requestedEid) " (en '$correctedEid')" else ""
+                    "Servicio '$d.$s' ejecutado correctamente en Home Assistant$correctionNote."
                 } else {
                     "Error ejecutando servicio '$d.$s' en Home Assistant (${resp.code}): $respBody"
                 }
@@ -603,7 +598,14 @@ class HomeAssistantClient(
             "bocina" to listOf("altavoz", "speaker", "echo", "alexa"),
             "bocinas" to listOf("altavoces", "speakers", "echo", "alexa"),
             "altavoz" to listOf("bocina", "speaker", "echo", "alexa"),
-            "altavoces" to listOf("bocinas", "speakers", "echo", "alexa")
+            "altavoces" to listOf("bocinas", "speakers", "echo", "alexa"),
+            "cuarto" to listOf("dormitorio", "recamara", "recámara", "habitacion", "habitación", "pieza", "colors", "ambiente"),
+            "recamara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "colors", "ambiente"),
+            "recámara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "colors", "ambiente"),
+            "dormitorio" to listOf("cuarto", "recamara", "recámara", "habitacion", "habitación", "colors", "ambiente"),
+            "habitacion" to listOf("cuarto", "dormitorio", "recamara", "recámara", "colors", "ambiente"),
+            "habitación" to listOf("cuarto", "dormitorio", "recamara", "recámara", "colors", "ambiente"),
+            "sala" to listOf("living", "estancia")
         )
 
         val req = Request.Builder()
