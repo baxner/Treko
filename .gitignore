@@ -1,5 +1,6 @@
 *.iml
 .gradle
+.kotlin/
 /local.properties
 /.idea/caches
 /.idea/libraries
@@ -12,5 +13,18 @@
 */build
 .cxx
 *.aar
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+apk-output/
+build.log
+test.log
+captures/
+.navigation/
+*.hprof
 core-kws/libs/
 local-repo/**/*.aar
+local-repo/**/*.aar.tmp

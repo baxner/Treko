@@ -1,5 +1,7 @@
 package com.treko.core.mcp
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * Definición estándar de herramienta MCP (Model Context Protocol).
  */
@@ -14,7 +16,7 @@ data class McpTool(
  * Gestor y catálogo de herramientas MCP locales de Treko.
  */
 class McpDispatcher {
-    private val tools = mutableMapOf<String, McpTool>()
+    private val tools = ConcurrentHashMap<String, McpTool>()
 
     fun registerTool(tool: McpTool) {
         tools[tool.name] = tool

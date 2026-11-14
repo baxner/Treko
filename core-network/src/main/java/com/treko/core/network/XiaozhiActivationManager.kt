@@ -2,8 +2,11 @@ package com.treko.core.network
 
 import android.util.Log
 import com.treko.core.common.data.TrekoPreferences
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -68,33 +71,36 @@ class XiaozhiActivationManager(
                 .post(payload.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
-            val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: ""
-            if (!response.isSuccessful) {
-                return@withContext ActivationState.Error("Error HTTP ${response.code}: $body")
-            }
-
-            val json = JSONObject(body)
-
-            // Guardar configuración websocket si el servidor ya la envía
-            if (json.has("websocket")) {
-                val ws = json.getJSONObject("websocket")
-                if (ws.has("url")) prefs.xiaozhiWsUrl = ws.getString("url")
-                if (ws.has("token")) prefs.xiaozhiToken = ws.getString("token")
-            }
-
-            if (json.has("activation")) {
-                val act = json.getJSONObject("activation")
-                val code = act.optString("code", "")
-                val challenge = act.optString("challenge", "")
-                if (code.isNotBlank()) {
-                    return@withContext ActivationState.CodeReady(code, challenge)
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    return@withContext ActivationState.Error("Error HTTP ${response.code}: $body")
                 }
-            }
 
-            // Si el servidor no envía "activation", el dispositivo ya fue autorizado y vinculado
-            prefs.isXiaozhiLinked = true
-            return@withContext ActivationState.Success
+                val json = JSONObject(body)
+
+                // Guardar configuración websocket si el servidor ya la envía
+                if (json.has("websocket")) {
+                    val ws = json.getJSONObject("websocket")
+                    if (ws.has("url")) prefs.xiaozhiWsUrl = ws.getString("url")
+                    if (ws.has("token")) prefs.xiaozhiToken = ws.getString("token")
+                }
+
+                if (json.has("activation")) {
+                    val act = json.getJSONObject("activation")
+                    val code = act.optString("code", "")
+                    val challenge = act.optString("challenge", "")
+                    if (code.isNotBlank()) {
+                        return@withContext ActivationState.CodeReady(code, challenge)
+                    }
+                }
+
+                // Si el servidor no envía "activation", el dispositivo ya fue autorizado y vinculado
+                prefs.isXiaozhiLinked = true
+                return@withContext ActivationState.Success
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Error al solicitar código de activación", e)
             return@withContext ActivationState.Error(e.message ?: "Error desconocido")
@@ -110,6 +116,11 @@ class XiaozhiActivationManager(
         code: String,
         onStateChange: (ActivationState) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
+        if (challenge.isBlank()) {
+            onStateChange(ActivationState.Error("Challenge de activación vacío."))
+            return@withContext false
+        }
+
         val mac = prefs.macAddress
         val clientId = prefs.clientId
         val hmacKey = prefs.hmacKey
@@ -139,19 +150,20 @@ class XiaozhiActivationManager(
 
         // Polling hasta 80 veces (~4 minutos)
         for (attempt in 1..80) {
+            if (!currentCoroutineContext().isActive) return@withContext false
             try {
-                val response = client.newCall(request).execute()
-                val codeStatus = response.code
-                val resBody = response.body?.string() ?: ""
-                response.close()
-
-                if (codeStatus == 200) {
-                    prefs.isXiaozhiLinked = true
-                    onStateChange(ActivationState.Success)
-                    return@withContext true
+                client.newCall(request).execute().use { response ->
+                    val codeStatus = response.code
+                    if (codeStatus == 200) {
+                        prefs.isXiaozhiLinked = true
+                        onStateChange(ActivationState.Success)
+                        return@withContext true
+                    }
                 }
                 // HTTP 202 = Esperando que el usuario presione 'Link' en xiaozhi.me
                 delay(3000L)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 delay(3000L)
             }
@@ -160,7 +172,7 @@ class XiaozhiActivationManager(
         return@withContext false
     }
 
-    private fun computeHmacSha256(key: String, data: String): String {
+    internal fun computeHmacSha256(key: String, data: String): String {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(key.toByteArray(), "HmacSHA256"))
         val hash = mac.doFinal(data.toByteArray())

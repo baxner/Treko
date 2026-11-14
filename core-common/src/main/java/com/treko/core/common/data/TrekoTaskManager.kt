@@ -7,11 +7,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 class TrekoTaskManager(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("treko_tasks_store", Context.MODE_PRIVATE)
 
     companion object {
+        private val lock = Any()
         private val _tasksFlow = MutableStateFlow<List<TaskItem>>(emptyList())
         val tasksFlow: StateFlow<List<TaskItem>> = _tasksFlow.asStateFlow()
 
@@ -20,7 +22,7 @@ class TrekoTaskManager(context: Context) {
     }
 
     init {
-        synchronized(TrekoTaskManager::class.java) {
+        synchronized(lock) {
             if (!isInitialized) {
                 load()
                 isInitialized = true
@@ -48,20 +50,29 @@ class TrekoTaskManager(context: Context) {
         }
 
         if (items.isEmpty()) {
+            val isSpanish = Locale.getDefault().language == "es"
             items.addAll(
-                listOf(
-                    TaskItem(1, "Revisar sensores de temperatura en Home Assistant", false),
-                    TaskItem(2, "Completar sesión Pomodoro de 25 min", true),
-                    TaskItem(3, "Configurar palabra de activación 'Treko' en la oficina", false)
-                )
+                if (isSpanish) {
+                    listOf(
+                        TaskItem(1, "Revisar sensores en Home Assistant", false),
+                        TaskItem(2, "Completar sesión Pomodoro de 25 min", true),
+                        TaskItem(3, "Calibrar palabra de activación con mi voz", false)
+                    )
+                } else {
+                    listOf(
+                        TaskItem(1, "Check smart home sensors in Home Assistant", false),
+                        TaskItem(2, "Complete a 25 min Pomodoro session", true),
+                        TaskItem(3, "Calibrate wake word with your voice", false)
+                    )
+                }
             )
-            saveList(items)
+            saveListLocked(items)
         }
 
         _tasksFlow.value = items
     }
 
-    private fun saveList(items: List<TaskItem>) {
+    private fun saveListLocked(items: List<TaskItem>) {
         val array = JSONArray()
         for (item in items) {
             val obj = JSONObject().apply {
@@ -76,24 +87,30 @@ class TrekoTaskManager(context: Context) {
     }
 
     fun addTask(title: String): TaskItem {
-        val current = _tasksFlow.value.toMutableList()
-        val nextId = (current.maxOfOrNull { it.id } ?: 0) + 1
-        val newTask = TaskItem(nextId, title.trim(), false)
-        current.add(newTask)
-        saveList(current)
-        return newTask
+        synchronized(lock) {
+            val current = _tasksFlow.value.toMutableList()
+            val nextId = (current.maxOfOrNull { it.id } ?: 0) + 1
+            val newTask = TaskItem(nextId, title.trim(), false)
+            current.add(newTask)
+            saveListLocked(current)
+            return newTask
+        }
     }
 
     fun toggleTask(id: Int) {
-        val current = _tasksFlow.value.map {
-            if (it.id == id) it.copy(isDone = !it.isDone) else it
+        synchronized(lock) {
+            val current = _tasksFlow.value.map {
+                if (it.id == id) it.copy(isDone = !it.isDone) else it
+            }
+            saveListLocked(current)
         }
-        saveList(current)
     }
 
     fun deleteTask(id: Int) {
-        val current = _tasksFlow.value.filter { it.id != id }
-        saveList(current)
+        synchronized(lock) {
+            val current = _tasksFlow.value.filter { it.id != id }
+            saveListLocked(current)
+        }
     }
 
     fun listTasksSummary(): String {

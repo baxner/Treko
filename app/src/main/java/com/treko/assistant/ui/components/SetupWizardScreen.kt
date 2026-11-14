@@ -4,39 +4,94 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.VpnKey
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.treko.assistant.ui.theme.*
+import com.treko.assistant.R
+import com.treko.assistant.ui.theme.CardBorder
+import com.treko.assistant.ui.theme.DeepBackground
+import com.treko.assistant.ui.theme.NeonCyan
+import com.treko.assistant.ui.theme.NeonPurple
+import com.treko.assistant.ui.theme.SurfaceDark
+import com.treko.assistant.ui.theme.TextPrimary
+import com.treko.assistant.ui.theme.TextSecondary
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.model.TrekoEmotion
+import com.treko.core.common.model.TrekoState
 import com.treko.core.network.ActivationState
 import com.treko.core.network.XiaozhiActivationManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
 
 enum class WizardStep {
@@ -52,13 +107,11 @@ fun SetupWizardScreen(
     val coroutineScope = rememberCoroutineScope()
     var currentStep by remember { mutableStateOf(WizardStep.WELCOME) }
 
-    // Campos temporales
     var wsUrl by remember { mutableStateOf(prefs.xiaozhiWsUrl) }
     var wsToken by remember { mutableStateOf(prefs.xiaozhiToken) }
     var haUrl by remember { mutableStateOf(prefs.haUrl) }
     var haToken by remember { mutableStateOf(prefs.haToken) }
 
-    // Estados de prueba
     var xiaozhiTesting by remember { mutableStateOf(false) }
     var xiaozhiTestResult by remember { mutableStateOf<String?>(null) }
     var haTesting by remember { mutableStateOf(false) }
@@ -76,80 +129,92 @@ fun SetupWizardScreen(
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Barra de progreso de pasos
             StepProgressBar(currentStep = currentStep)
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            when (currentStep) {
-                WizardStep.WELCOME -> {
-                    WelcomeStep(
-                        onNext = { currentStep = WizardStep.XIAOZHI }
-                    )
-                }
+            AnimatedContent(
+                targetState = currentStep,
+                transitionSpec = {
+                    val forward = targetState.ordinal >= initialState.ordinal
+                    if (forward) {
+                        (slideInHorizontally { it / 4 } + fadeIn()) togetherWith
+                            (slideOutHorizontally { -it / 4 } + fadeOut())
+                    } else {
+                        (slideInHorizontally { -it / 4 } + fadeIn()) togetherWith
+                            (slideOutHorizontally { it / 4 } + fadeOut())
+                    }
+                },
+                label = "WizardStepTransition"
+            ) { step ->
+                when (step) {
+                    WizardStep.WELCOME -> {
+                        WelcomeStep(
+                            onNext = { currentStep = WizardStep.XIAOZHI }
+                        )
+                    }
 
-                WizardStep.XIAOZHI -> {
-                    XiaozhiStep(
-                        prefs = prefs,
-                        wsUrl = wsUrl,
-                        onWsUrlChange = { wsUrl = it },
-                        wsToken = wsToken,
-                        onWsTokenChange = { wsToken = it },
-                        isTesting = xiaozhiTesting,
-                        testResult = xiaozhiTestResult,
-                        onTestConnection = {
-                            coroutineScope.launch {
-                                xiaozhiTesting = true
-                                xiaozhiTestResult = null
-                                xiaozhiTestResult = testXiaozhiConnection(wsUrl, wsToken)
-                                xiaozhiTesting = false
+                    WizardStep.XIAOZHI -> {
+                        XiaozhiStep(
+                            prefs = prefs,
+                            wsUrl = wsUrl,
+                            onWsUrlChange = { wsUrl = it },
+                            wsToken = wsToken,
+                            onWsTokenChange = { wsToken = it },
+                            isTesting = xiaozhiTesting,
+                            testResult = xiaozhiTestResult,
+                            onTestConnection = {
+                                coroutineScope.launch {
+                                    xiaozhiTesting = true
+                                    xiaozhiTestResult = null
+                                    xiaozhiTestResult = testXiaozhiConnection(context, wsUrl, wsToken, prefs.macAddress, prefs.clientId)
+                                    xiaozhiTesting = false
+                                }
+                            },
+                            onBack = { currentStep = WizardStep.WELCOME },
+                            onNext = {
+                                prefs.xiaozhiWsUrl = wsUrl
+                                prefs.xiaozhiToken = wsToken
+                                currentStep = WizardStep.HOME_ASSISTANT
                             }
-                        },
-                        onBack = { currentStep = WizardStep.WELCOME },
-                        onNext = {
-                            prefs.xiaozhiWsUrl = wsUrl
-                            prefs.xiaozhiToken = wsToken
-                            currentStep = WizardStep.HOME_ASSISTANT
-                        }
-                    )
-                }
+                        )
+                    }
 
-                WizardStep.HOME_ASSISTANT -> {
-                    HomeAssistantStep(
-                        haUrl = haUrl,
-                        onHaUrlChange = { haUrl = it },
-                        haToken = haToken,
-                        onHaTokenChange = { haToken = it },
-                        isTesting = haTesting,
-                        testResult = haTestResult,
-                        onTestConnection = {
-                            coroutineScope.launch {
-                                haTesting = true
-                                haTestResult = null
-                                haTestResult = testHaConnection(haUrl, haToken)
-                                haTesting = false
+                    WizardStep.HOME_ASSISTANT -> {
+                        HomeAssistantStep(
+                            haUrl = haUrl,
+                            onHaUrlChange = { haUrl = it },
+                            haToken = haToken,
+                            onHaTokenChange = { haToken = it },
+                            isTesting = haTesting,
+                            testResult = haTestResult,
+                            onTestConnection = {
+                                coroutineScope.launch {
+                                    haTesting = true
+                                    haTestResult = null
+                                    haTestResult = testHaConnection(context, haUrl, haToken)
+                                    haTesting = false
+                                }
+                            },
+                            onBack = { currentStep = WizardStep.XIAOZHI },
+                            onSkip = { currentStep = WizardStep.COMPLETED },
+                            onNext = {
+                                prefs.haUrl = haUrl
+                                prefs.haToken = haToken
+                                currentStep = WizardStep.COMPLETED
                             }
-                        },
-                        onBack = { currentStep = WizardStep.XIAOZHI },
-                        onSkip = {
-                            currentStep = WizardStep.COMPLETED
-                        },
-                        onNext = {
-                            prefs.haUrl = haUrl
-                            prefs.haToken = haToken
-                            currentStep = WizardStep.COMPLETED
-                        }
-                    )
-                }
+                        )
+                    }
 
-                WizardStep.COMPLETED -> {
-                    CompletedStep(
-                        prefs = prefs,
-                        onStart = {
-                            prefs.isOnboardingCompleted = true
-                            onFinish()
-                        }
-                    )
+                    WizardStep.COMPLETED -> {
+                        CompletedStep(
+                            prefs = prefs,
+                            onStart = {
+                                prefs.isOnboardingCompleted = true
+                                onFinish()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -158,7 +223,7 @@ fun SetupWizardScreen(
 
 @Composable
 fun StepProgressBar(currentStep: WizardStep) {
-    val steps = listOf(WizardStep.WELCOME, WizardStep.XIAOZHI, WizardStep.HOME_ASSISTANT, WizardStep.COMPLETED)
+    val steps = WizardStep.entries
     val currentIndex = steps.indexOf(currentStep)
 
     Row(
@@ -168,7 +233,7 @@ fun StepProgressBar(currentStep: WizardStep) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        steps.forEachIndexed { index, step ->
+        steps.forEachIndexed { index, _ ->
             val isActive = index <= currentIndex
             val isCurrent = index == currentIndex
 
@@ -193,7 +258,7 @@ fun StepProgressBar(currentStep: WizardStep) {
             }
 
             if (index < steps.size - 1) {
-                Divider(
+                HorizontalDivider(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 4.dp),
@@ -213,7 +278,7 @@ fun WelcomeStep(onNext: () -> Unit) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Text(
-            text = "¡Hola! Soy Treko",
+            text = stringResource(R.string.wizard_welcome_title),
             color = NeonCyan,
             fontSize = 28.sp,
             fontWeight = FontWeight.Bold
@@ -221,11 +286,12 @@ fun WelcomeStep(onNext: () -> Unit) {
 
         TrekoFace(
             emotion = TrekoEmotion.HAPPY,
-            size = 180.dp
+            size = 170.dp,
+            state = TrekoState.IDLE
         )
 
         Text(
-            text = "Tu asistente personal de voz nativo, ultra-rápido y 100% privado.",
+            text = stringResource(R.string.wizard_welcome_subtitle),
             color = TextPrimary,
             fontSize = 15.sp,
             textAlign = TextAlign.Center
@@ -239,10 +305,10 @@ fun WelcomeStep(onNext: () -> Unit) {
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("¿Por qué Treko es diferente?", color = NeonPurple, fontWeight = FontWeight.Bold)
-                Text("• Privacidad Zero-Leak: La detección de voz se ejecuta 100% en tu procesador local.", color = TextPrimary, fontSize = 13.sp)
-                Text("• Activación instantánea: Di en voz alta \"Treko\" en cualquier momento.", color = TextPrimary, fontSize = 13.sp)
-                Text("• Control de Luces y Hogar: Soporte nativo para Home Assistant.", color = TextPrimary, fontSize = 13.sp)
+                Text(stringResource(R.string.wizard_why_title), color = NeonPurple, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.wizard_why_privacy), color = TextPrimary, fontSize = 13.sp)
+                Text(stringResource(R.string.wizard_why_wake), color = TextPrimary, fontSize = 13.sp)
+                Text(stringResource(R.string.wizard_why_ha), color = TextPrimary, fontSize = 13.sp)
             }
         }
 
@@ -256,9 +322,9 @@ fun WelcomeStep(onNext: () -> Unit) {
                 .height(50.dp),
             shape = RoundedCornerShape(12.dp)
         ) {
-            Text("Comenzar Configuración", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(stringResource(R.string.wizard_start_setup), fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(modifier = Modifier.width(8.dp))
-            Icon(Icons.Default.ArrowForward, contentDescription = null)
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null)
         }
     }
 }
@@ -278,11 +344,18 @@ fun XiaozhiStep(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val activationManager = remember { XiaozhiActivationManager(prefs) }
-    var activationState by remember { mutableStateOf<ActivationState>(ActivationState.Idle) }
+    val activationManager = remember(prefs) { XiaozhiActivationManager(prefs) }
+    var activationState by remember {
+        mutableStateOf<ActivationState>(
+            if (prefs.isXiaozhiLinked) ActivationState.Success else ActivationState.Idle
+        )
+    }
+    var activationJob by remember { mutableStateOf<Job?>(null) }
+    var isWsTokenVisible by remember { mutableStateOf(false) }
 
     fun requestActivationCode() {
-        coroutineScope.launch {
+        activationJob?.cancel()
+        activationJob = coroutineScope.launch {
             activationState = ActivationState.FetchingCode
             val result = activationManager.fetchActivationCode()
             activationState = result
@@ -294,10 +367,15 @@ fun XiaozhiStep(
         }
     }
 
-    // Auto-solicitar el código al abrir este paso
     LaunchedEffect(Unit) {
-        if (!prefs.isXiaozhiLinked) {
+        if (!prefs.isXiaozhiLinked && activationState is ActivationState.Idle) {
             requestActivationCode()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activationJob?.cancel()
         }
     }
 
@@ -305,22 +383,21 @@ fun XiaozhiStep(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Paso 1: Vincular con Xiaozhi", color = NeonCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.wizard_step1_title), color = NeonCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Xiaozhi es el motor de IA que sintetiza la voz y gestiona las conversaciones de Treko.",
+            stringResource(R.string.wizard_step1_desc),
             color = TextSecondary,
             fontSize = 13.sp
         )
 
-        // Tarjeta con la dirección MAC oficial para xiaozhi.me
         Card(
             colors = CardDefaults.cardColors(containerColor = SurfaceDark),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("1. Dirección MAC de este Treko:", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text("En xiaozhi.me selecciona \"Añadir dispositivo\" e introduce esta dirección MAC:", color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_mac_title), color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(stringResource(R.string.wizard_mac_desc), color = TextPrimary, fontSize = 12.sp)
 
                 Row(
                     modifier = Modifier
@@ -331,21 +408,28 @@ fun XiaozhiStep(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("MAC Address:", color = TextSecondary, fontSize = 11.sp)
+                        Text(stringResource(R.string.wizard_mac_label), color = TextSecondary, fontSize = 11.sp)
                         Text(prefs.macAddress, color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                     IconButton(onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("MAC Address", prefs.macAddress))
-                        Toast.makeText(context, "MAC copiada: ${prefs.macAddress}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.wizard_mac_copied, prefs.macAddress),
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copiar MAC", tint = NeonCyan)
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = stringResource(R.string.wizard_copy_mac),
+                            tint = NeonCyan
+                        )
                     }
                 }
             }
         }
 
-        // Tarjeta de Código de Verificación de 6 Dígitos
         Card(
             colors = CardDefaults.cardColors(containerColor = SurfaceDark),
             border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)),
@@ -358,7 +442,7 @@ fun XiaozhiStep(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "2. Código de Verificación de 6 Dígitos",
+                    stringResource(R.string.wizard_code_title),
                     color = NeonCyan,
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.sp
@@ -367,7 +451,7 @@ fun XiaozhiStep(
                 when (val state = activationState) {
                     is ActivationState.Idle -> {
                         Text(
-                            "Presiona el botón para solicitar el código que te pide xiaozhi.me.",
+                            stringResource(R.string.wizard_code_idle_desc),
                             color = TextSecondary,
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center
@@ -378,19 +462,22 @@ fun XiaozhiStep(
                         ) {
                             Icon(Icons.Default.VpnKey, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Generar Código de 6 Dígitos", fontWeight = FontWeight.Bold)
+                            Text(stringResource(R.string.wizard_generate_code), fontWeight = FontWeight.Bold)
                         }
                     }
 
                     is ActivationState.FetchingCode -> {
                         CircularProgressIndicator(color = NeonCyan, modifier = Modifier.size(32.dp))
-                        Text("Obteniendo código del servidor Xiaozhi…", color = TextSecondary, fontSize = 12.sp)
+                        Text(stringResource(R.string.wizard_fetching_code), color = TextSecondary, fontSize = 12.sp)
                     }
 
                     is ActivationState.CodeReady, is ActivationState.PollingApproval -> {
-                        val code = if (state is ActivationState.CodeReady) state.code else (state as ActivationState.PollingApproval).code
+                        val code = if (state is ActivationState.CodeReady) {
+                            state.code
+                        } else {
+                            (state as ActivationState.PollingApproval).code
+                        }
 
-                        // Mostrar los 6 dígitos en cajas llamativas
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             code.forEach { char ->
                                 Box(
@@ -415,22 +502,31 @@ fun XiaozhiStep(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Código: $code",
+                                text = stringResource(R.string.wizard_code_value, code),
                                 color = Color(0xFF00E676),
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
                             )
                             IconButton(onClick = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Código Xiaozhi", code))
-                                Toast.makeText(context, "Código copiado: $code", Toast.LENGTH_SHORT).show()
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Xiaozhi Code", code))
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.wizard_code_copied, code),
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Copiar Código", tint = NeonCyan, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    Icons.Default.ContentCopy,
+                                    contentDescription = stringResource(R.string.wizard_copy_code),
+                                    tint = NeonCyan,
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
 
                         Text(
-                            "Escribe este código en la ventana de xiaozhi.me y presiona 'Link'",
+                            stringResource(R.string.wizard_code_enter_hint),
                             color = TextPrimary,
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center
@@ -441,39 +537,70 @@ fun XiaozhiStep(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = NeonPurple)
-                            Text("Esperando a que presiones 'Link' en xiaozhi.me…", color = TextSecondary, fontSize = 11.sp)
+                            Text(stringResource(R.string.wizard_waiting_approval), color = TextSecondary, fontSize = 11.sp)
                         }
                     }
 
                     is ActivationState.Success -> {
                         Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF00E676), modifier = Modifier.size(40.dp))
                         Text(
-                            "¡Dispositivo Vinculado Exitosamente con Xiaozhi! 🎉",
+                            text = if (prefs.isXiaozhiLinked) {
+                                stringResource(R.string.wizard_linked_success)
+                            } else {
+                                stringResource(R.string.wizard_code_already_linked)
+                            },
                             color = Color(0xFF00E676),
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
                             textAlign = TextAlign.Center
                         )
+                        OutlinedButton(onClick = { requestActivationCode() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.wizard_relink_device), fontSize = 12.sp)
+                        }
                     }
 
                     is ActivationState.Error -> {
-                        Text("Error: ${state.message}", color = Color(0xFFFF5252), fontSize = 12.sp, textAlign = TextAlign.Center)
+                        Text(
+                            stringResource(R.string.wizard_error_prefix, state.message),
+                            color = Color(0xFFFF5252),
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
                         OutlinedButton(onClick = { requestActivationCode() }) {
                             Icon(Icons.Default.Refresh, contentDescription = null)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Reintentar Código")
+                            Text(stringResource(R.string.wizard_retry_code))
                         }
                     }
                 }
             }
         }
 
-        // Campos opcionales / avanzados de WebSocket
         OutlinedTextField(
             value = wsUrl,
             onValueChange = onWsUrlChange,
-            label = { Text("URL WebSocket de Xiaozhi (Avanzado)") },
-            placeholder = { Text("wss://api.tenclass.net/xiaozhi/v1/") },
+            label = { Text(stringResource(R.string.wizard_ws_url_advanced)) },
+            placeholder = { Text(TrekoPreferences.DEFAULT_XIAOZHI_WS_URL) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+
+        OutlinedTextField(
+            value = wsToken,
+            onValueChange = onWsTokenChange,
+            label = { Text(stringResource(R.string.wizard_ws_token_optional)) },
+            visualTransformation = if (isWsTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { isWsTokenVisible = !isWsTokenVisible }) {
+                    Icon(
+                        imageVector = if (isWsTokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = null,
+                        tint = TextSecondary
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
@@ -489,10 +616,10 @@ fun XiaozhiStep(
                 shape = RoundedCornerShape(10.dp)
             ) {
                 if (isTesting) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = NeonCyan)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = NeonCyan, strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
-                Text("Probar Conexión", color = NeonCyan)
+                Text(stringResource(R.string.action_test_connection), color = NeonCyan)
             }
 
             if (testResult != null) {
@@ -510,18 +637,22 @@ fun XiaozhiStep(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(
                 onClick = onBack,
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Atrás", color = TextPrimary)
+                Text(stringResource(R.string.action_back), color = TextPrimary)
             }
             Button(
                 onClick = onNext,
                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Siguiente", fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.action_next), fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -540,13 +671,15 @@ fun HomeAssistantStep(
     onSkip: () -> Unit,
     onNext: () -> Unit
 ) {
+    var isHaTokenVisible by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Paso 2: Home Assistant (Opcional)", color = NeonCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.wizard_step2_title), color = NeonCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Conecta tu domótica para que Treko encienda luces, regule temperatura de color (Kelvin) y controle dispositivos por voz.",
+            stringResource(R.string.wizard_step2_desc),
             color = TextSecondary,
             fontSize = 13.sp
         )
@@ -556,18 +689,18 @@ fun HomeAssistantStep(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("🔑 Cómo generar tu Token de Home Assistant:", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text("1. Abre Home Assistant y haz clic en tu Nombre de Usuario (perfil).", color = TextPrimary, fontSize = 12.sp)
-                Text("2. Baja a la sección \"Tokens de acceso de larga duración\".", color = TextPrimary, fontSize = 12.sp)
-                Text("3. Haz clic en \"Crear token\", nómbralo \"Treko\" y cópialo aquí.", color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_ha_guide_title), color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(stringResource(R.string.wizard_ha_guide_1), color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_ha_guide_2), color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_ha_guide_3), color = TextPrimary, fontSize = 12.sp)
             }
         }
 
         OutlinedTextField(
             value = haUrl,
             onValueChange = onHaUrlChange,
-            label = { Text("URL del Servidor Home Assistant") },
-            placeholder = { Text("ej. http://homeassistant.local:8123") },
+            label = { Text(stringResource(R.string.wizard_ha_url_label)) },
+            placeholder = { Text(stringResource(R.string.wizard_ha_url_placeholder)) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
@@ -575,8 +708,18 @@ fun HomeAssistantStep(
         OutlinedTextField(
             value = haToken,
             onValueChange = onHaTokenChange,
-            label = { Text("Token de Acceso de Larga Duración") },
-            placeholder = { Text("Pega tu Token de HA aquí") },
+            label = { Text(stringResource(R.string.wizard_ha_token_label)) },
+            placeholder = { Text(stringResource(R.string.wizard_ha_token_placeholder)) },
+            visualTransformation = if (isHaTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { isHaTokenVisible = !isHaTokenVisible }) {
+                    Icon(
+                        imageVector = if (isHaTokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = null,
+                        tint = TextSecondary
+                    )
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
@@ -592,10 +735,10 @@ fun HomeAssistantStep(
                 shape = RoundedCornerShape(10.dp)
             ) {
                 if (isTesting) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = NeonCyan)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = NeonCyan, strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
-                Text("Probar Conexión", color = NeonCyan)
+                Text(stringResource(R.string.action_test_connection), color = NeonCyan)
             }
 
             if (testResult != null) {
@@ -613,25 +756,31 @@ fun HomeAssistantStep(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(
                 onClick = onBack,
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Atrás", color = TextPrimary)
+                Text(stringResource(R.string.action_back), color = TextPrimary)
             }
             OutlinedButton(
                 onClick = onSkip,
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Omitir", color = TextSecondary)
+                Text(stringResource(R.string.action_skip), color = TextSecondary)
             }
             Button(
                 onClick = onNext,
                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Guardar", fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.action_save_short), fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -642,20 +791,22 @@ fun CompletedStep(
     prefs: TrekoPreferences,
     onStart: () -> Unit
 ) {
+    val wakeWord = prefs.customWakeWord.ifBlank { stringResource(R.string.wake_word) }
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        Text("¡Todo Listo!", color = NeonCyan, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.wizard_done_title), color = NeonCyan, fontSize = 28.sp, fontWeight = FontWeight.Bold)
 
         TrekoFace(
             emotion = TrekoEmotion.HAPPY,
-            size = 180.dp
+            size = 170.dp,
+            state = TrekoState.IDLE
         )
 
         Text(
-            text = "Treko está configurado y listo para responderte.",
+            text = stringResource(R.string.wizard_done_subtitle),
             color = TextPrimary,
             fontSize = 15.sp,
             textAlign = TextAlign.Center
@@ -666,11 +817,19 @@ fun CompletedStep(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Estado de la Configuración:", color = NeonPurple, fontWeight = FontWeight.Bold)
-                Text("• Activación por voz: Activa (Di \"Treko\")", color = Color(0xFF00E676), fontSize = 13.sp)
-                Text("• Servidor Xiaozhi: ${prefs.xiaozhiWsUrl.take(28)}…", color = Color(0xFF00E676), fontSize = 13.sp)
-                val haStatus = if (prefs.haUrl.isNotBlank()) "Configurado (${prefs.haUrl.take(25)}…)" else "Omitido (puedes añadirlo en Ajustes)"
-                Text("• Home Assistant: $haStatus", color = TextPrimary, fontSize = 13.sp)
+                Text(stringResource(R.string.wizard_summary_title), color = NeonPurple, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.wizard_summary_wake, wakeWord), color = Color(0xFF00E676), fontSize = 13.sp)
+                Text(
+                    stringResource(R.string.wizard_summary_xiaozhi, "${prefs.xiaozhiWsUrl.take(28)}…"),
+                    color = Color(0xFF00E676),
+                    fontSize = 13.sp
+                )
+                val haStatus = if (prefs.haUrl.isNotBlank()) {
+                    stringResource(R.string.wizard_summary_ha_ok, "${prefs.haUrl.take(25)}…")
+                } else {
+                    stringResource(R.string.wizard_summary_ha_skip)
+                }
+                Text(haStatus, color = TextPrimary, fontSize = 13.sp)
             }
         }
 
@@ -682,53 +841,88 @@ fun CompletedStep(
                 .height(52.dp),
             shape = RoundedCornerShape(12.dp)
         ) {
-            Text("Entrar a Treko", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text(stringResource(R.string.wizard_enter_treko), fontWeight = FontWeight.Bold, fontSize = 18.sp)
             Spacer(modifier = Modifier.width(8.dp))
             Icon(Icons.Default.Check, contentDescription = null)
         }
     }
 }
 
-suspend fun testXiaozhiConnection(url: String, token: String): String = withContext(Dispatchers.IO) {
-    if (url.isBlank()) return@withContext "✗ URL vacía"
+private val sharedTestHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .build()
+}
+
+suspend fun testXiaozhiConnection(
+    context: Context,
+    url: String,
+    token: String,
+    macAddress: String = "00:00:00:00:00:00",
+    clientId: String = "treko-test"
+): String = withContext(Dispatchers.IO) {
+    val clean = url.trim()
+    if (clean.isBlank()) return@withContext context.getString(R.string.test_conn_empty_url)
     try {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .build()
-        val request = Request.Builder()
-            .url(url.replace("wss://", "https://").replace("ws://", "http://"))
-            .addHeader("Authorization", "Bearer $token")
-            .build()
-        val response = client.newCall(request).execute()
-        if (response.code in 200..499) {
-            "✓ Conexión exitosa"
+        val deferred = CompletableDeferred<String>()
+        val reqBuilder = Request.Builder()
+            .url(clean)
+            .addHeader("Device-Id", macAddress)
+            .addHeader("Client-Id", clientId)
+            .addHeader("Protocol-Version", "1")
+        if (token.isNotBlank()) {
+            reqBuilder.addHeader("Authorization", "Bearer ${token.trim()}")
+        }
+        val ws = sharedTestHttpClient.newWebSocket(reqBuilder.build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                deferred.complete(context.getString(R.string.test_conn_ok))
+                webSocket.close(1000, "connection test")
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val code = response?.code
+                val msg = if (code != null) {
+                    context.getString(R.string.test_conn_http_err, code)
+                } else {
+                    context.getString(R.string.test_conn_fail, t.message?.take(28) ?: "error")
+                }
+                deferred.complete(msg)
+            }
+        })
+        val result = withTimeoutOrNull(5500L) { deferred.await() }
+        if (result == null) {
+            ws.cancel()
+            context.getString(R.string.test_conn_fail, "timeout")
         } else {
-            "✗ Error HTTP ${response.code}"
+            result
         }
     } catch (e: Exception) {
-        "✗ Fallo: ${e.message?.take(20)}"
+        context.getString(R.string.test_conn_fail, e.message?.take(28) ?: "error")
     }
 }
 
-suspend fun testHaConnection(url: String, token: String): String = withContext(Dispatchers.IO) {
-    if (url.isBlank() || token.isBlank()) return@withContext "✗ URL o Token vacíos"
+suspend fun testHaConnection(
+    context: Context,
+    url: String,
+    token: String
+): String = withContext(Dispatchers.IO) {
+    if (url.isBlank() || token.isBlank()) return@withContext context.getString(R.string.test_conn_empty_ha)
     try {
         var cleanUrl = url.trim().removeSuffix("/")
         if (cleanUrl.endsWith("/api")) cleanUrl = cleanUrl.removeSuffix("/api")
-        val client = OkHttpClient.Builder()
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .build()
         val request = Request.Builder()
             .url("$cleanUrl/api/")
             .addHeader("Authorization", "Bearer ${token.trim()}")
             .build()
-        val response = client.newCall(request).execute()
-        if (response.isSuccessful) {
-            "✓ Conectado a HA"
-        } else {
-            "✗ HTTP ${response.code}"
+        sharedTestHttpClient.newCall(request).execute().use { response ->
+            if (response.isSuccessful) {
+                context.getString(R.string.test_conn_ha_ok)
+            } else {
+                context.getString(R.string.test_conn_http_err, response.code)
+            }
         }
     } catch (e: Exception) {
-        "✗ Fallo: ${e.message?.take(20)}"
+        context.getString(R.string.test_conn_fail, e.message?.take(28) ?: "error")
     }
 }

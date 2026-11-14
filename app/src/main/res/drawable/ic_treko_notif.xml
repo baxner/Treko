@@ -1,0 +1,32 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Monochrome Treko emblem for notifications, QS tile & Android themed icons -->
+    <path
+        android:pathData="M12,2.2 A9.8,9.8 0 1,1 11.99,2.2 Z"
+        android:strokeWidth="1.9"
+        android:strokeColor="#FFFFFF"
+        android:fillColor="#00000000" />
+
+    <!-- Left & Right expressive eyes -->
+    <path
+        android:pathData="M7,8.2 L9.5,8.2 A1.3,1.3 0 0,1 10.8,9.5 L10.8,10.5 A1.3,1.3 0 0,1 9.5,11.8 L7,11.8 A1.3,1.3 0 0,1 5.7,10.5 L5.7,9.5 A1.3,1.3 0 0,1 7,8.2 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M14.5,8.2 L17,8.2 A1.3,1.3 0 0,1 18.3,9.5 L18.3,10.5 A1.3,1.3 0 0,1 17,11.8 L14.5,11.8 A1.3,1.3 0 0,1 13.2,10.5 L13.2,9.5 A1.3,1.3 0 0,1 14.5,8.2 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- 3-bar Voice pulse -->
+    <path
+        android:pathData="M8.5,14.8 A0.8,0.8 0 0,1 10.1,14.8 L10.1,16.4 A0.8,0.8 0 0,1 8.5,16.4 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M11.2,13.9 A0.8,0.8 0 0,1 12.8,13.9 L12.8,17.3 A0.8,0.8 0 0,1 11.2,17.3 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M13.9,14.8 A0.8,0.8 0 0,1 15.5,14.8 L15.5,16.4 A0.8,0.8 0 0,1 13.9,16.4 Z"
+        android:fillColor="#FFFFFF" />
+</vector>

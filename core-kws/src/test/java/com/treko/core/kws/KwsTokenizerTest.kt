@@ -156,4 +156,19 @@ class KwsTokenizerTest {
         val formatted = tokenizer.formatKeywordLine("Oye Treko", 3.0f, 0.05f)
         assertEquals("\u2581O Y E \u2581T RE K O :3.0 #0.05 @OYE_TREKO", formatted)
     }
+
+    @Test
+    fun testHyphenatedPhraseAndTokenValidation() {
+        val tokens = tokenizer.tokenizePhrase("Hey-Treko")
+        assertEquals(listOf("\u2581HE", "Y", "\u2581T", "RE", "K", "O"), tokens)
+        assertTrue(tokenizer.validateTokens(tokens))
+    }
+
+    @Test
+    fun testPhoneticVariantsGeneration() {
+        val variants = tokenizer.generatePhoneticVariants("Kira", maxVariants = 4)
+        assertTrue(variants.contains("KIRA"))
+        assertTrue(variants.contains("CIRA"))
+        assertTrue(variants.size <= 4)
+    }
 }

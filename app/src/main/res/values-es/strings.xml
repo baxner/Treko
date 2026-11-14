@@ -1,27 +1,405 @@
 <resources>
     <string name="app_name">Treko Asistente</string>
+    <string name="assistant_header_title">%1$s Asistente</string>
     <string name="wake_word">Treko</string>
-    <string name="status_idle">En reposo… di \"Treko\" para despertar</string>
+
+    <!-- Estado y Servicio -->
+    <string name="status_idle">En reposo… di \"%1$s\" para despertar</string>
+    <string name="status_sleepy">Durmiendo (Zzz… di \"%1$s\" para despertar)</string>
     <string name="status_listening">Escuchándote…</string>
     <string name="status_thinking">Pensando…</string>
     <string name="status_speaking">Hablando…</string>
+    <string name="status_error">Error de conexión</string>
+    <string name="status_follow_up">¿Deseas algo más?</string>
+    <string name="status_thinking_timeout">Sin respuesta del servidor. Intenta de nuevo.</string>
+    <string name="status_goodbye">¡Hasta luego! Zzz…</string>
+    <string name="status_mic_permission_missing">Se requiere permiso de micrófono</string>
+    <string name="status_muted">Micrófono silenciado — toca Activar para escuchar</string>
+    <string name="status_cinema_idle">Modo Cine · Di \"%1$s\" o toca el micro</string>
+    <string name="status_foreign_voice_ignored">Voz de fondo ignorada · Sigo escuchando…</string>
+
+    <string name="speaker_you">Tú</string>
+    <string name="speaker_treko">Treko</string>
+
+    <!-- Tile y Notificación -->
+    <string name="tile_open_assistant">Abrir Treko Asistente</string>
+    <string name="notification_channel_name">Servicio de Voz Treko AI</string>
+    <string name="notification_channel_desc">Mantiene activa la escucha local de activación para Treko</string>
+    <string name="notification_action_talk">Hablar</string>
+    <string name="notification_action_stop">Detener</string>
+    <string name="notification_action_mute">Silenciar</string>
+    <string name="notification_action_unmute">Activar micro</string>
+
+    <!-- Pestañas de Navegación -->
     <string name="tab_face">Cara</string>
     <string name="tab_habits">Hábitos</string>
     <string name="tab_tasks">Tareas</string>
     <string name="tab_timer">Temporizador</string>
     <string name="tab_settings">Ajustes</string>
-    <string name="settings_ha_title">Home Assistant</string>
+
+    <!-- Insignias de Estado y Conexión -->
+    <string name="state_idle">REPOSO</string>
+    <string name="state_listening">ESCUCHANDO</string>
+    <string name="state_thinking">PENSANDO</string>
+    <string name="state_speaking">HABLANDO</string>
+    <string name="state_error">ERROR</string>
+    <string name="state_muted">SILENCIADO</string>
+    <string name="chip_cinema_on">MODO CINE</string>
+    <string name="chip_cinema_off">Cine</string>
+
+    <string name="conn_connected">En línea</string>
+    <string name="conn_connecting">Conectando</string>
+    <string name="conn_disconnected">Desconectado</string>
+    <string name="conn_error">Error</string>
+
+    <!-- Cara e Historial de Chat -->
+    <string name="face_show_history">Ver historial</string>
+    <string name="face_hide_history">Ocultar historial</string>
+    <string name="face_conversation_count">Conversación (%1$d)</string>
+    <string name="face_clear_history">Limpiar</string>
+    <string name="face_empty_history">No hay mensajes en esta sesión.\nDi \"%1$s\" o toca el micrófono para hablar.</string>
+    <string name="face_mic_cd">Empezar a hablar</string>
+    <string name="face_stop_cd">Detener conversación</string>
+    <string name="face_mute_cd">Silenciar micrófono</string>
+    <string name="face_unmute_cd">Reactivar micrófono</string>
+    <string name="face_cinema_cd">Alternar Modo Cine</string>
+    <string name="face_diagnostics_cd">Diagnóstico del sistema</string>
+    <string name="face_cameras_cd">Cámaras de seguridad</string>
+
+    <!-- Permisos -->
+    <string name="perm_mic_title">Se requiere permiso de micrófono</string>
+    <string name="perm_mic_desc" formatted="false">Se requiere acceso al micrófono para detectar la palabra de activación 100% en tu dispositivo y conversar por voz.</string>
+    <string name="perm_mic_grant">Conceder Permiso</string>
+    <string name="perm_open_settings">Ajustes de App</string>
+
+    <!-- Acciones Comunes -->
+    <string name="action_save">Guardar Cambios</string>
+    <string name="action_save_short">Guardar</string>
+    <string name="action_test_connection">Probar Conexión</string>
+    <string name="action_back">Atrás</string>
+    <string name="action_next">Siguiente</string>
+    <string name="action_skip">Omitir</string>
+    <string name="action_cancel">Cancelar</string>
+    <string name="action_add">Añadir</string>
+    <string name="action_close">Cerrar</string>
+    <string name="action_refresh">Actualizar</string>
+    <string name="action_delete">Eliminar</string>
+    <string name="saved_success">¡Ajustes guardados correctamente!</string>
+
+    <!-- Asistente de Configuración -->
+    <string name="wizard_welcome_title">¡Hola! Soy Treko</string>
+    <string name="wizard_welcome_subtitle" formatted="false">Tu asistente personal de voz nativo, ultra-rápido y 100% privado.</string>
+    <string name="wizard_why_title">¿Por qué Treko es diferente?</string>
+    <string name="wizard_why_privacy" formatted="false">• Privacidad Zero-Leak: La detección de voz se ejecuta 100% en tu procesador local.</string>
+    <string name="wizard_why_wake">• Activación instantánea: Di en voz alta \"Treko\" en cualquier momento.</string>
+    <string name="wizard_why_ha">• Hogar Inteligente y Visión: Soporte nativo para Home Assistant y cámaras.</string>
+    <string name="wizard_start_setup">Comenzar Configuración</string>
+    <string name="wizard_step1_title">Paso 1: Vincular con Xiaozhi</string>
+    <string name="wizard_step1_desc">Xiaozhi es el motor de IA que gestiona el reconocimiento de voz, razonamiento y síntesis de Treko.</string>
+    <string name="wizard_mac_title">1. Dirección MAC de este Treko:</string>
+    <string name="wizard_mac_desc">En xiaozhi.me selecciona \"Añadir dispositivo\" e introduce esta dirección MAC:</string>
+    <string name="wizard_mac_label">Dirección MAC:</string>
+    <string name="wizard_copy_mac">Copiar MAC</string>
+    <string name="wizard_mac_copied">MAC copiada: %1$s</string>
+    <string name="wizard_code_title">2. Código de Verificación de 6 Dígitos</string>
+    <string name="wizard_code_idle_desc">Presiona el botón para solicitar el código que te pide xiaozhi.me.</string>
+    <string name="wizard_code_already_linked">Este dispositivo ya está vinculado con Xiaozhi.</string>
+    <string name="wizard_relink_device">Volver a Vincular</string>
+    <string name="wizard_generate_code">Generar Código de 6 Dígitos</string>
+    <string name="wizard_fetching_code">Obteniendo código del servidor Xiaozhi…</string>
+    <string name="wizard_code_value">Código: %1$s</string>
+    <string name="wizard_copy_code">Copiar Código</string>
+    <string name="wizard_code_copied">Código copiado: %1$s</string>
+    <string name="wizard_code_enter_hint">Escribe este código en la ventana de xiaozhi.me y presiona \'Link\'</string>
+    <string name="wizard_waiting_approval">Esperando a que presiones \'Link\' en xiaozhi.me…</string>
+    <string name="wizard_linked_success">¡Dispositivo vinculado exitosamente con Xiaozhi!</string>
+    <string name="wizard_error_prefix">Error: %1$s</string>
+    <string name="wizard_retry_code">Reintentar Código</string>
+    <string name="wizard_ws_url_advanced">URL WebSocket de Xiaozhi (Avanzado)</string>
+    <string name="wizard_ws_token_optional">Token de Acceso (opcional)</string>
+    <string name="wizard_step2_title">Paso 2: Home Assistant (Opcional)</string>
+    <string name="wizard_step2_desc">Conecta tu domótica para que Treko controle luces, escenas, clima y cámaras de seguridad por voz.</string>
+    <string name="wizard_ha_guide_title">Cómo generar tu Token de Home Assistant:</string>
+    <string name="wizard_ha_guide_1">1. Abre Home Assistant y haz clic en tu Perfil de Usuario.</string>
+    <string name="wizard_ha_guide_2">2. Baja a la sección \"Tokens de acceso de larga duración\".</string>
+    <string name="wizard_ha_guide_3">3. Haz clic en \"Crear token\", nómbralo \"Treko\" y pégalo aquí.</string>
+    <string name="wizard_ha_url_label">URL del Servidor Home Assistant</string>
+    <string name="wizard_ha_url_placeholder">ej. http://homeassistant.local:8123</string>
+    <string name="wizard_ha_token_label">Token de Acceso de Larga Duración</string>
+    <string name="wizard_ha_token_placeholder">Pega tu Token de HA aquí</string>
+    <string name="wizard_done_title">¡Todo Listo!</string>
+    <string name="wizard_done_subtitle">Treko está configurado y listo para responderte.</string>
+    <string name="wizard_summary_title">Estado de la Configuración:</string>
+    <string name="wizard_summary_wake">• Activación por voz: Activa (Di \"%1$s\")</string>
+    <string name="wizard_summary_xiaozhi">• Servidor Xiaozhi: %1$s</string>
+    <string name="wizard_summary_ha_ok">• Home Assistant: Configurado (%1$s)</string>
+    <string name="wizard_summary_ha_skip">• Home Assistant: Omitido (puedes añadirlo en Ajustes)</string>
+    <string name="wizard_enter_treko">Entrar a Treko</string>
+
+    <!-- Pruebas de Conexión -->
+    <string name="test_conn_empty_url">✗ URL vacía</string>
+    <string name="test_conn_empty_ha">✗ URL o Token vacíos</string>
+    <string name="test_conn_ok">✓ Conexión exitosa</string>
+    <string name="test_conn_ha_ok">✓ Conectado a HA</string>
+    <string name="test_conn_http_err">✗ Error HTTP %1$d</string>
+    <string name="test_conn_fail">✗ Fallo: %1$s</string>
+
+    <!-- Hábitos -->
+    <string name="habits_title">Hábitos Diarios</string>
+    <string name="habits_subtitle">Seguimiento y bienestar personal</string>
+    <string name="habits_add_cd">Añadir Hábito</string>
+    <string name="habits_today_progress">Progreso de hoy</string>
+    <string name="habits_progress_format">%1$d de %2$d (%3$d%%)</string>
+    <string name="habits_hydration_title">Hidratación Diaria</string>
+    <string name="habits_hydration_done">¡Meta de 8 vasos cumplida!</string>
+    <string name="habits_hydration_count">%1$d de 8 vasos (250 ml)</string>
+    <string name="habits_decrease_cd">Menos vasos</string>
+    <string name="habits_increase_cd">Más vasos</string>
+    <string name="habits_section_title">Rutinas y Hábitos</string>
+    <string name="habits_dialog_title">Nuevo Hábito</string>
+    <string name="habits_dialog_label">Nombre del hábito</string>
+    <string name="habits_dialog_placeholder">Ej. Estiramiento 10 min</string>
+    <string name="habits_empty">Sin hábitos aún. Toca + o pídeselo a %1$s por voz.</string>
+
+    <!-- Tareas -->
+    <string name="tasks_title">Tareas del Día</string>
+    <string name="tasks_completed_count">%1$d de %2$d completadas</string>
+    <string name="tasks_input_placeholder">Escribe una nueva tarea…</string>
+    <string name="tasks_filter_all">Todas (%1$d)</string>
+    <string name="tasks_filter_pending">Pendientes (%1$d)</string>
+    <string name="tasks_filter_done">Completadas (%1$d)</string>
+    <string name="tasks_empty_all">No hay tareas. Añade una arriba o pídeselo a %1$s.</string>
+    <string name="tasks_empty_pending">¡Todas las tareas completadas!</string>
+    <string name="tasks_empty_done">Aún no hay tareas completadas.</string>
+
+    <!-- Temporizador -->
+    <string name="timer_title">Temporizador de Enfoque</string>
+    <string name="timer_subtitle">Técnica Pomodoro asistida por %1$s</string>
+    <string name="timer_mode_pomodoro">Pomodoro (25m)</string>
+    <string name="timer_mode_short_break">Descanso (5m)</string>
+    <string name="timer_mode_long_break">Descanso Largo (15m)</string>
+    <string name="timer_mode_custom">Personalizado</string>
+    <string name="timer_running">En progreso…</string>
+    <string name="timer_paused">Pausado</string>
+    <string name="timer_start">Iniciar</string>
+    <string name="timer_pause">Pausar</string>
+    <string name="timer_reset">Reiniciar</string>
+    <string name="timer_sessions_today">Sesiones hoy</string>
+    <string name="timer_focus_total">Enfoque total</string>
+    <string name="timer_focus_minutes">%1$d min</string>
+    <string name="timer_custom_button">Personalizar</string>
+    <string name="timer_custom_dialog_title">Duración Personalizada</string>
+    <string name="timer_custom_minutes_label">Minutos (1–180)</string>
+
+    <!-- Visor de Cámara -->
+    <string name="camera_live_status">En vivo (actualizando cada 2s)</string>
+    <string name="camera_snapshot_status">Instantánea de cámara</string>
+    <string name="camera_no_signal">Sin señal de video</string>
+    <string name="camera_http_error">Error %1$d al obtener imagen de la cámara</string>
+    <string name="camera_toggle_live">Modo en vivo</string>
+    <string name="camera_toggle_snapshot">Pausar en vivo</string>
+    <string name="camera_updated_at">Actualizada %1$s</string>
+
+    <!-- Muro Multicámara -->
+    <string name="multicam_title">Cámaras (%1$d)</string>
+    <string name="multicam_subtitle_live">Vigilancia en vivo · actualizando cada 2s</string>
+    <string name="multicam_subtitle_snap">Instantáneas automáticas · cada 4s</string>
+    <string name="multicam_live_all">En vivo</string>
+    <string name="multicam_pause_all">Pausar</string>
+    <string name="multicam_badge_live">EN VIVO</string>
+    <string name="multicam_badge_snap">SNAP</string>
+    <string name="multicam_tile_live">En vivo</string>
+    <string name="multicam_tile_pause">Pausar</string>
+    <string name="multicam_ai_button">IA</string>
+    <string name="multicam_analyze_cd">Analizar cámara con Visión IA</string>
+    <string name="multicam_connecting">Conectando…</string>
+    <string name="multicam_empty">No hay cámaras disponibles en Home Assistant.</string>
+
+    <!-- Ajustes -->
+    <string name="settings_title">Ajustes del Asistente</string>
+    <string name="settings_ha_title">Home Assistant (Domótica)</string>
     <string name="settings_ha_url">URL del Servidor (ej. http://homeassistant.local:8123)</string>
     <string name="settings_ha_token">Token de Acceso de Larga Duración</string>
     <string name="settings_xiaozhi_title">Servidor Xiaozhi AI</string>
     <string name="settings_xiaozhi_ws_url">URL WebSocket (ej. wss://api.tenclass.net/xiaozhi/v1/)</string>
-    <string name="settings_xiaozhi_token">Token de Acceso (opcional)</string>
-    <string name="settings_device_id">ID de Dispositivo Treko (MAC)</string>
+    <string name="settings_xiaozhi_token">Token de Acceso (opcional para servidores propios)</string>
+    <string name="settings_device_id">MAC (xiaozhi.me): %1$s</string>
     <string name="settings_mic_title">Micrófono y Audio</string>
-    <string name="settings_mic_test">Probar Micrófono</string>
-    <string name="settings_kws_title">Sensibilidad de Activación</string>
+    <string name="settings_mic_test">Entrenamiento de Voz y Calibración</string>
+    <string name="settings_mic_test_desc">Mide el ruido ambiental, graba 3 muestras y auto-calibra la sensibilidad</string>
+    <string name="settings_diagnostics">Diagnóstico del Sistema</string>
+    <string name="settings_diagnostics_desc">Revisa pipeline de audio, motor KWS, sesión WebSocket y permisos</string>
+    <string name="settings_kws_title">Detección de Voz Local (KWS)</string>
+    <string name="settings_kws_desc" formatted="false">Motor neuronal Sherpa-ONNX Zipformer (100% privado en tu dispositivo)</string>
+    <string name="settings_custom_wake_word">Palabra de Activación Personalizada</string>
+    <string name="settings_custom_wake_word_hint">Treko, Jarvis, Nova, etc.</string>
+    <string name="settings_boost_label">Sensibilidad al Susurro (Ganancia)</string>
+    <string name="settings_boost_desc">Multiplicador acústico para voces suaves o lejanas (def: 3.0x)</string>
+    <string name="settings_threshold_label">Umbral de Ruido (Filtro Acústico)</string>
+    <string name="settings_threshold_desc">Menor = más sensible. Mayor = evita falsos positivos con ruido (def: 0.05)</string>
+    <string name="settings_bg_listen_title">Escuchar con app cerrada</string>
+    <string name="settings_bg_listen_on">Continúa escuchando \"%1$s\" en segundo plano aunque cierres la app o apagues la pantalla.</string>
+    <string name="settings_bg_listen_off">%1$s solo escuchará mientras la app esté abierta. Al cerrar la app se detiene el micrófono.</string>
+    <string name="settings_bg_listen_toast_on">Escucha en segundo plano activada</string>
+    <string name="settings_bg_listen_toast_off">El asistente se detendrá al cerrar la app</string>
     <string name="settings_reopen_wizard">Reabrir Asistente de Configuración</string>
-    <string name="action_save">Guardar Cambios</string>
-    <string name="action_test_connection">Probar Conexión</string>
-    <string name="saved_success">¡Ajustes guardados correctamente!</string>
+    <string name="settings_test_server">Probar Servidor</string>
+    <string name="settings_test_ha">Probar HA</string>
+    <string name="settings_vad_gating_title">Filtro VAD Adaptativo</string>
+    <string name="settings_vad_gating_desc">Omite decodificación Zipformer en silencio para ahorrar batería y evitar falsas activaciones</string>
+    <string name="settings_speaker_verify_title">Verificación por Huella Vocal</string>
+    <string name="settings_speaker_verify_desc">Requiere coincidencia con tu huella acústica entrenada (calibra tu voz primero)</string>
+    <string name="settings_echo_mode_title">Modo Duplex con AEC</string>
+    <string name="settings_echo_mode_desc">Usa VOICE_COMMUNICATION y sesión compartida para mejor interrupción (barge-in)</string>
+    <string name="settings_calibrated_badge">Calibrado (SNR %.1f dB)</string>
+    <string name="settings_not_calibrated_badge">Sin calibrar</string>
+
+    <!-- Sala / Modo Cine / Denoiser / Biometría Anti-TV -->
+    <string name="settings_room_title">Sala y Protección Anti-TV</string>
+    <string name="settings_cinema_mode_title">Modo Cine / Televisión</string>
+    <string name="settings_cinema_mode_desc">Desactiva la auto-escucha de 7s y el barge-in por voz, y endurece el filtro SNR mientras ves películas</string>
+    <string name="settings_auto_follow_up_title">Seguimiento Automático (7s)</string>
+    <string name="settings_auto_follow_up_desc">Reabre el micrófono automáticamente cuando %1$s termina de responder (se desactiva en Modo Cine)</string>
+    <string name="settings_voice_barge_in_title">Interrupción por Voz (Barge-in)</string>
+    <string name="settings_voice_barge_in_desc">Permite decir \"%1$s\" para interrumpir mientras habla (se desactiva en Modo Cine)</string>
+    <string name="settings_near_field_title">Compuerta de Cercanía (SNR)</string>
+    <string name="settings_near_field_desc">Ignora murmullos moderados de TV y retiene pre-roll hasta detectar tu voz cercana</string>
+    <string name="settings_near_field_snr_label">Margen de Cercanía (SNR)</string>
+    <string name="settings_near_field_snr_desc">Mayor = ignora TV más fuerte al escucharte (def: 7.5 dB)</string>
+    <string name="settings_denoiser_title">Denoiser Neuronal GTCRN</string>
+    <string name="settings_denoiser_desc">Supresión neuronal local Sherpa-ONNX de ruido y música en tiempo real</string>
+    <string name="settings_biometric_enroll_btn">Enrolamiento Biométrico de Voz (Anti-TV)</string>
+    <string name="settings_biometric_enroll_desc">Graba 3 frases libres para que %1$s reconozca tu timbre vocal en cualquier comando (3D-Speaker CAM++)</string>
+    <string name="settings_biometric_enrolled_badge">Enrolada (%.0f%%)</string>
+    <string name="settings_biometric_not_enrolled_badge">Sin enrolar</string>
+    <string name="settings_biometric_gate_title">Bloqueo Biométrico en Conversación</string>
+    <string name="settings_biometric_gate_desc">Verifica tu voz en cada turno hablado y descarta diálogos de películas o terceros en local</string>
+    <string name="settings_biometric_threshold_label">Exigencia Biométrica</string>
+    <string name="settings_biometric_threshold_desc">Similitud mínima requerida para aceptar el turno (mayor = más estricto)</string>
+
+    <!-- Diálogo de Enrolamiento Biométrico -->
+    <string name="bio_title">Enrolamiento Biométrico de Voz</string>
+    <string name="bio_subtitle">Verificación libre de texto con Sherpa-ONNX CAM++</string>
+    <string name="bio_step_enroll">1. Grabar Frases</string>
+    <string name="bio_step_verify">2. Prueba en Vivo</string>
+    <string name="bio_phrases_desc">Graba 3 frases naturales a tu distancia habitual. A diferencia de la calibración de \"Treko\", esto protege cualquier frase frente a la TV.</string>
+    <string name="bio_phrase_1">Frase 1: \"Hola Treko, dime qué hora es y cómo está el clima hoy\"</string>
+    <string name="bio_phrase_2">Frase 2: \"Por favor enciende las luces de la sala y pon música\"</string>
+    <string name="bio_phrase_3">Frase 3: \"Recuérdame revisar mi lista de tareas y hábitos mañana\"</string>
+    <string name="bio_record_take">Grabar Frase %1$d / %2$d (3.2s)</string>
+    <string name="bio_recording_take">Grabando (3.2s)… habla con naturalidad</string>
+    <string name="bio_processing">Extrayendo vector biométrico de 192 dimensiones…</string>
+    <string name="bio_take_ok">¡Frase aceptada! (%1$.1f dB · %2$.1fs de voz activa)</string>
+    <string name="bio_quality_too_quiet">Muy suave (SNR %.1f dB) — habla más claro o cerca</string>
+    <string name="bio_quality_too_noisy">Demasiado ruido de fondo — pausa un momento la TV al enrolar</string>
+    <string name="bio_quality_clipped">Audio saturado — aleja un poco el teléfono</string>
+    <string name="bio_quality_too_short">Muy corto (%.1fs) — lee la frase completa con calma</string>
+    <string name="bio_profile_ready">¡Huella biométrica lista! Umbral recomendado: %1$d%%</string>
+    <string name="bio_verify_desc">Habla normalmente o deja una película de fondo. Treko evaluará bloques de 1.4s en vivo sin enviar nada al servidor.</string>
+    <string name="bio_verify_listening">Escuchando para prueba biométrica en vivo…</string>
+    <string name="bio_verify_match_owner">TU VOZ ACEPTADA · Coincidencia %1$d%% (Umbral %2$d%% · %3$dms)</string>
+    <string name="bio_verify_match_other">VOZ EXTERNA BLOQUEADA · Coincidencia %1$d%% (Umbral %2$d%% · %3$dms)</string>
+    <string name="bio_reset">Borrar Huella</string>
+
+    <!-- Diagnóstico extra -->
+    <string name="diag_mic_mute">Estado Micrófono</string>
+    <string name="diag_cinema_mode">Modo Cine</string>
+    <string name="diag_denoiser">Denoiser GTCRN</string>
+    <string name="diag_biometric">Guardia Biométrica</string>
+    <string name="diag_muted_yes">Silenciado</string>
+    <string name="diag_muted_no">En vivo</string>
+
+    <!-- Entrenamiento de Voz y Calibración -->
+    <string name="training_title">Entrenamiento de Voz (Wake-Word)</string>
+    <string name="training_subtitle">Calibra \"%1$s\" para tu voz y la acústica de la habitación</string>
+    <string name="training_step_noise">1. Ruido</string>
+    <string name="training_step_samples">2. Muestras</string>
+    <string name="training_step_verify">3. Prueba</string>
+    <string name="training_noise_desc">Guarda silencio 1.5 segundos para que Treko mida el nivel de ruido de fondo.</string>
+    <string name="training_measure_noise">Medir Ruido Ambiental (1.5s)</string>
+    <string name="training_measuring_noise">Midiendo ruido de fondo…</string>
+    <string name="training_noise_result">Ruido base: %1$.4f RMS (%2$s)</string>
+    <string name="training_env_quiet">Habitación silenciosa</string>
+    <string name="training_env_moderate">Ruido ambiental moderado</string>
+    <string name="training_env_noisy">Ambiente ruidoso — intenta un lugar más silencioso</string>
+    <string name="training_samples_desc">Graba 3 tomas naturales diciendo \"%1$s\" con claridad para crear tu huella vocal y calibrar con multi-SNR.</string>
+    <string name="training_record_take">Grabar Toma %1$d / %2$d</string>
+    <string name="training_recording_take">Escuchando (2.2s)… di \"%1$s\" ahora</string>
+    <string name="training_take_ok">¡Toma aceptada! SNR %1$+.1f dB · %2$d ms</string>
+    <string name="training_quality_too_quiet">Muy bajo (SNR %.1f dB) — habla más fuerte</string>
+    <string name="training_quality_too_noisy">Demasiado ruido de fondo — reintenta con menos ruido</string>
+    <string name="training_quality_clipped">Audio saturado — aleja un poco el teléfono</string>
+    <string name="training_quality_too_short">Muy corto (%1$d ms) — di la palabra completa</string>
+    <string name="training_quality_too_long">Muy largo (%1$d ms) — di solo la palabra clave</string>
+    <string name="training_calibrating">Ejecutando aumento multi-SNR y barrido Zipformer…</string>
+    <string name="training_recommended_params">Calibrado: Ganancia %1$.1fx · Umbral %2$.2f</string>
+    <string name="training_calibration_metrics">SNR %1$.1f dB · Recall %2$d%% · Falsos positivos: %3$d</string>
+    <string name="training_calibration_dtw">DTW acústico activo (umbral ≤ %1$.3f · %2$d plantillas)</string>
+    <string name="training_verify_desc">Prueba tus ajustes calibrados en vivo: di \"%1$s\" a volumen normal. El servidor remoto queda en pausa durante la prueba.</string>
+    <string name="training_verify_waiting">Escuchando localmente \"%1$s\"…</string>
+    <string name="training_verify_hit">¡Detectado \"%1$s\"! [%5$s] (%2$d aciertos · SNR %3$.0f dB · Huella %4$d%%)</string>
+    <string name="training_finish_done">Aplicar y Cerrar</string>
+    <string name="training_reset_calibration">Reiniciar</string>
+    <string name="training_mic_required">Concede el permiso de micrófono primero para calibrar la voz.</string>
+
+    <!-- Diagnóstico -->
+    <string name="diag_title">Diagnóstico del Sistema</string>
+    <string name="diag_subtitle">Telemetría en vivo de audio, KWS y conexión de Treko</string>
+    <string name="diag_perm_mic">Permiso de Micrófono</string>
+    <string name="diag_perm_notif">Permiso de Notificaciones</string>
+    <string name="diag_service_status">Servicio del Asistente</string>
+    <string name="diag_ws_status">WebSocket Xiaozhi</string>
+    <string name="diag_ws_session">ID de Sesión</string>
+    <string name="diag_kws_engine">Motor KWS Sherpa-ONNX</string>
+    <string name="diag_kws_config">Palabra / Parámetros</string>
+    <string name="diag_kws_stats">Frames KWS / Saltados VAD</string>
+    <string name="diag_kws_dtw">DTW Acústico</string>
+    <string name="diag_audio_hw">Hardware AEC / NS / AGC</string>
+    <string name="diag_live_rms">RMS Micrófono / SNR</string>
+    <string name="diag_ha_status">Home Assistant</string>
+    <string name="diag_logs_title">Registros Recientes (%1$d)</string>
+    <string name="diag_logs_empty">Sin eventos recientes registrados.</string>
+    <string name="diag_granted">Concedido</string>
+    <string name="diag_denied">Denegado</string>
+    <string name="diag_active">Activo</string>
+    <string name="diag_inactive">Detenido</string>
+    <string name="diag_configured">Configurado</string>
+    <string name="diag_not_configured">Sin configurar</string>
+    <string name="diag_reconnect_ws">Reconectar WS</string>
+    <string name="diag_restart_service">Reiniciar Servicio</string>
+    <string name="timer_finished_notification_body">Se acabó el tiempo</string>
+    <string name="timer_active_named_title">Temporizadores activos (%1$d)</string>
+    <string name="settings_advanced_toggle">Opciones técnicas avanzadas</string>
+    <string name="full_duplex_capturing">Anotando tu comentario…</string>
+    <string name="full_duplex_queued">Comentario en cola al terminar la respuesta</string>
+    <string name="full_duplex_flushing">Enviando comentario complementario…</string>
+    <string name="settings_full_duplex_title">Modo de Conversación Mientras Habla</string>
+    <string name="settings_full_duplex_desc">Cómo procesa %1$s tu voz mientras responde (Modo Cine fuerza Turnos Clásicos)</string>
+    <string name="settings_duplex_complementary">Complementario (Termina de hablar y encola tu comentario)</string>
+    <string name="settings_duplex_barge_in">Interrupción inmediata (Corta el habla)</string>
+    <string name="settings_duplex_half">Turnos clásicos (Solo escucha al terminar)</string>
+    <string name="settings_sw_aec3_title">Cancelación de Eco por Software (WebRTC AEC3)</string>
+    <string name="settings_sw_aec3_desc">Filtra el audio del altavoz en tiempo real para permitir escucha continua sin eco</string>
+    <string name="diag_sw_aec3">WebRTC AEC3 (Software)</string>
+    <string name="diag_full_duplex">Estado Full-Duplex</string>
+
+    <string name="proactive_channel_name">Asistente Proactivo</string>
+    <string name="proactive_channel_desc">Avisos proactivos sobre el estado de tu hogar, cámaras, hábitos y tareas</string>
+    <string name="proactive_notif_title">💬 %1$s tiene algo que decirte</string>
+    <string name="proactive_action_listen">Escuchar ahora</string>
+    <string name="proactive_action_dismiss">Descartar</string>
+    <string name="proactive_banner_listen">Escuchar y conversar</string>
+    <string name="proactive_settings_title">🧠 Asistente Proactivo y Centinela</string>
+    <string name="proactive_settings_desc">Revisa periódicamente Home Assistant, anomalías en cámaras, tus hábitos cumplidos, tareas y memoria.</string>
+    <string name="proactive_enable_title">Chequeo proactivo automático</string>
+    <string name="proactive_enable_sub">Supervisa sensores del hogar, hábitos, hidratación y tareas pendientes</string>
+    <string name="proactive_speak_title">Iniciar conversación hablando automáticamente</string>
+    <string name="proactive_speak_sub">Activado: %1$s inicia la conversación por voz al detectar un aviso. Desactivado: envía una notificación con el resumen.</string>
+    <string name="proactive_camera_title">Escaneo de anomalías en cámaras con IA</string>
+    <string name="proactive_camera_sub">Analiza periódicamente las cámaras principales con Home Assistant LLM Vision</string>
+    <string name="proactive_quiet_title">Horario nocturno silencioso (11 PM – 7 AM)</string>
+    <string name="proactive_quiet_sub">Pausa las intervenciones por voz durante la noche y entrega los avisos solo por notificación</string>
+    <string name="proactive_interval_label">Frecuencia de revisión:</string>
+    <string name="proactive_test_now">Probar chequeo proactivo ahora</string>
+    <string name="proactive_test_started">Ejecutando chequeo proactivo de hogar, cámaras, hábitos y tareas…</string>
 </resources>

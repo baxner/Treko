@@ -1,0 +1,75 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="64dp"
+    android:height="64dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+
+    <!-- Circular cyber-navy badge background -->
+    <path android:pathData="M32,1 A31,31 0 1,1 31.99,1 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="32"
+                android:centerY="32"
+                android:gradientRadius="32"
+                android:startColor="#17223B"
+                android:endColor="#080B12" />
+        </aapt:attr>
+    </path>
+
+    <!-- Neon Cyan -> Purple orbital ring -->
+    <path
+        android:pathData="M32,4.5 A27.5,27.5 0 1,1 31.99,4.5 Z"
+        android:strokeWidth="3.2"
+        android:fillColor="#00000000">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="5"
+                android:startY="5"
+                android:endX="59"
+                android:endY="59"
+                android:startColor="#00E5FF"
+                android:centerColor="#4F9DFF"
+                android:endColor="#9D4EDD" />
+        </aapt:attr>
+    </path>
+
+    <!-- Core visor -->
+    <path
+        android:pathData="M32,8 A24,24 0 1,1 31.99,8 Z"
+        android:fillColor="#0D1426" />
+
+    <!-- Glowing eyes -->
+    <path
+        android:pathData="M18.5,22.5 L24.5,22.5 A4,4 0 0,1 28.5,26.5 L28.5,28.5 A4,4 0 0,1 24.5,32.5 L18.5,32.5 A4,4 0 0,1 14.5,28.5 L14.5,26.5 A4,4 0 0,1 18.5,22.5 Z"
+        android:fillColor="#00E5FF" />
+    <path
+        android:pathData="M19.5,24.8 A1.6,1.6 0 1,1 19.49,24.8 Z"
+        android:fillColor="#FFFFFF" />
+
+    <path
+        android:pathData="M39.5,22.5 L45.5,22.5 A4,4 0 0,1 49.5,26.5 L49.5,28.5 A4,4 0 0,1 45.5,32.5 L39.5,32.5 A4,4 0 0,1 35.5,28.5 L35.5,26.5 A4,4 0 0,1 39.5,22.5 Z"
+        android:fillColor="#00E5FF" />
+    <path
+        android:pathData="M40.5,24.8 A1.6,1.6 0 1,1 40.49,24.8 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Sonic voice wave bars -->
+    <path
+        android:pathData="M20.5,40.5 A1.3,1.3 0 0,1 23.1,40.5 L23.1,43.5 A1.3,1.3 0 0,1 20.5,43.5 Z"
+        android:fillColor="#9D4EDD" />
+    <path
+        android:pathData="M25.6,38.5 A1.3,1.3 0 0,1 28.2,38.5 L28.2,45.5 A1.3,1.3 0 0,1 25.6,45.5 Z"
+        android:fillColor="#38BDF8" />
+    <path
+        android:pathData="M30.7,36.8 A1.3,1.3 0 0,1 33.3,36.8 L33.3,47.2 A1.3,1.3 0 0,1 30.7,47.2 Z"
+        android:fillColor="#00E5FF" />
+    <path
+        android:pathData="M35.8,38.5 A1.3,1.3 0 0,1 38.4,38.5 L38.4,45.5 A1.3,1.3 0 0,1 35.8,45.5 Z"
+        android:fillColor="#38BDF8" />
+    <path
+        android:pathData="M40.9,40.5 A1.3,1.3 0 0,1 43.5,40.5 L43.5,43.5 A1.3,1.3 0 0,1 40.9,43.5 Z"
+        android:fillColor="#9D4EDD" />
+</vector>

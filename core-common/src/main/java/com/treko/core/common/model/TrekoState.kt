@@ -68,7 +68,7 @@ enum class TrekoEmotion(val fileName: String) {
     companion object {
         fun fromString(name: String?): TrekoEmotion {
             if (name.isNullOrBlank()) return RELAX
-            val clean = name.trim().lowercase()
+            val clean = name.trim().lowercase().removeSuffix(".gif")
             return entries.firstOrNull { 
                 it.name.lowercase() == clean || it.fileName.removeSuffix(".gif") == clean 
             } ?: RELAX

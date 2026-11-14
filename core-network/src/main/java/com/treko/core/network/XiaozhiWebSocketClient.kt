@@ -2,9 +2,12 @@ package com.treko.core.network
 
 import android.util.Log
 import com.treko.core.common.model.TrekoState
+import com.treko.core.common.util.TrekoLogBuffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +18,8 @@ import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
+import kotlin.random.Random
 
 /**
  * Cliente WebSocket oficial para el protocolo Xiaozhi AI v1/v2.
@@ -31,8 +36,9 @@ class XiaozhiWebSocketClient(
     private val token: String = ""
 ) {
     private val TAG = "TrekoNetwork"
+    @Volatile
     private var webSocket: WebSocket? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val client = OkHttpClient.Builder()
         .readTimeout(60, TimeUnit.SECONDS)
@@ -61,6 +67,18 @@ class XiaozhiWebSocketClient(
     @Volatile
     private var pendingListenStart: Boolean = false
 
+    @Volatile
+    private var pendingListenMode: String = "auto"
+
+    @Volatile
+    var advertiseAecFeature: Boolean = true
+
+    @Volatile
+    private var reconnectAttempt: Int = 0
+
+    @Volatile
+    private var reconnectScheduledForSocket: WebSocket? = null
+
     private var reconnectJob: Job? = null
 
     var onSessionStarted: ((String) -> Unit)? = null
@@ -69,15 +87,29 @@ class XiaozhiWebSocketClient(
     var onTtsStateChanged: ((state: String, text: String?) -> Unit)? = null
     var onAudioPacketReceived: ((ByteArray) -> Unit)? = null
     var onConnectionStateChanged: ((TrekoState) -> Unit)? = null
+    var onError: ((String) -> Unit)? = null
     var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
 
-    private fun scheduleReconnect() {
+    internal fun computeReconnectDelayMs(attempt: Int): Long {
+        val exp = 1L shl attempt.coerceIn(0, 4) // 1, 2, 4, 8, 16 -> 2s..32s
+        val baseMs = min(2000L * exp, 30_000L)
+        val jitterMs = Random.nextLong(0L, 500L)
+        return baseMs + jitterMs
+    }
+
+    private fun scheduleReconnect(closedSocket: WebSocket? = null) {
         if (isExplicitDisconnect) return
+        if (closedSocket != null) {
+            if (reconnectScheduledForSocket === closedSocket) return
+            reconnectScheduledForSocket = closedSocket
+        }
         reconnectJob?.cancel()
+        val delayMs = computeReconnectDelayMs(reconnectAttempt)
+        reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(10)
         reconnectJob = scope.launch {
-            delay(2000)
+            delay(delayMs)
             if (!isConnected && !isConnecting && !isExplicitDisconnect) {
-                Log.i(TAG, "Reconectando automáticamente a Xiaozhi...")
+                TrekoLogBuffer.i(TAG, "Reconectando a Xiaozhi (intento #$reconnectAttempt, delay=${delayMs}ms)...")
                 connect()
             }
         }
@@ -89,57 +121,98 @@ class XiaozhiWebSocketClient(
             Log.d(TAG, "Conexión WebSocket ya se encuentra activa o en progreso.")
             return
         }
-        isConnecting = true
 
-        val requestBuilder = Request.Builder()
-            .url(serverUrl)
-            .addHeader("Device-Id", macAddress)
-            .addHeader("Client-Id", clientId)
-            .addHeader("Protocol-Version", "1")
-
-        if (token.isNotBlank()) {
-            requestBuilder.addHeader("Authorization", "Bearer $token")
+        val cleanUrl = serverUrl.trim()
+        if (!cleanUrl.startsWith("ws://", ignoreCase = true) && !cleanUrl.startsWith("wss://", ignoreCase = true)) {
+            val errMsg = "URL WebSocket inválida: '$serverUrl' (debe iniciar con ws:// o wss://)"
+            TrekoLogBuffer.e(TAG, errMsg)
+            _connectionState.value = TrekoState.ERROR
+            onConnectionStateChanged?.invoke(TrekoState.ERROR)
+            onError?.invoke(errMsg)
+            return
         }
 
-        val request = requestBuilder.build()
-        Log.i(TAG, "Conectando a Xiaozhi WebSocket: $serverUrl (MAC: $macAddress)...")
+        isConnecting = true
 
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                Log.i(TAG, "Conexión WebSocket establecida con Xiaozhi.")
-                isConnecting = false
-                isConnected = true
-                sendHello()
+        try {
+            val requestBuilder = Request.Builder()
+                .url(cleanUrl)
+                .addHeader("Device-Id", macAddress)
+                .addHeader("Client-Id", clientId)
+                .addHeader("Protocol-Version", "1")
+
+            if (token.isNotBlank()) {
+                requestBuilder.addHeader("Authorization", "Bearer $token")
             }
 
-            override fun onMessage(ws: WebSocket, text: String) {
-                handleJsonMessage(text)
-            }
+            val request = requestBuilder.build()
+            TrekoLogBuffer.i(TAG, "Conectando a Xiaozhi WebSocket: $cleanUrl (MAC: $macAddress)...")
 
-            override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                onAudioPacketReceived?.invoke(bytes.toByteArray())
-            }
+            webSocket = client.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(ws: WebSocket, response: Response) {
+                    if (ws !== webSocket) return
+                    TrekoLogBuffer.i(TAG, "Conexión WebSocket establecida con Xiaozhi.")
+                    isConnecting = false
+                    isConnected = true
+                    reconnectAttempt = 0
+                    reconnectScheduledForSocket = null
+                    sendHello()
+                }
 
-            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "WebSocket cerrándose: $code / $reason")
-                isConnecting = false
-                isConnected = false
-                sessionId = null
-                _connectionState.value = TrekoState.IDLE
-                onConnectionStateChanged?.invoke(TrekoState.IDLE)
-                scheduleReconnect()
-            }
+                override fun onMessage(ws: WebSocket, text: String) {
+                    if (ws !== webSocket) return
+                    handleJsonMessage(text)
+                }
 
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "Fallo en conexión WebSocket Xiaozhi: ${t.message}")
-                isConnecting = false
-                isConnected = false
-                sessionId = null
-                _connectionState.value = TrekoState.ERROR
-                onConnectionStateChanged?.invoke(TrekoState.ERROR)
-                scheduleReconnect()
-            }
-        })
+                override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                    if (ws !== webSocket) return
+                    onAudioPacketReceived?.invoke(bytes.toByteArray())
+                }
+
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    if (ws !== webSocket) return
+                    TrekoLogBuffer.i(TAG, "WebSocket cerrándose: $code / $reason")
+                    isConnecting = false
+                    isConnected = false
+                    sessionId = null
+                    _connectionState.value = TrekoState.IDLE
+                    onConnectionStateChanged?.invoke(TrekoState.IDLE)
+                    scheduleReconnect(ws)
+                }
+
+                override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                    if (ws !== webSocket) return
+                    isConnecting = false
+                    isConnected = false
+                    sessionId = null
+                    _connectionState.value = TrekoState.IDLE
+                    onConnectionStateChanged?.invoke(TrekoState.IDLE)
+                    scheduleReconnect(ws)
+                }
+
+                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                    if (ws !== webSocket) return
+                    val httpInfo = response?.let { " (HTTP ${it.code})" } ?: ""
+                    val errMsg = "${t.message ?: "Error de conexión"}$httpInfo"
+                    TrekoLogBuffer.e(TAG, "Fallo en conexión WebSocket Xiaozhi: $errMsg")
+                    isConnecting = false
+                    isConnected = false
+                    sessionId = null
+                    _connectionState.value = TrekoState.ERROR
+                    onConnectionStateChanged?.invoke(TrekoState.ERROR)
+                    onError?.invoke(errMsg)
+                    scheduleReconnect(ws)
+                }
+            })
+        } catch (e: Exception) {
+            isConnecting = false
+            isConnected = false
+            val errMsg = e.message ?: "Error iniciando WebSocket"
+            TrekoLogBuffer.e(TAG, "Error construyendo conexión WebSocket: $errMsg", e)
+            _connectionState.value = TrekoState.ERROR
+            onConnectionStateChanged?.invoke(TrekoState.ERROR)
+            onError?.invoke(errMsg)
+        }
     }
 
     private fun sendHello() {
@@ -147,7 +220,12 @@ class XiaozhiWebSocketClient(
             val hello = JSONObject().apply {
                 put("type", "hello")
                 put("version", 1)
-                put("features", JSONObject().apply { put("mcp", true) })
+                put("features", JSONObject().apply {
+                    put("mcp", true)
+                    if (advertiseAecFeature) {
+                        put("aec", true)
+                    }
+                })
                 put("transport", "websocket")
                 put("audio_params", JSONObject().apply {
                     put("format", "opus")
@@ -179,7 +257,7 @@ class XiaozhiWebSocketClient(
                     if (pendingListenStart) {
                         pendingListenStart = false
                         Log.i(TAG, "Iniciando escucha diferida tras negociación exitosa...")
-                        startListening()
+                        startListening(pendingListenMode)
                     }
                 }
                 "mcp" -> {
@@ -214,15 +292,15 @@ class XiaozhiWebSocketClient(
         try {
             val payload = json.optJSONObject("payload") ?: return
             val method = payload.optString("method")
-            val id = payload.optLong("id", -1)
+            val idValue = payload.opt("id")?.takeIf { it !== JSONObject.NULL }
 
-            if (method == "initialize" && id != -1L) {
+            if (method == "initialize" && idValue != null) {
                 val response = JSONObject().apply {
                     put("session_id", sessionId ?: "")
                     put("type", "mcp")
                     put("payload", JSONObject().apply {
                         put("jsonrpc", "2.0")
-                        put("id", id)
+                        put("id", idValue)
                         put("result", JSONObject().apply {
                             put("protocolVersion", "2024-11-05")
                             put("capabilities", JSONObject().apply {
@@ -236,7 +314,7 @@ class XiaozhiWebSocketClient(
                     })
                 }
                 sendJson(response.toString())
-            } else if (method == "tools/list" && id != -1L) {
+            } else if (method == "tools/list" && idValue != null) {
                 val toolsArray = JSONArray().apply {
                     put(JSONObject().apply {
                         put("name", "get_device_status")
@@ -436,21 +514,33 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "manage_timer")
-                        put("description", "Gestiona el temporizador de enfoque y técnica Pomodoro en la pantalla de Temporizador de Treko. Permite iniciar ('start'), pausar ('pause'), alternar ('toggle'), reiniciar ('reset'), consultar el tiempo restante ('status') o fijar minutos ('set').")
+                        put("description", "Gestiona múltiples temporizadores y recordatorios rápidos tipo Alexa en Treko (con aviso sonoro y notificación al terminar), además del temporizador Pomodoro principal. Permite crear varios timers simultáneos con etiqueta ('start'/'add'), listar activos ('status'/'list'), cancelar uno por nombre/id o todos ('cancel'), pausar ('pause') o reiniciar ('reset').")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'start' para iniciar, 'pause' para pausar, 'reset' para reiniciar, 'status' para consultar tiempo restante, 'set' para fijar minutos personalizados")
+                                    put("description", "'start' o 'add' para iniciar un nuevo temporizador/recordatorio, 'list' o 'status' para consultar todos los activos, 'cancel' o 'delete' para cancelar por etiqueta/id (o todos si label='all'), 'pause', 'reset'")
                                 })
                                 put("minutes", JSONObject().apply {
                                     put("type", "integer")
-                                    put("description", "Minutos a temporizar (ej. 15, 25, 5) (opcional)")
+                                    put("description", "Minutos a temporizar (ej. 1, 8, 15, 25)")
+                                })
+                                put("seconds", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Segundos adicionales o totales a temporizar (opcional)")
+                                })
+                                put("label", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Etiqueta o motivo del temporizador/recordatorio (ej. 'Bañarme', 'Pasta', 'Horno')")
+                                })
+                                put("timer_id", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "ID numérico del temporizador a cancelar (opcional)")
                                 })
                                 put("mode", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'pomodoro' (25m), 'short_break' (5m), o 'long_break' (15m)")
+                                    put("description", "Solo para Pomodoro principal: 'pomodoro' (25m), 'short_break' (5m), o 'long_break' (15m)")
                                 })
                             })
                             put("required", JSONArray().apply { put("action") })
@@ -570,20 +660,33 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "view_camera")
-                        put("description", "Muestra una cámara de seguridad dentro de la aplicación Treko en tiempo real (instantánea o live stream). Soporta nombres coloquiales como 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera', 'patio', 'entrada', etc. ¡ÚSALO SIEMPRE que el usuario pida ver, mostrar o poner una cámara!")
+                        put("description", "Muestra una cámara de seguridad o todas ('todas'/'all') en el muro multicámara dentro de la aplicación Treko en tiempo real (instantánea o live stream). Soporta nombres coloquiales como 'ring', 'timbre', 'puerta', 'jardín', 'cochera', 'patio', 'entrada', 'todas', 'all', etc. ¡ÚSALO SIEMPRE que el usuario pida ver, mostrar o poner una cámara!")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("camera", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera', 'entrada')")
+                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'cochera', 'entrada', o 'todas'/'all' para abrir el muro multicámara)")
                                 })
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'view' (mostrar en pantalla), 'live' (transmisión en vivo), 'list' (listar cámaras), 'dismiss' (cerrar)")
+                                    put("description", "'view' (mostrar en pantalla), 'live' (transmisión en vivo), 'list' o 'grid' (abrir muro multicámara), 'dismiss' (cerrar)")
                                 })
                             })
                             put("required", JSONArray().apply { put("camera") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "view_all_cameras")
+                        put("description", "Abre el muro visual multicámara (Multi-Camera Security Wall) en Treko con todas las cámaras de seguridad de Home Assistant deduplicadas y muestra un resumen de sus estados.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("live", JSONObject().apply {
+                                    put("type", "boolean")
+                                    put("description", "Si es true, activa actualización continua en vivo para todas las cámaras del muro (opcional)")
+                                })
+                            })
                         })
                     })
                     put(JSONObject().apply {
@@ -594,7 +697,7 @@ class XiaozhiWebSocketClient(
                             put("properties", JSONObject().apply {
                                 put("camera", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'china', 'cochera')")
+                                    put("description", "Nombre o alias de la cámara (ej. 'ring', 'timbre', 'puerta', 'jardín', 'cochera')")
                                 })
                                 put("question", JSONObject().apply {
                                     put("type", "string")
@@ -604,6 +707,84 @@ class XiaozhiWebSocketClient(
                             put("required", JSONArray().apply { put("camera") })
                         })
                     })
+                    put(JSONObject().apply {
+                        put("name", "play_music_or_radio")
+                        put("description", "¡PRIORIDAD MÁXIMA! Usa SIEMPRE esta herramienta en lugar de search_music para poner música, canciones, artistas, géneros, playlists o estaciones de radio en Alexas/Echo, bocinas de Home Assistant o en el teléfono.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("query", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Canción, artista, género, playlist o estación de radio (ej. 'rock clásico', 'Los Ángeles Azules', 'Alfa 91.3', 'una estación de radio')")
+                                })
+                                put("device", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Dispositivo o habitación destino: 'cuarto', 'sala', 'cocina', 'todas' o 'telefono' (opcional)")
+                                })
+                                put("media_type", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Tipo de contenido: 'radio', 'music', 'artist', 'playlist', 'routine' o 'auto' (opcional)")
+                                })
+                                put("provider", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Proveedor preferido: 'tunein', 'spotify', 'amazon_music' o 'auto' (opcional)")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("query") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "home_status_summary")
+                        put("description", "Genera un resumen ejecutivo de luces encendidas, Alexas/TVs reproduciendo, clima y temperatura, puertas/sensores activos y cámaras de seguridad del hogar.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject())
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "manage_workflows")
+                        put("description", "Lista, ejecuta, crea o elimina rutinas/workflows automatizados en Treko (integrados: 'buenos_dias', 'buenas_noches', 'modo_cine', 'vigilancia_total', 'concentracion', y rutinas personalizadas).")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "'list' para listar rutinas, 'run' para ejecutar una rutina, 'create' para crear una personalizada, o 'delete' para eliminar una personalizada")
+                                })
+                                put("name", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Nombre o ID de la rutina (ej. 'buenos días', 'modo cine', 'vigilancia total', 'concentración')")
+                                })
+                                put("description", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Descripción opcional de la rutina personalizada (para action='create')")
+                                })
+                                put("steps", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Arreglo JSON de pasos o descripción de pasos para action='create' (tipos: 'ha_control', 'play_media', 'broadcast', 'scene', 'camera_wall', 'cinema_mode', 'timer', 'weather', 'home_summary', 'tasks_summary', 'habits_summary')")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "manage_proactive_assistant")
+                        put("description", "Triggers or checks Treko's proactive home, camera anomaly, habits, tasks, and memory briefing. Use when the user asks '¿Qué me ibas a decir?', 'haz un chequeo proactivo', or wants to configure proactive alerts.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Acción a realizar: 'deliver_pending', 'check_now', 'status' o 'set_speak_out_loud'")
+                                })
+                                put("speak_out_loud", JSONObject().apply {
+                                    put("type", "boolean")
+                                    put("description", "Opcional para action='set_speak_out_loud': true para iniciar conversación por voz automáticamente, false para enviar solo notificación")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
                 }
 
                 val toolsResp = JSONObject().apply {
@@ -611,38 +792,53 @@ class XiaozhiWebSocketClient(
                     put("type", "mcp")
                     put("payload", JSONObject().apply {
                         put("jsonrpc", "2.0")
-                        put("id", id)
+                        put("id", idValue)
                         put("result", JSONObject().apply {
                             put("tools", toolsArray)
                         })
                     })
                 }
                 sendJson(toolsResp.toString())
-            } else if (method == "tools/call" && id != -1L) {
+            } else if (method == "tools/call" && idValue != null) {
                 val params = payload.optJSONObject("params")
                 val toolName = params?.optString("name") ?: ""
                 val arguments = params?.optJSONObject("arguments") ?: JSONObject()
                 Log.i(TAG, "Ejecutando herramienta MCP: $toolName con argumentos: $arguments")
 
                 scope.launch {
-                    val resultText = onMcpToolCall?.invoke(toolName, arguments)
-                        ?: "Herramienta $toolName ejecutada correctamente."
-
-                    val callResp = JSONObject().apply {
-                        put("session_id", sessionId ?: "")
-                        put("type", "mcp")
-                        put("payload", JSONObject().apply {
-                            put("jsonrpc", "2.0")
-                            put("id", id)
-                            put("result", JSONObject().apply {
-                                put("content", JSONArray().apply {
-                                    put(JSONObject().apply {
-                                        put("type", "text")
-                                        put("text", resultText)
+                    val callResp = try {
+                        val resultText = onMcpToolCall?.invoke(toolName, arguments)
+                            ?: "Herramienta $toolName ejecutada correctamente."
+                        JSONObject().apply {
+                            put("session_id", sessionId ?: "")
+                            put("type", "mcp")
+                            put("payload", JSONObject().apply {
+                                put("jsonrpc", "2.0")
+                                put("id", idValue)
+                                put("result", JSONObject().apply {
+                                    put("content", JSONArray().apply {
+                                        put(JSONObject().apply {
+                                            put("type", "text")
+                                            put("text", resultText)
+                                        })
                                     })
                                 })
                             })
-                        })
+                        }
+                    } catch (e: Exception) {
+                        TrekoLogBuffer.e(TAG, "Error ejecutando herramienta MCP '$toolName'", e)
+                        JSONObject().apply {
+                            put("session_id", sessionId ?: "")
+                            put("type", "mcp")
+                            put("payload", JSONObject().apply {
+                                put("jsonrpc", "2.0")
+                                put("id", idValue)
+                                put("error", JSONObject().apply {
+                                    put("code", -32000)
+                                    put("message", e.message ?: "Error ejecutando herramienta $toolName")
+                                })
+                            })
+                        }
                     }
                     sendJson(callResp.toString())
                 }
@@ -655,10 +851,11 @@ class XiaozhiWebSocketClient(
     /**
      * Inicia la captura de audio en vivo sin auto-enviar la palabra de activación como texto prompt.
      */
-    fun startListening() {
+    fun startListening(mode: String = "auto") {
         val sId = sessionId
         if (sId == null || !isConnected) {
             Log.i(TAG, "Sesión no lista al iniciar escucha. Marcando inicio diferido y conectando...")
+            pendingListenMode = mode
             pendingListenStart = true
             connect()
             return
@@ -668,10 +865,10 @@ class XiaozhiWebSocketClient(
             put("session_id", sId)
             put("type", "listen")
             put("state", "start")
-            put("mode", "auto")
+            put("mode", mode)
         }
         sendJson(start.toString())
-        Log.i(TAG, "Iniciada sesión de escucha para voz del usuario en Xiaozhi (Session: $sId).")
+        Log.i(TAG, "Iniciada sesión de escucha para voz del usuario en Xiaozhi (Session: $sId, mode=$mode).")
     }
 
     fun stopListening() {
@@ -690,15 +887,40 @@ class XiaozhiWebSocketClient(
         Log.i(TAG, "Detenida sesión de escucha en Xiaozhi (esperando respuesta).")
     }
 
-    fun abortSpeaking() {
-        val sId = sessionId ?: ""
+    fun abortSpeaking(reason: String = "wake_word_detected") {
+        val sId = sessionId
+        if (!isConnected || sId.isNullOrBlank()) return
         val abort = JSONObject().apply {
             put("session_id", sId)
             put("type", "abort")
-            put("reason", "wake_word_detected")
+            put("reason", reason)
         }
         sendJson(abort.toString())
-        Log.i(TAG, "Interrupción de habla enviada al servidor Xiaozhi.")
+        Log.i(TAG, "Interrupción de habla enviada al servidor Xiaozhi (reason=$reason).")
+    }
+
+    /**
+     * Inicia una conversación proactiva enviando un prompt de contexto al servidor Xiaozhi
+     * mediante un evento listen(state="detect", text=prompt) para que Treko hable al usuario.
+     */
+    fun sendProactivePrompt(prompt: String): Boolean {
+        val ws = webSocket ?: return false
+        if (!isConnected) return false
+        val sId = sessionId
+        if (sId.isNullOrBlank()) return false
+        val cleanPrompt = prompt.trim()
+        if (cleanPrompt.isBlank()) return false
+
+        val msg = JSONObject().apply {
+            put("session_id", sId)
+            put("type", "listen")
+            put("state", "detect")
+            put("text", cleanPrompt)
+        }
+        val sent = ws.send(msg.toString())
+        TrekoLogBuffer.i(TAG, "Enviado prompt proactivo a Xiaozhi (sent=$sent, len=${cleanPrompt.length}).")
+        Log.i(TAG, "Prompt proactivo enviado a Xiaozhi (Session: $sId, sent=$sent).")
+        return sent
     }
 
     fun sendAudio(opusData: ByteArray) {
@@ -716,17 +938,25 @@ class XiaozhiWebSocketClient(
 
     fun disconnect() {
         isExplicitDisconnect = true
+        isConnecting = false
         reconnectJob?.cancel()
         pendingListenStart = false
+        val wsToClose = webSocket
+        webSocket = null
         try {
-            webSocket?.close(1000, "Desconexión normal")
+            wsToClose?.close(1000, "Desconexión normal")
         } catch (e: Exception) {
             // ignore
         }
-        webSocket = null
         isConnected = false
         sessionId = null
         _connectionState.value = TrekoState.IDLE
         onConnectionStateChanged?.invoke(TrekoState.IDLE)
+    }
+
+    fun release() {
+        disconnect()
+        scope.cancel()
+        client.connectionPool.evictAll()
     }
 }

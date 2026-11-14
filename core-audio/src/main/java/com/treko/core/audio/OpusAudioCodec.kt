@@ -1,25 +1,42 @@
 package com.treko.core.audio
 
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
+import com.treko.core.common.model.AudioLevel
+import com.treko.core.common.util.TrekoLogBuffer
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.sqrt
 
 /**
  * Motor nativo de codificación y decodificación Opus acelerado por hardware (MediaCodec / c2.android.opus).
  * - Codificador: 16000 Hz mono (micrófono -> paquetes Opus a 60ms).
  * - Decodificador: Decodifica paquetes Opus a 48000 Hz PCM (tasa nativa de salida de c2.android.opus.decoder).
- * - Reproductor: AudioTrack a 48000 Hz con control de flujo para reproducción natural a velocidad 1.0x.
+ * - Reproductor: AudioTrack a 48000 Hz con locks separados para evitar bloqueo de barge-in y nivel RMS reactivo.
  */
 class OpusAudioCodec(
     val inputSampleRate: Int = 16000,
-    var outputSampleRate: Int = 48000
+    var outputSampleRate: Int = 48000,
+    audioSessionId: Int = AudioManager.AUDIO_SESSION_ID_GENERATE
 ) {
     private val TAG = "TrekoOpus"
+
+    @Volatile
+    private var currentAudioSessionId: Int = audioSessionId
+
+    @Volatile
+    private var preferredOutputDevice: AudioDeviceInfo? = null
 
     private var encoder: MediaCodec? = null
     private var decoder: MediaCodec? = null
@@ -30,7 +47,25 @@ class OpusAudioCodec(
     private var sampleCount = 0
     private var encoderPtsUs: Long = 0L
 
-    private val lock = Any()
+    private val encoderLock = Any()
+    private val decoderLock = Any()
+    private val trackLock = Any()
+
+    @Volatile
+    private var playbackGeneration: Long = 0L
+
+    @Volatile
+    private var isReleased: Boolean = false
+
+    private val _playbackLevel = MutableStateFlow(AudioLevel())
+    val playbackLevel: StateFlow<AudioLevel> = _playbackLevel.asStateFlow()
+
+    @Volatile
+    var onRenderPcmWritten: ((pcm48k: ShortArray, count: Int, playoutDelayMs: Int) -> Unit)? = null
+
+    private var writtenPcmFrames: Long = 0L
+    private val audioTimestamp = AudioTimestamp()
+    private var renderShortScratch = ShortArray(4096)
 
     init {
         initEncoder()
@@ -48,16 +83,15 @@ class OpusAudioCodec(
             enc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             enc.start()
             encoder = enc
-            Log.i(TAG, "Codificador Opus inicializado exitosamente a $inputSampleRate Hz.")
+            TrekoLogBuffer.i(TAG, "Codificador Opus inicializado a $inputSampleRate Hz.")
         } catch (e: Exception) {
-            Log.e(TAG, "Error inicializando codificador Opus: ${e.message}", e)
+            TrekoLogBuffer.e(TAG, "Error inicializando codificador Opus", e)
         }
     }
 
     private fun initDecoder() {
         try {
             val dec = MediaCodec.createDecoderByType("audio/opus")
-            // Android Opus decoder nativo opera y emite a 48000 Hz
             val decFormat = MediaFormat.createAudioFormat("audio/opus", 48000, 1)
 
             // CSD-0: OpusHead RFC 7845 a 48000 Hz (48000 LE = 0x80, 0xBB, 0x00, 0x00)
@@ -73,53 +107,97 @@ class OpusAudioCodec(
             )
 
             decFormat.setByteBuffer("csd-0", ByteBuffer.wrap(opusHead))
-            decFormat.setByteBuffer("csd-1", ByteBuffer.wrap(ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(0).array()))
-            decFormat.setByteBuffer("csd-2", ByteBuffer.wrap(ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(0).array()))
+            decFormat.setByteBuffer("csd-1", ByteBuffer.wrap(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(0).array()))
+            decFormat.setByteBuffer("csd-2", ByteBuffer.wrap(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(0).array()))
 
             dec.configure(decFormat, null, null, 0)
             dec.start()
             decoder = dec
-            Log.i(TAG, "Decodificador Opus inicializado con salida a 48000 Hz.")
+            TrekoLogBuffer.i(TAG, "Decodificador Opus inicializado a 48000 Hz.")
         } catch (e: Exception) {
-            Log.e(TAG, "Error inicializando decodificador Opus: ${e.message}", e)
+            TrekoLogBuffer.e(TAG, "Error inicializando decodificador Opus", e)
         }
     }
 
     private fun initAudioTrack(sampleRate: Int) {
-        try {
-            audioTrack?.release()
-            outputSampleRate = sampleRate
+        synchronized(trackLock) {
+            try {
+                audioTrack?.release()
+                outputSampleRate = sampleRate
 
-            val minBuf = AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(8192)
+                val minBuf = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(8192)
 
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(minBuf * 4)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+                val usage = if (preferredOutputDevice != null) {
+                    AudioAttributes.USAGE_VOICE_COMMUNICATION
+                } else {
+                    AudioAttributes.USAGE_ASSISTANT
+                }
 
-            track.setVolume(1.0f)
-            track.play()
-            audioTrack = track
-            Log.i(TAG, "AudioTrack configurado y reproduciendo a $sampleRate Hz (velocidad normal 1.0x).")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error iniciando AudioTrack a $sampleRate Hz: ${e.message}", e)
+                val trackBuilder = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(usage)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf * 4)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+
+                if (currentAudioSessionId > 0) {
+                    trackBuilder.setSessionId(currentAudioSessionId)
+                }
+
+                val track = trackBuilder.build()
+                preferredOutputDevice?.let { dev ->
+                    track.setPreferredDevice(dev)
+                }
+                track.setVolume(1.0f)
+                track.play()
+                audioTrack = track
+                writtenPcmFrames = 0L
+                TrekoLogBuffer.i(TAG, "AudioTrack configurado a $sampleRate Hz (sessionId=$currentAudioSessionId).")
+            } catch (e: Exception) {
+                TrekoLogBuffer.e(TAG, "Error iniciando AudioTrack a $sampleRate Hz", e)
+            }
+        }
+    }
+
+    /**
+     * Reasocia el AudioTrack al sessionId de AudioRecord tras desmutear para mantener el AEC por hardware.
+     */
+    fun updateAudioSessionId(newSessionId: Int) {
+        if (isReleased || newSessionId <= 0 || newSessionId == currentAudioSessionId) return
+        currentAudioSessionId = newSessionId
+        initAudioTrack(outputSampleRate)
+    }
+
+    /**
+     * Fija o limpia el dispositivo de salida preferido (ej. audífono BLE/SCO/USB) y ajusta AudioAttributes.
+     */
+    fun setPreferredOutputDevice(device: AudioDeviceInfo?) {
+        if (isReleased) return
+        val wasHeadset = preferredOutputDevice != null
+        val nowHeadset = device != null
+        val prevId = preferredOutputDevice?.id
+        preferredOutputDevice = device
+        synchronized(trackLock) {
+            val track = audioTrack ?: return
+            if (wasHeadset != nowHeadset) {
+                initAudioTrack(outputSampleRate)
+            } else if (prevId != device?.id) {
+                track.setPreferredDevice(device)
+            }
         }
     }
 
@@ -127,7 +205,7 @@ class OpusAudioCodec(
      * Reinicia el buffer y los timestamps del codificador al iniciar una nueva interacción de voz.
      */
     fun resetEncoder() {
-        synchronized(lock) {
+        synchronized(encoderLock) {
             sampleCount = 0
             encoderPtsUs = 0L
             try {
@@ -143,12 +221,15 @@ class OpusAudioCodec(
      */
     fun encodePcm(samples: ShortArray, read: Int): List<ByteArray> {
         val result = mutableListOf<ByteArray>()
-        synchronized(lock) {
+        if (isReleased || read <= 0) return result
+
+        synchronized(encoderLock) {
             val enc = encoder ?: return result
+            val safeRead = minOf(read, samples.size)
             var offset = 0
-            while (offset < read) {
+            while (offset < safeRead) {
                 val needed = inputFrameSamples - sampleCount
-                val available = read - offset
+                val available = safeRead - offset
                 val toCopy = minOf(needed, available)
 
                 System.arraycopy(samples, offset, sampleBuffer, sampleCount, toCopy)
@@ -156,7 +237,7 @@ class OpusAudioCodec(
                 offset += toCopy
 
                 if (sampleCount == inputFrameSamples) {
-                    queueFrame(enc, sampleBuffer, inputFrameSamples)
+                    queueFrame(enc, sampleBuffer, inputFrameSamples, result)
                     sampleCount = 0
                 }
             }
@@ -165,9 +246,13 @@ class OpusAudioCodec(
         return result
     }
 
-    private fun queueFrame(enc: MediaCodec, frameSamples: ShortArray, count: Int) {
+    private fun queueFrame(enc: MediaCodec, frameSamples: ShortArray, count: Int, outResult: MutableList<ByteArray>) {
         try {
-            val inIdx = enc.dequeueInputBuffer(10_000)
+            var inIdx = enc.dequeueInputBuffer(10_000)
+            if (inIdx < 0) {
+                drainEncoder(enc, outResult)
+                inIdx = enc.dequeueInputBuffer(10_000)
+            }
             if (inIdx >= 0) {
                 val inBuf = enc.getInputBuffer(inIdx) ?: return
                 inBuf.clear()
@@ -216,11 +301,13 @@ class OpusAudioCodec(
      */
     fun flushEncoder(): List<ByteArray> {
         val result = mutableListOf<ByteArray>()
-        synchronized(lock) {
+        if (isReleased) return result
+
+        synchronized(encoderLock) {
             val enc = encoder ?: return result
             if (sampleCount > 0) {
                 java.util.Arrays.fill(sampleBuffer, sampleCount, inputFrameSamples, 0.toShort())
-                queueFrame(enc, sampleBuffer, inputFrameSamples)
+                queueFrame(enc, sampleBuffer, inputFrameSamples, result)
                 sampleCount = 0
             }
             drainEncoder(enc, result)
@@ -229,12 +316,17 @@ class OpusAudioCodec(
     }
 
     /**
-     * Decodifica un paquete Opus recibido del servidor Xiaozhi y lo envía de inmediato al altavoz a 48000 Hz.
+     * Decodifica un paquete Opus recibido del servidor Xiaozhi y lo envía al altavoz a 48000 Hz.
+     * Usa locks independientes del codificador para no bloquear el micrófono ni el barge-in.
      */
     fun decodeAndPlay(opusPacket: ByteArray) {
-        synchronized(lock) {
+        if (isReleased || opusPacket.isEmpty()) return
+        val genAtStart = playbackGeneration
+        val pcmChunks = mutableListOf<ByteArray>()
+
+        synchronized(decoderLock) {
+            if (isReleased || genAtStart != playbackGeneration) return
             val dec = decoder ?: return
-            val track = audioTrack ?: return
 
             try {
                 val inIdx = dec.dequeueInputBuffer(20_000)
@@ -260,8 +352,10 @@ class OpusAudioCodec(
                         val outBuf = dec.getOutputBuffer(outIdx)
                         if (outBuf != null && info.size > 0) {
                             val pcmBytes = ByteArray(info.size)
+                            outBuf.position(info.offset)
+                            outBuf.limit(info.offset + info.size)
                             outBuf.get(pcmBytes)
-                            audioTrack?.write(pcmBytes, 0, pcmBytes.size)
+                            pcmChunks.add(pcmBytes)
                         }
                         dec.releaseOutputBuffer(outIdx, false)
                     }
@@ -271,44 +365,171 @@ class OpusAudioCodec(
                 Log.e(TAG, "Error en decodeAndPlay: ${e.message}")
             }
         }
+
+        if (pcmChunks.isEmpty() || genAtStart != playbackGeneration) return
+
+        for (chunk in pcmChunks) {
+            if (isReleased || genAtStart != playbackGeneration) break
+            updatePlaybackLevelFromPcmBytes(chunk)
+            var wroteSamples = 0
+            var delayMsSnapshot = 80
+            synchronized(trackLock) {
+                if (genAtStart == playbackGeneration) {
+                    val track = audioTrack
+                    if (track != null) {
+                        val writtenBytes = track.write(chunk, 0, chunk.size)
+                        if (writtenBytes > 0) {
+                            wroteSamples = writtenBytes / 2
+                            writtenPcmFrames += wroteSamples.toLong()
+                            delayMsSnapshot = computePlayoutDelayMsLocked(track)
+                        }
+                    }
+                }
+            }
+            val renderCb = onRenderPcmWritten
+            if (renderCb != null && wroteSamples > 0 && genAtStart == playbackGeneration) {
+                val shorts = synchronized(trackLock) {
+                    if (renderShortScratch.size < wroteSamples) {
+                        renderShortScratch = ShortArray(wroteSamples)
+                    }
+                    for (i in 0 until wroteSamples) {
+                        val lo = chunk[i * 2].toInt() and 0xFF
+                        val hi = chunk[i * 2 + 1].toInt()
+                        renderShortScratch[i] = ((hi shl 8) or lo).toShort()
+                    }
+                    renderShortScratch.copyOf(wroteSamples)
+                }
+                renderCb.invoke(shorts, wroteSamples, delayMsSnapshot)
+            }
+        }
+    }
+
+    private fun computePlayoutDelayMsLocked(track: AudioTrack): Int {
+        val rate = outputSampleRate.coerceAtLeast(16000)
+        val playedFrames = try {
+            if (track.getTimestamp(audioTimestamp)) {
+                audioTimestamp.framePosition.coerceAtLeast(0L)
+            } else {
+                track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            }
+        } catch (_: Exception) {
+            track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+        }
+        val queuedFrames = (writtenPcmFrames - playedFrames).coerceAtLeast(0L)
+        val rawDelayMs = ((queuedFrames * 1000L) / rate).toInt() + 25
+        return rawDelayMs.coerceIn(20, 300)
+    }
+
+    fun getPlayoutDelayMs(): Int = synchronized(trackLock) {
+        val track = audioTrack ?: return@synchronized 80
+        computePlayoutDelayMsLocked(track)
     }
 
     /**
-     * Detiene la reproducción y limpia buffers de audio.
+     * Espera a que el AudioTrack termine de drenar los frames pendientes antes de cerrar TTS.
+     */
+    suspend fun waitUntilPlaybackDrained(maxWaitMs: Long = 1400L) {
+        val genAtStart = playbackGeneration
+        val deadlineMs = System.currentTimeMillis() + maxWaitMs
+        var lastHead = -1L
+        var lastAdvanceMs = System.currentTimeMillis()
+        val thresholdFrames = (outputSampleRate / 50).toLong() // <=20ms restante
+
+        while (!isReleased && genAtStart == playbackGeneration) {
+            val (written, head) = synchronized(trackLock) {
+                val track = audioTrack
+                val h = track?.let { it.playbackHeadPosition.toLong() and 0xFFFFFFFFL } ?: writtenPcmFrames
+                writtenPcmFrames to h
+            }
+            if (written <= 0L || (written - head) <= thresholdFrames) {
+                break
+            }
+            val now = System.currentTimeMillis()
+            if (head != lastHead) {
+                lastHead = head
+                lastAdvanceMs = now
+            } else if (now - lastAdvanceMs >= 160L) {
+                break
+            }
+            if (now >= deadlineMs) {
+                break
+            }
+            delay(25L)
+        }
+        if (!isReleased && genAtStart == playbackGeneration) {
+            delay(65L) // Cola acústica breve del altavoz antes de volcar complemento
+        }
+    }
+
+    private fun updatePlaybackLevelFromPcmBytes(pcmBytes: ByteArray) {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount <= 0) return
+        var sum = 0.0
+        for (i in 0 until sampleCount) {
+            val lo = pcmBytes[i * 2].toInt() and 0xFF
+            val hi = pcmBytes[i * 2 + 1].toInt()
+            val sample = ((hi shl 8) or lo).toShort() / 32768.0
+            sum += sample * sample
+        }
+        val rms = sqrt(sum / sampleCount).toFloat()
+        _playbackLevel.value = NativeAudioEngine.buildAudioLevel(rms, rms > 0.015f)
+    }
+
+    /**
+     * Detiene la reproducción instantáneamente y limpia buffers de audio (para barge-in).
      */
     fun stopPlayback() {
-        synchronized(lock) {
+        playbackGeneration++
+        _playbackLevel.value = AudioLevel()
+
+        synchronized(trackLock) {
+            writtenPcmFrames = 0L
             try {
                 audioTrack?.pause()
                 audioTrack?.flush()
                 audioTrack?.play()
             } catch (e: Exception) {
-                Log.w(TAG, "Error en stopPlayback: ${e.message}")
+                Log.w(TAG, "Error en stopPlayback (AudioTrack): ${e.message}")
+            }
+        }
+        synchronized(decoderLock) {
+            try {
+                decoder?.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error en stopPlayback (Decoder): ${e.message}")
             }
         }
     }
 
     fun release() {
-        synchronized(lock) {
+        isReleased = true
+        playbackGeneration++
+        _playbackLevel.value = AudioLevel()
+
+        synchronized(encoderLock) {
             try {
                 encoder?.stop()
                 encoder?.release()
-            } catch (e: Exception) { /* ignore */ }
+            } catch (_: Exception) { }
             encoder = null
+        }
 
+        synchronized(decoderLock) {
             try {
                 decoder?.stop()
                 decoder?.release()
-            } catch (e: Exception) { /* ignore */ }
+            } catch (_: Exception) { }
             decoder = null
+        }
 
+        synchronized(trackLock) {
             try {
                 audioTrack?.stop()
                 audioTrack?.release()
-            } catch (e: Exception) { /* ignore */ }
+            } catch (_: Exception) { }
             audioTrack = null
-
-            Log.i(TAG, "Recursos OpusAudioCodec liberados.")
         }
+
+        TrekoLogBuffer.i(TAG, "Recursos OpusAudioCodec liberados.")
     }
 }

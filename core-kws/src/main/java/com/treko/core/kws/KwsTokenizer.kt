@@ -124,15 +124,54 @@ class KwsTokenizer(val tokenSet: Set<String>) {
     }
 
     /**
-     * Segmenta una frase completa (múltiples palabras) en una lista plana de tokens.
+     * Segmenta una frase completa (múltiples palabras o separadas por guiones) en una lista plana de tokens.
      */
     fun tokenizePhrase(phrase: String): List<String> {
-        val words = phrase.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        val words = phrase.trim().split(Regex("[\\s-]+")).filter { it.isNotBlank() }
         val allTokens = mutableListOf<String>()
         for (w in words) {
             allTokens.addAll(tokenizeWord(w))
         }
         return allTokens
+    }
+
+    /**
+     * Verifica que todos los tokens de una secuencia existan en el vocabulario cargado.
+     */
+    fun validateTokens(tokens: List<String>): Boolean {
+        return tokens.isNotEmpty() && tokens.all { tokenSet.contains(it) }
+    }
+
+    /**
+     * Genera variantes ortográfico-fonéticas acotadas para mejorar el recall en pronunciación
+     * bilingüe (español/inglés) de palabras de activación personalizadas.
+     */
+    fun generatePhoneticVariants(phrase: String, maxVariants: Int = 5): List<String> {
+        val clean = Normalizer.normalize(phrase.trim(), Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            .uppercase(Locale.US)
+        if (clean.isBlank()) return emptyList()
+
+        val variants = linkedSetOf(clean)
+        val rules = listOf(
+            "PH" to "F",
+            "QU" to "K",
+            "CK" to "K",
+            "K" to "C",
+            "C" to "K",
+            "TH" to "T",
+            "V" to "B",
+            "Z" to "S",
+            "LL" to "Y",
+            "J" to "H"
+        )
+        for ((from, to) in rules) {
+            if (variants.size >= maxVariants) break
+            if (clean.contains(from)) {
+                variants.add(clean.replace(from, to))
+            }
+        }
+        return variants.take(maxVariants)
     }
 
     /**

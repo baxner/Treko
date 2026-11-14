@@ -1,78 +1,72 @@
 package com.treko.assistant
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.material.icons.automirrored.filled.TrendingUp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import com.treko.assistant.service.TrekoAssistantService
-import com.treko.assistant.ui.components.*
-import com.treko.assistant.ui.theme.*
+import com.treko.assistant.ui.components.SetupWizardScreen
+import com.treko.assistant.ui.screens.CameraViewerDialog
+import com.treko.assistant.ui.screens.DiagnosticsDialog
+import com.treko.assistant.ui.screens.FaceScreen
+import com.treko.assistant.ui.screens.HabitsScreen
+import com.treko.assistant.ui.screens.MultiCameraDialog
+import com.treko.assistant.ui.screens.SettingsScreen
+import com.treko.assistant.ui.screens.TasksScreen
+import com.treko.assistant.ui.screens.TimerScreen
+import com.treko.assistant.ui.theme.DeepBackground
+import com.treko.assistant.ui.theme.NeonCyan
+import com.treko.assistant.ui.theme.SurfaceDark
+import com.treko.assistant.ui.theme.TextPrimary
+import com.treko.assistant.ui.theme.TrekoTheme
 import com.treko.core.audio.NativeAudioEngine
-import com.treko.core.common.data.TrekoHabitManager
-import com.treko.core.common.data.TrekoTaskManager
-import com.treko.core.common.data.TrekoTimerManager
 import com.treko.core.common.data.TrekoPreferences
-import com.treko.core.common.model.AudioLevel
-import com.treko.core.common.model.CameraFeedState
-import com.treko.core.common.model.HabitItem
-import com.treko.core.common.model.TaskItem
-import com.treko.core.common.model.TimerMode
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import com.treko.core.common.model.ChatMessage
-import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    private var hasMicPermission by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+        val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO]
+            ?: (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        hasMicPermission = recordAudioGranted
         if (recordAudioGranted) {
             TrekoAssistantService.startService(this)
         }
@@ -81,6 +75,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        refreshPermissionState()
         checkAndRequestPermissions()
 
         val prefs = TrekoPreferences(applicationContext)
@@ -95,11 +90,17 @@ class MainActivity : ComponentActivity() {
                         onFinish = {
                             prefs.isOnboardingCompleted = true
                             isOnboardingCompleted = true
+                            if (hasMicPermission) {
+                                TrekoAssistantService.reloadConfiguration(this)
+                            }
                         }
                     )
                 } else {
                     MainScreen(
                         prefs = prefs,
+                        hasMicPermission = hasMicPermission,
+                        onRequestMicPermission = { checkAndRequestPermissions() },
+                        onOpenAppSettings = { openAppSettings() },
                         onReopenWizard = {
                             prefs.isOnboardingCompleted = false
                             isOnboardingCompleted = false
@@ -112,9 +113,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+        refreshPermissionState()
+        if (hasMicPermission) {
             TrekoAssistantService.startService(this)
         }
+    }
+
+    private fun refreshPermissionState() {
+        hasMicPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun checkAndRequestPermissions() {
@@ -123,20 +132,29 @@ class MainActivity : ComponentActivity() {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        val allGranted = permissions.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
-        if (!allGranted) {
-            permissionLauncher.launch(permissions.toTypedArray())
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
         } else {
+            hasMicPermission = true
             TrekoAssistantService.startService(this)
         }
     }
 
+    private fun openAppSettings() {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", packageName, null)
+        )
+        startActivity(intent)
+    }
+
     override fun onDestroy() {
         val prefs = TrekoPreferences(applicationContext)
-        if (!prefs.isAlwaysListeningInBackground) {
+        if (!isChangingConfigurations && !prefs.isAlwaysListeningInBackground) {
             TrekoAssistantService.stopService(this)
         }
         super.onDestroy()
@@ -150,13 +168,27 @@ enum class NavigationTab {
 @Composable
 fun MainScreen(
     prefs: TrekoPreferences,
+    hasMicPermission: Boolean,
+    onRequestMicPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     onReopenWizard: () -> Unit
 ) {
+    val context = LocalContext.current
     var selectedTab by remember { mutableStateOf(NavigationTab.FACE) }
+    var showDiagnostics by remember { mutableStateOf(false) }
+
     val currentEmotion by TrekoAssistantService.currentEmotion.collectAsState()
     val currentState by TrekoAssistantService.serviceState.collectAsState()
+    val serviceAssistantName by TrekoAssistantService.assistantName.collectAsState()
+    val effectiveWakeWord = serviceAssistantName.ifBlank { prefs.customWakeWord.ifBlank { "Treko" } }
+    val isMuted by TrekoAssistantService.isMuted.collectAsState()
+    val isCinemaMode by TrekoAssistantService.isCinemaMode.collectAsState()
+    val connectionStatus by TrekoAssistantService.connectionStatus.collectAsState()
     val subtitleText by TrekoAssistantService.subtitleText.collectAsState()
-    val audioLevel by NativeAudioEngine.audioLevel.collectAsState()
+    val micAudioLevelState = NativeAudioEngine.audioLevel.collectAsState()
+    val playbackAudioLevelState = TrekoAssistantService.playbackAudioLevel.collectAsState()
+    val activeCameraFeed by TrekoAssistantService.activeCameraFeed.collectAsState()
+    val activeMultiCameraGrid by TrekoAssistantService.activeMultiCameraGrid.collectAsState()
 
     Scaffold(
         bottomBar = {
@@ -174,7 +206,7 @@ fun MainScreen(
                 NavigationBarItem(
                     selected = selectedTab == NavigationTab.HABITS,
                     onClick = { selectedTab = NavigationTab.HABITS },
-                    icon = { Icon(Icons.Default.TrendingUp, contentDescription = stringResource(R.string.tab_habits)) },
+                    icon = { Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = stringResource(R.string.tab_habits)) },
                     label = { Text(stringResource(R.string.tab_habits)) },
                     colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
                 )
@@ -208,1292 +240,85 @@ fun MainScreen(
                 .padding(padding)
                 .background(DeepBackground)
         ) {
-            when (selectedTab) {
-                NavigationTab.FACE -> FaceScreen(
-                    emotion = currentEmotion,
-                    state = currentState,
-                    subtitle = subtitleText,
-                    audioLevel = audioLevel,
-                    onToggleListen = {
-                        if (currentState == TrekoState.IDLE) {
-                            TrekoAssistantService.startConversation(prefs.customWakeWord.ifBlank { "Treko" })
-                        } else if (currentState == TrekoState.SPEAKING) {
-                            // Interrupción táctil durante habla (Barge-In)
-                            TrekoAssistantService.startConversation(prefs.customWakeWord.ifBlank { "Treko" })
-                        } else {
-                            TrekoAssistantService.stopConversation()
-                        }
-                    }
-                )
-                NavigationTab.HABITS -> HabitsScreen()
-                NavigationTab.TASKS -> TasksScreen()
-                NavigationTab.TIMER -> TimerScreen()
-                NavigationTab.SETTINGS -> SettingsScreen(
-                    prefs = prefs,
-                    onReopenWizard = onReopenWizard
+            Crossfade(
+                targetState = selectedTab,
+                animationSpec = tween(180),
+                label = "TabCrossfade"
+            ) { tab ->
+                when (tab) {
+                    NavigationTab.FACE -> FaceScreen(
+                        emotion = currentEmotion,
+                        state = currentState,
+                        connectionStatus = connectionStatus,
+                        subtitle = subtitleText,
+                        wakeWord = effectiveWakeWord,
+                        hasMicPermission = hasMicPermission,
+                        isMuted = isMuted,
+                        isCinemaMode = isCinemaMode,
+                        micAudioLevelState = micAudioLevelState,
+                        playbackAudioLevelState = playbackAudioLevelState,
+                        onToggleListen = {
+                            if (!hasMicPermission) {
+                                onRequestMicPermission()
+                            } else if (currentState == TrekoState.IDLE || currentState == TrekoState.ERROR || currentState == TrekoState.SPEAKING) {
+                                TrekoAssistantService.startConversation(
+                                    context,
+                                    effectiveWakeWord
+                                )
+                            } else {
+                                TrekoAssistantService.stopConversation()
+                            }
+                        },
+                        onToggleMute = {
+                            if (!hasMicPermission) {
+                                onRequestMicPermission()
+                            } else {
+                                TrekoAssistantService.toggleMute(context)
+                            }
+                        },
+                        onToggleCinemaMode = {
+                            TrekoAssistantService.toggleCinemaMode(context)
+                        },
+                        onRequestMicPermission = onRequestMicPermission,
+                        onOpenAppSettings = onOpenAppSettings,
+                        onOpenDiagnostics = { showDiagnostics = true },
+                        onOpenMultiCamera = { TrekoAssistantService.openMultiCameraPanel(context) }
+                    )
+                    NavigationTab.HABITS -> HabitsScreen()
+                    NavigationTab.TASKS -> TasksScreen()
+                    NavigationTab.TIMER -> TimerScreen()
+                    NavigationTab.SETTINGS -> SettingsScreen(
+                        prefs = prefs,
+                        onReopenWizard = onReopenWizard,
+                        onOpenDiagnostics = { showDiagnostics = true },
+                        onRequestMicPermission = onRequestMicPermission
+                    )
+                }
+            }
+
+            activeMultiCameraGrid?.let { gridState ->
+                MultiCameraDialog(
+                    gridState = gridState,
+                    onDismiss = { TrekoAssistantService.dismissMultiCameraGrid() },
+                    onSelectCamera = { feed -> TrekoAssistantService.showCameraFeed(feed) },
+                    onAnalyzeCamera = { feed -> TrekoAssistantService.analyzeCameraFromUi(feed) },
+                    onToggleLiveAll = { enabled -> TrekoAssistantService.setMultiCameraLiveAll(enabled) }
                 )
             }
 
-            // Visor de Cámara de Seguridad (En vivo / Instantánea)
-            val activeCameraFeed by TrekoAssistantService.activeCameraFeed.collectAsState()
             activeCameraFeed?.let { feed ->
                 CameraViewerDialog(
                     feed = feed,
                     onDismiss = { TrekoAssistantService.dismissCameraFeed() }
                 )
             }
-        }
-    }
-}
 
-@Composable
-fun FaceScreen(
-    emotion: TrekoEmotion,
-    state: TrekoState,
-    subtitle: String,
-    audioLevel: AudioLevel,
-    onToggleListen: () -> Unit
-) {
-    var showHistory by remember { mutableStateOf(false) }
-    val history by TrekoAssistantService.conversationHistory.collectAsState()
-    val listState = rememberLazyListState()
-
-    // Auto-scroll al final del historial cuando llega un mensaje nuevo
-    LaunchedEffect(history.size) {
-        if (history.isNotEmpty()) {
-            listState.animateScrollToItem(history.size - 1)
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        // Encabezado con título, chip de estado y botón para ver/ocultar historial
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    color = NeonCyan,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                AssistChip(
-                    onClick = {},
-                    label = { Text(state.name, color = NeonPurple, fontSize = 11.sp) }
-                )
-            }
-
-            // Botón interactivo para ver u ocultar el historial con badge contador
-            FilledTonalIconButton(
-                onClick = { showHistory = !showHistory },
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = if (showHistory) NeonCyan.copy(alpha = 0.2f) else SurfaceDark,
-                    contentColor = if (showHistory) NeonCyan else TextSecondary
-                )
-            ) {
-                BadgedBox(
-                    badge = {
-                        if (history.isNotEmpty() && !showHistory) {
-                            Badge(containerColor = NeonPurple, contentColor = Color.White) {
-                                Text(history.size.toString(), fontSize = 9.sp)
-                            }
-                        }
-                    }
-                ) {
-                    Icon(
-                        imageVector = if (showHistory) Icons.Default.Face else Icons.Default.Forum,
-                        contentDescription = if (showHistory) "Ocultar historial" else "Ver historial"
-                    )
-                }
-            }
-        }
-
-        // Lógica facial reactiva: NUNCA cortar la animación de habla con el micrófono
-        val dynamicEmotion = when {
-            state == TrekoState.SPEAKING -> emotion // NUNCA cortar animación de respuesta por micro
-            state == TrekoState.THINKING -> TrekoEmotion.PIENSA
-            state == TrekoState.LISTENING -> TrekoEmotion.ESCUCHA
-            else -> emotion
-        }
-
-        if (showHistory) {
-            // Modo Historial: Cara compacta superior + Lista de conversación interactiva
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .clickable { onToggleListen() }
-                        .padding(top = 4.dp)
-                ) {
-                    TrekoFace(
-                        emotion = dynamicEmotion,
-                        size = 110.dp
-                    )
-                }
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDark.copy(alpha = 0.88f)),
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, CardBorder)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Conversación (${history.size})",
-                                color = TextSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            if (history.isNotEmpty()) {
-                                TextButton(
-                                    onClick = { TrekoAssistantService.clearHistory() },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text("Limpiar", color = Color(0xFFFF5252), fontSize = 11.sp)
-                                }
-                            }
-                        }
-
-                        if (history.isEmpty()) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "No hay mensajes en esta sesión.\nDi 'Treko' para comenzar a hablar.",
-                                    color = TextSecondary,
-                                    fontSize = 12.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        } else {
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(history, key = { it.id }) { msg ->
-                                    ChatBubble(msg = msg)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Modo Cara Principal: Cara grande de 260dp
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .clickable { onToggleListen() }
-                    .padding(vertical = 16.dp)
-            ) {
-                TrekoFace(
-                    emotion = dynamicEmotion,
-                    size = 260.dp
+            if (showDiagnostics) {
+                DiagnosticsDialog(
+                    prefs = prefs,
+                    onDismiss = { showDiagnostics = false }
                 )
             }
         }
-
-        // Ecualizador reactivo, subtítulo y control táctil
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            ReactiveEqualizer(audioLevel = audioLevel)
-
-            if (subtitle.isNotBlank()) {
-                Text(
-                    text = subtitle,
-                    color = NeonCyan,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            } else {
-                Text(
-                    text = when (state) {
-                        TrekoState.IDLE -> if (dynamicEmotion == TrekoEmotion.SLEEPY) "Treko durmiendo (Zzz... di 'Treko' para despertar)" else stringResource(R.string.status_idle)
-                        TrekoState.LISTENING -> stringResource(R.string.status_listening)
-                        TrekoState.THINKING -> stringResource(R.string.status_thinking)
-                        TrekoState.SPEAKING -> stringResource(R.string.status_speaking)
-                        TrekoState.ERROR -> "Error de conexión"
-                    },
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
-
-            FloatingActionButton(
-                onClick = onToggleListen,
-                containerColor = if (state == TrekoState.LISTENING) NeonPurple else NeonCyan,
-                contentColor = Color.Black,
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.size(60.dp)
-            ) {
-                Icon(
-                    imageVector = if (state == TrekoState.LISTENING) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = "Micrófono"
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun ChatBubble(msg: ChatMessage) {
-    val isUser = msg.sender.equals("Tú", ignoreCase = true)
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
-    ) {
-        Surface(
-            color = if (isUser) NeonPurple.copy(alpha = 0.22f) else SurfaceDark,
-            border = BorderStroke(1.dp, if (isUser) NeonPurple.copy(alpha = 0.5f) else CardBorder),
-            shape = RoundedCornerShape(
-                topStart = 14.dp,
-                topEnd = 14.dp,
-                bottomStart = if (isUser) 14.dp else 3.dp,
-                bottomEnd = if (isUser) 3.dp else 14.dp
-            )
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                Text(
-                    text = msg.sender,
-                    color = if (isUser) NeonPurple else NeonCyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = msg.text,
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    lineHeight = 17.sp
-                )
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// PANTALLA DE HÁBITOS (INTERACTIVA Y PERSISTENTE)
-// -------------------------------------------------------------
-@Composable
-fun HabitsScreen() {
-    val context = LocalContext.current
-    val habitManager = remember { TrekoHabitManager(context) }
-    val habits by TrekoHabitManager.habitsFlow.collectAsState()
-    val waterGlasses by TrekoHabitManager.waterGlassesFlow.collectAsState()
-
-    val totalHabits = (habits.size + 1).coerceAtLeast(1) // +1 por la meta de agua (8 vasos)
-    val waterDone = waterGlasses >= 8
-    val completedHabits = habits.count { it.isDone } + (if (waterDone) 1 else 0)
-    val progress = (completedHabits.toFloat() / totalHabits.toFloat()).coerceIn(0f, 1f)
-
-    var showAddDialog by remember { mutableStateOf(false) }
-    var newHabitTitle by remember { mutableStateOf("") }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("Hábitos Diarios", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Text("Seguimiento y bienestar personal", color = TextSecondary, fontSize = 13.sp)
-            }
-            IconButton(
-                onClick = { showAddDialog = true },
-                modifier = Modifier.background(SurfaceDark, CircleShape)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "Añadir Hábito", tint = NeonCyan)
-            }
-        }
-
-        // Tarjeta de progreso general
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Progreso de hoy", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = "$completedHabits de $totalHabits (${(progress * 100).toInt()}%)",
-                        color = NeonCyan,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
-                }
-
-                LinearProgressIndicator(
-                    progress = { progress },
-                    color = NeonCyan,
-                    trackColor = CardBorder,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(10.dp)
-                        .clip(RoundedCornerShape(5.dp))
-                )
-            }
-        }
-
-        // Contador de Hidratación interactivo
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("💧", fontSize = 28.sp)
-                    Column {
-                        Text("Hidratación Diaria", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Text(
-                            text = if (waterDone) "Meta de 8 vasos cumplida 🎉" else "$waterGlasses de 8 vasos (250 ml)",
-                            color = if (waterDone) Color(0xFF00E676) else TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    IconButton(
-                        onClick = { if (waterGlasses > 0) habitManager.setWaterGlasses(waterGlasses - 1) },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(CardBorder, CircleShape)
-                    ) {
-                        Icon(Icons.Default.Remove, contentDescription = "Menos", tint = TextPrimary, modifier = Modifier.size(18.dp))
-                    }
-                    Text(
-                        text = "$waterGlasses",
-                        color = NeonCyan,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 4.dp)
-                    )
-                    IconButton(
-                        onClick = { habitManager.setWaterGlasses(waterGlasses + 1) },
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(CardBorder, CircleShape)
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = "Más", tint = TextPrimary, modifier = Modifier.size(18.dp))
-                    }
-                }
-            }
-        }
-
-        // Lista de hábitos interactivos
-        Text("Rutinas y Hábitos", color = NeonPurple, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-
-        habits.forEach { habit ->
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (habit.isDone) SurfaceDark.copy(alpha = 0.7f) else SurfaceDark
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { habitManager.toggleHabit(habit.id) },
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(habit.icon, fontSize = 22.sp)
-                        Text(
-                            text = habit.title,
-                            color = if (habit.isDone) TextSecondary else TextPrimary,
-                            textDecoration = if (habit.isDone) TextDecoration.LineThrough else TextDecoration.None,
-                            fontSize = 14.sp
-                        )
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = habit.isDone,
-                            onCheckedChange = { _ -> habitManager.toggleHabit(habit.id) },
-                            colors = CheckboxDefaults.colors(
-                                checkedColor = NeonCyan,
-                                checkmarkColor = Color.Black
-                            )
-                        )
-                        IconButton(
-                            onClick = { habitManager.deleteHabit(habit.id) },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar Hábito", tint = TextSecondary.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showAddDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddDialog = false },
-            title = { Text("Nuevo Hábito", color = NeonCyan) },
-            text = {
-                OutlinedTextField(
-                    value = newHabitTitle,
-                    onValueChange = { newHabitTitle = it },
-                    label = { Text("Nombre del hábito") },
-                    placeholder = { Text("Ej. Estiramiento 10 min") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (newHabitTitle.isNotBlank()) {
-                            habitManager.addHabit(newHabitTitle.trim())
-                            newHabitTitle = ""
-                            showAddDialog = false
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black)
-                ) {
-                    Text("Añadir")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddDialog = false }) {
-                    Text("Cancelar", color = TextSecondary)
-                }
-            },
-            containerColor = SurfaceDark
-        )
-    }
-}
-
-// -------------------------------------------------------------
-// PANTALLA DE TAREAS (INTERACTIVA Y PERSISTENTE)
-// -------------------------------------------------------------
-@Composable
-fun TasksScreen() {
-    val context = LocalContext.current
-    val taskManager = remember { TrekoTaskManager(context) }
-    val tasks by TrekoTaskManager.tasksFlow.collectAsState()
-
-    var newTaskText by remember { mutableStateOf("") }
-    var filterMode by remember { mutableIntStateOf(0) } // 0: Todas, 1: Pendientes, 2: Hechas
-
-    val filteredTasks = tasks.filter {
-        when (filterMode) {
-            1 -> !it.isDone
-            2 -> it.isDone
-            else -> true
-        }
-    }
-
-    val doneCount = tasks.count { it.isDone }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("Tareas del Día", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Text("$doneCount de ${tasks.size} completadas", color = TextSecondary, fontSize = 13.sp)
-            }
-        }
-
-        // Campo para añadir tarea rápidamente
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedTextField(
-                value = newTaskText,
-                onValueChange = { newTaskText = it },
-                placeholder = { Text("Escribe una nueva tarea…", fontSize = 14.sp) },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp)
-            )
-
-            Button(
-                onClick = {
-                    if (newTaskText.isNotBlank()) {
-                        taskManager.addTask(newTaskText.trim())
-                        newTaskText = ""
-                    }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.height(56.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "Añadir")
-            }
-        }
-
-        // Filtros rápidos
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = filterMode == 0,
-                onClick = { filterMode = 0 },
-                label = { Text("Todas (${tasks.size})") }
-            )
-            FilterChip(
-                selected = filterMode == 1,
-                onClick = { filterMode = 1 },
-                label = { Text("Pendientes (${tasks.count { !it.isDone }})") }
-            )
-            FilterChip(
-                selected = filterMode == 2,
-                onClick = { filterMode = 2 },
-                label = { Text("Completadas ($doneCount)") }
-            )
-        }
-
-        // Lista de tareas
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(filteredTasks, key = { it.id }) { task ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clickable { taskManager.toggleTask(task.id) },
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Checkbox(
-                                checked = task.isDone,
-                                onCheckedChange = { _ ->
-                                    taskManager.toggleTask(task.id)
-                                },
-                                colors = CheckboxDefaults.colors(
-                                    checkedColor = NeonCyan,
-                                    checkmarkColor = Color.Black
-                                )
-                            )
-                            Text(
-                                text = task.title,
-                                color = if (task.isDone) TextSecondary else TextPrimary,
-                                textDecoration = if (task.isDone) TextDecoration.LineThrough else TextDecoration.None,
-                                fontSize = 14.sp
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { taskManager.deleteTask(task.id) }
-                        ) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar", tint = TextSecondary)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// PANTALLA DE TEMPORIZADOR (POMODORO ASISTIDO POR VOZ)
-// -------------------------------------------------------------
-@Composable
-fun TimerScreen() {
-    val timerState by TrekoTimerManager.timerState.collectAsState()
-    val progress = if (timerState.totalSeconds > 0) {
-        (timerState.remainingSeconds.toFloat() / timerState.totalSeconds.toFloat()).coerceIn(0f, 1f)
-    } else 0f
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Temporizador de Enfoque", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("Técnica Pomodoro asistida por Treko", color = TextSecondary, fontSize = 13.sp)
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Selector de modo
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(TimerMode.POMODORO, TimerMode.SHORT_BREAK, TimerMode.LONG_BREAK).forEach { mode ->
-                    FilterChip(
-                        selected = timerState.selectedMode == mode,
-                        onClick = { TrekoTimerManager.setMode(mode) },
-                        label = { Text(mode.title, fontSize = 11.sp) }
-                    )
-                }
-            }
-        }
-
-        // Reloj Cyber Digital
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            val minutes = timerState.remainingSeconds / 60
-            val seconds = timerState.remainingSeconds % 60
-            val timeString = String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds)
-
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(220.dp)
-                    .clip(CircleShape)
-                    .background(SurfaceDark)
-                    .border(3.dp, if (timerState.isRunning) NeonCyan else CardBorder, CircleShape)
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = timeString,
-                        color = if (timerState.isRunning) NeonCyan else TextPrimary,
-                        fontSize = 52.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (timerState.isRunning) "En progreso…" else "Pausado",
-                        color = if (timerState.isRunning) NeonPurple else TextSecondary,
-                        fontSize = 13.sp
-                    )
-                }
-            }
-
-            LinearProgressIndicator(
-                progress = { progress },
-                color = NeonCyan,
-                trackColor = CardBorder,
-                modifier = Modifier
-                    .width(220.dp)
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-            )
-        }
-
-        // Controles y estadísticas
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Button(
-                    onClick = { TrekoTimerManager.toggle() },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (timerState.isRunning) Color(0xFFFF5252) else NeonCyan,
-                        contentColor = Color.Black
-                    ),
-                    modifier = Modifier.height(50.dp).width(140.dp),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(
-                        imageVector = if (timerState.isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = null
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (timerState.isRunning) "Pausar" else "Iniciar", fontWeight = FontWeight.Bold)
-                }
-
-                OutlinedButton(
-                    onClick = { TrekoTimerManager.reset() },
-                    modifier = Modifier.height(50.dp).width(120.dp),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, tint = TextPrimary)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Reiniciar", color = TextPrimary)
-                }
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Sesiones hoy", color = TextSecondary, fontSize = 12.sp)
-                        Text("${timerState.completedSessions}", color = NeonCyan, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Enfoque total", color = TextSecondary, fontSize = 12.sp)
-                        Text("${timerState.completedSessions * 25} min", color = NeonPurple, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// VISOR DE CÁMARA DE SEGURIDAD (EN VIVO / CAPTURA)
-// -------------------------------------------------------------
-@Composable
-fun CameraViewerDialog(
-    feed: CameraFeedState,
-    onDismiss: () -> Unit
-) {
-    var bitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var refreshTrigger by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(feed.entityId, refreshTrigger) {
-        withContext(Dispatchers.IO) {
-            try {
-                val client = okhttp3.OkHttpClient()
-                val req = okhttp3.Request.Builder()
-                    .url(feed.snapshotUrl)
-                    .addHeader("Authorization", "Bearer ${feed.haToken}")
-                    .get()
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val bytes = resp.body?.bytes()
-                        if (bytes != null) {
-                            val decoded = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                            if (decoded != null) {
-                                bitmap = decoded.asImageBitmap()
-                                errorMessage = null
-                            }
-                        }
-                    } else {
-                        errorMessage = "Error ${resp.code} al obtener imagen de la cámara"
-                    }
-                }
-            } catch (e: Exception) {
-                errorMessage = e.message
-            } finally {
-                isLoading = false
-            }
-        }
-    }
-
-    if (feed.isLive) {
-        LaunchedEffect(feed.entityId) {
-            while (true) {
-                delay(2000L)
-                refreshTrigger++
-            }
-        }
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            border = BorderStroke(1.dp, NeonCyan),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("📹", fontSize = 20.sp)
-                        Column {
-                            Text(feed.friendlyName, color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            Text(
-                                if (feed.isLive) "En vivo (Actualizando cada 2s)" else "Instantánea de cámara",
-                                color = if (feed.isLive) Color(0xFF00E676) else TextSecondary,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = TextSecondary)
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black),
-                    contentAlignment = Alignment.Center
-                ) {
-                    val bmp = bitmap
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp,
-                            contentDescription = feed.friendlyName,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                        )
-                    } else if (isLoading) {
-                        CircularProgressIndicator(color = NeonCyan)
-                    } else {
-                        Text(
-                            text = errorMessage ?: "Sin señal de video",
-                            color = TextSecondary,
-                            fontSize = 12.sp,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = { refreshTrigger++ }) {
-                        Icon(Icons.Default.Refresh, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Actualizar", color = NeonCyan, fontSize = 12.sp)
-                    }
-
-                    Button(
-                        onClick = onDismiss,
-                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceDark, contentColor = TextPrimary),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("Cerrar")
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// PANTALLA DE AJUSTES (DINÁMICA Y PERSISTIDA)
-// -------------------------------------------------------------
-@Composable
-fun SettingsScreen(
-    prefs: TrekoPreferences,
-    onReopenWizard: () -> Unit
-) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-
-    var xiaozhiUrl by remember { mutableStateOf(prefs.xiaozhiWsUrl) }
-    var xiaozhiToken by remember { mutableStateOf(prefs.xiaozhiToken) }
-    var haUrl by remember { mutableStateOf(prefs.haUrl) }
-    var haToken by remember { mutableStateOf(prefs.haToken) }
-    var customWakeWord by remember { mutableStateOf(prefs.customWakeWord) }
-    var wakeWordBoost by remember { mutableFloatStateOf(prefs.wakeWordBoost) }
-    var sensitivity by remember { mutableFloatStateOf(prefs.wakeWordSensitivity) }
-    var alwaysListenInBackground by remember { mutableStateOf(prefs.isAlwaysListeningInBackground) }
-
-    var isTokenVisible by remember { mutableStateOf(false) }
-
-    // Estados de pruebas
-    var isTestingXiaozhi by remember { mutableStateOf(false) }
-    var xiaozhiResult by remember { mutableStateOf<String?>(null) }
-    var isTestingHa by remember { mutableStateOf(false) }
-    var haResult by remember { mutableStateOf<String?>(null) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(20.dp)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text("Ajustes del Asistente", color = NeonCyan, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-
-        // Tarjeta Servidor Xiaozhi
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Servidor Xiaozhi AI", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    IconButton(
-                        onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("MAC Address", prefs.macAddress))
-                            Toast.makeText(context, "MAC copiada: ${prefs.macAddress}", Toast.LENGTH_SHORT).show()
-                        }
-                    ) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copiar MAC", tint = NeonCyan, modifier = Modifier.size(20.dp))
-                    }
-                }
-
-                AssistChip(
-                    onClick = {},
-                    label = { Text("MAC (xiaozhi.me): ${prefs.macAddress}", fontSize = 12.sp, color = NeonCyan) }
-                )
-
-                OutlinedTextField(
-                    value = xiaozhiUrl,
-                    onValueChange = { xiaozhiUrl = it },
-                    label = { Text("URL WebSocket Xiaozhi", fontSize = 12.sp) },
-                    placeholder = { Text("wss://api.tenclass.net/xiaozhi/v1/") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = xiaozhiToken,
-                    onValueChange = { xiaozhiToken = it },
-                    label = { Text("Token de Xiaozhi (opcional)", fontSize = 12.sp) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (xiaozhiResult != null) {
-                        Text(
-                            text = xiaozhiResult ?: "",
-                            color = if (xiaozhiResult?.startsWith("✓") == true) Color(0xFF00E676) else Color(0xFFFF5252),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.width(1.dp))
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            coroutineScope.launch {
-                                isTestingXiaozhi = true
-                                xiaozhiResult = null
-                                xiaozhiResult = testXiaozhiConnection(xiaozhiUrl, xiaozhiToken)
-                                isTestingXiaozhi = false
-                            }
-                        },
-                        enabled = !isTestingXiaozhi
-                    ) {
-                        if (isTestingXiaozhi) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Text("Probar Servidor", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tarjeta Home Assistant
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Home Assistant (Domótica)", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-
-                OutlinedTextField(
-                    value = haUrl,
-                    onValueChange = { haUrl = it },
-                    label = { Text("URL del Servidor", fontSize = 12.sp) },
-                    placeholder = { Text("http://homeassistant.local:8123") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = haToken,
-                    onValueChange = { haToken = it },
-                    label = { Text("Token de Larga Duración", fontSize = 12.sp) },
-                    visualTransformation = if (isTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { isTokenVisible = !isTokenVisible }) {
-                            Icon(
-                                imageVector = if (isTokenVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = null,
-                                tint = TextSecondary
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (haResult != null) {
-                        Text(
-                            text = haResult ?: "",
-                            color = if (haResult?.startsWith("✓") == true) Color(0xFF00E676) else Color(0xFFFF5252),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.width(1.dp))
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            coroutineScope.launch {
-                                isTestingHa = true
-                                haResult = null
-                                haResult = testHaConnection(haUrl, haToken)
-                                isTestingHa = false
-                            }
-                        },
-                        enabled = !isTestingHa
-                    ) {
-                        if (isTestingHa) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Text("Probar HA", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tarjeta Sensibilidad Wake Word y Personalización KWS
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Detección de Voz Local (KWS)", color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("Motor neuronal Sherpa-ONNX Zipformer (100% privado en tu teléfono)", color = TextSecondary, fontSize = 12.sp)
-
-                OutlinedTextField(
-                    value = customWakeWord,
-                    onValueChange = { customWakeWord = it },
-                    label = { Text("Palabra de Activación Personalizada", fontSize = 12.sp) },
-                    placeholder = { Text("Treko, Jarvis, Alexa, etc.") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Sensibilidad al Susurro (Ganancia)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(String.format(java.util.Locale.US, "%.1fx", wakeWordBoost), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-                    Text("Multiplicador acústico para despertar a Treko hablando suave o de lejos (def: 2.5x)", color = TextSecondary, fontSize = 11.sp)
-                }
-
-                Slider(
-                    value = wakeWordBoost,
-                    onValueChange = { wakeWordBoost = it },
-                    valueRange = 1.0f..5.0f,
-                    colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
-                )
-
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Umbral de Ruido (Filtro Acústico)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(String.format(java.util.Locale.US, "%.2f", sensitivity), color = NeonCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-                    Text("Menor valor = más sensible. Mayor valor = evita falsos positivos con ruidos (def: 0.05)", color = TextSecondary, fontSize = 11.sp)
-                }
-
-                Slider(
-                    value = sensitivity,
-                    onValueChange = { sensitivity = it },
-                    valueRange = 0.01f..0.20f,
-                    colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
-                )
-            }
-        }
-
-        // Tarjeta Escucha en Segundo Plano
-        Card(
-            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                        Text(
-                            "Escuchar con app cerrada",
-                            color = NeonPurple,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            if (alwaysListenInBackground)
-                                "Treko continúa escuchando 'Treko' en segundo plano aunque cierres la app o apagues la pantalla."
-                            else
-                                "Treko solo escuchará mientras la app esté abierta. Al cerrar la app se detiene el micrófono.",
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                    Switch(
-                        checked = alwaysListenInBackground,
-                        onCheckedChange = { checked ->
-                            alwaysListenInBackground = checked
-                            prefs.isAlwaysListeningInBackground = checked
-                            if (checked) {
-                                TrekoAssistantService.startService(context)
-                                Toast.makeText(context, "Escucha en segundo plano activada", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Treko se detendrá al cerrar la app", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = NeonCyan,
-                            checkedTrackColor = NeonPurple.copy(alpha = 0.5f)
-                        )
-                    )
-                }
-            }
-        }
-
-        // Acciones y Botones Finales
-        Button(
-            onClick = {
-                prefs.xiaozhiWsUrl = xiaozhiUrl
-                prefs.xiaozhiToken = xiaozhiToken
-                prefs.haUrl = haUrl
-                prefs.haToken = haToken
-                prefs.customWakeWord = customWakeWord
-                customWakeWord = prefs.customWakeWord
-                prefs.wakeWordBoost = wakeWordBoost
-                prefs.wakeWordSensitivity = sensitivity
-                prefs.isAlwaysListeningInBackground = alwaysListenInBackground
-
-                TrekoAssistantService.updateWakeWordConfig(
-                    context = context,
-                    keyword = prefs.customWakeWord,
-                    boost = prefs.wakeWordBoost,
-                    threshold = prefs.wakeWordSensitivity
-                )
-
-                if (alwaysListenInBackground) {
-                    TrekoAssistantService.startService(context)
-                }
-
-                Toast.makeText(context, "¡Ajustes guardados!", Toast.LENGTH_SHORT).show()
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-        ) {
-            Icon(Icons.Default.Save, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Guardar Ajustes", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
-
-        OutlinedButton(
-            onClick = onReopenWizard,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-        ) {
-            Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = NeonPurple)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Reabrir Asistente de Configuración (Wizard)", color = NeonPurple, fontSize = 14.sp)
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
     }
 }

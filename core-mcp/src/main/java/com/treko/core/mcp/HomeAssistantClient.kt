@@ -9,6 +9,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.Normalizer
 import java.util.concurrent.TimeUnit
 
 /**
@@ -22,6 +23,7 @@ class HomeAssistantClient(
 ) {
     companion object {
         private const val TAG = "HomeAssistantClient"
+        private const val STATES_CACHE_TTL_MS = 3000L
     }
 
     private val client = OkHttpClient.Builder()
@@ -29,19 +31,61 @@ class HomeAssistantClient(
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
+    @Volatile
+    private var cachedStates: JSONArray? = null
+
+    @Volatile
+    private var cachedStatesTimestampMs: Long = 0L
+
+    internal var radioBrowserClient: RadioBrowserClient = RadioBrowserClient()
+
     fun updateCredentials(url: String, token: String) {
         this.haUrl = sanitizeUrl(url)
         this.haToken = token.trim()
+        invalidateStatesCache()
+    }
+
+    private fun invalidateStatesCache() {
+        cachedStates = null
+        cachedStatesTimestampMs = 0L
     }
 
     private fun getBaseUrl(): String = sanitizeUrl(haUrl)
 
-    private fun sanitizeUrl(url: String): String {
+    internal fun sanitizeUrl(url: String): String {
         var cleanUrl = url.trim().removeSuffix("/")
         if (cleanUrl.endsWith("/api")) {
             cleanUrl = cleanUrl.removeSuffix("/api")
         }
         return cleanUrl
+    }
+
+    internal fun hasValidConfig(): Boolean {
+        val base = getBaseUrl()
+        val hasHttpScheme = base.startsWith("http://", ignoreCase = true) ||
+            base.startsWith("https://", ignoreCase = true)
+        return hasHttpScheme && haToken.isNotBlank()
+    }
+
+    private fun fetchStatesArray(forceRefresh: Boolean = false): JSONArray? {
+        val now = System.currentTimeMillis()
+        val cached = cachedStates
+        if (!forceRefresh && cached != null && (now - cachedStatesTimestampMs) < STATES_CACHE_TTL_MS) {
+            return cached
+        }
+        if (!hasValidConfig()) return null
+        val req = Request.Builder()
+            .url("${getBaseUrl()}/api/states")
+            .addHeader("Authorization", "Bearer $haToken")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            val array = JSONArray(resp.body?.string().orEmpty())
+            cachedStates = array
+            cachedStatesTimestampMs = System.currentTimeMillis()
+            return array
+        }
     }
 
     /**
@@ -55,6 +99,9 @@ class HomeAssistantClient(
         serviceData: JSONObject? = null
     ): String = withContext(Dispatchers.IO) {
         try {
+            if (!hasValidConfig()) {
+                return@withContext "Error: Home Assistant no está configurado con una URL válida (http/https) y token."
+            }
             var d = domain.trim().lowercase().removePrefix("service.")
             var s = service.trim().lowercase()
 
@@ -72,8 +119,9 @@ class HomeAssistantClient(
 
             val payload = serviceData ?: JSONObject()
 
-            // Auto-corrección inteligente de entity_id con tolerancia a erratas de LLMs
-            val requestedEid = payload.optString("entity_id", "").trim()
+            // Auto-corrección inteligente de entity_id con tolerancia a erratas de LLMs (solo si es String)
+            val rawEntityVal = payload.opt("entity_id")
+            val requestedEid = if (rawEntityVal is String) rawEntityVal.trim() else ""
             var correctedEid = requestedEid
             if (requestedEid.isNotBlank()) {
                 correctedEid = resolveEntityIdOrFuzzy(requestedEid, d)
@@ -95,6 +143,7 @@ class HomeAssistantClient(
             client.newCall(req).execute().use { resp ->
                 val respBody = resp.body?.string().orEmpty()
                 if (resp.isSuccessful) {
+                    invalidateStatesCache()
                     val correctionNote = if (correctedEid.isNotBlank() && correctedEid != requestedEid) " (en '$correctedEid')" else ""
                     "Servicio '$d.$s' ejecutado correctamente en Home Assistant$correctionNote."
                 } else {
@@ -111,48 +160,37 @@ class HomeAssistantClient(
      */
     private fun resolveEntityIdOrFuzzy(rawEid: String, domainHint: String): String {
         try {
-            val req = Request.Builder()
-                .url("${getBaseUrl()}/api/states")
-                .addHeader("Authorization", "Bearer $haToken")
-                .get()
-                .build()
+            val array = fetchStatesArray() ?: return rawEid
+            val allEids = mutableListOf<String>()
+            val domainEids = mutableListOf<String>()
 
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return rawEid
-                val array = JSONArray(resp.body?.string().orEmpty())
-                val allEids = mutableListOf<String>()
-                val domainEids = mutableListOf<String>()
-
-                for (i in 0 until array.length()) {
-                    val eid = array.getJSONObject(i).optString("entity_id")
-                    if (eid.isBlank() || eid.contains("_segment_")) continue
-                    allEids.add(eid)
-                    if (domainHint.isNotBlank() && eid.startsWith("$domainHint.")) {
-                        domainEids.add(eid)
-                    }
+            for (i in 0 until array.length()) {
+                val eid = array.getJSONObject(i).optString("entity_id")
+                if (eid.isBlank() || eid.contains("_segment_")) continue
+                allEids.add(eid)
+                if (domainHint.isNotBlank() && eid.startsWith("$domainHint.")) {
+                    domainEids.add(eid)
                 }
+            }
 
-                // 1. Si existe exactamente, devolver tal cual
-                if (allEids.contains(rawEid)) {
-                    return rawEid
+            if (allEids.contains(rawEid)) {
+                return rawEid
+            }
+
+            val candidatesPool = if (domainEids.isNotEmpty()) domainEids else allEids
+            var bestEid: String? = null
+            var bestSim = 0.0
+
+            for (cand in candidatesPool) {
+                val sim = stringSimilarity(rawEid.lowercase(), cand.lowercase())
+                if (sim > bestSim) {
+                    bestSim = sim
+                    bestEid = cand
                 }
+            }
 
-                // 2. Buscar coincidencia más cercana primero en el dominio especificado, luego en general
-                val candidatesPool = if (domainEids.isNotEmpty()) domainEids else allEids
-                var bestEid: String? = null
-                var bestSim = 0.0
-
-                for (cand in candidatesPool) {
-                    val sim = stringSimilarity(rawEid.lowercase(), cand.lowercase())
-                    if (sim > bestSim) {
-                        bestSim = sim
-                        bestEid = cand
-                    }
-                }
-
-                if (bestEid != null && bestSim >= 0.65) {
-                    return bestEid
-                }
+            if (bestEid != null && bestSim >= 0.65) {
+                return bestEid
             }
         } catch (_: Exception) {
             // Mantener rawEid si la consulta falla
@@ -490,7 +528,7 @@ class HomeAssistantClient(
         }
     }
 
-    private fun applyColorOrTemperature(payload: JSONObject, raw: String) {
+    internal fun applyColorOrTemperature(payload: JSONObject, raw: String) {
         val c = raw.trim().lowercase()
         val cClean = c.replace(Regex("^(color\\s+(de\\s+)?|luz\\s+|tono\\s+)"), "").trim()
 
@@ -526,19 +564,25 @@ class HomeAssistantClient(
         val rgbValues = mapOf(
             "azul" to listOf(0, 0, 255),
             "blue" to listOf(0, 0, 255),
+            "celeste" to listOf(100, 180, 255),
             "rojo" to listOf(255, 0, 0),
             "red" to listOf(255, 0, 0),
             "verde" to listOf(0, 255, 0),
             "green" to listOf(0, 255, 0),
             "amarillo" to listOf(255, 255, 0),
             "yellow" to listOf(255, 255, 0),
+            "dorado" to listOf(255, 215, 0),
             "morado" to listOf(128, 0, 128),
+            "violeta" to listOf(138, 43, 226),
+            "lila" to listOf(180, 120, 230),
             "purple" to listOf(128, 0, 128),
             "naranja" to listOf(255, 165, 0),
             "orange" to listOf(255, 165, 0),
             "rosa" to listOf(255, 105, 180),
             "pink" to listOf(255, 105, 180),
+            "magenta" to listOf(255, 0, 255),
             "cyan" to listOf(0, 255, 255),
+            "cian" to listOf(0, 255, 255),
             "turquesa" to listOf(64, 224, 208)
         )
         val rgb = rgbValues[cClean]
@@ -548,7 +592,7 @@ class HomeAssistantClient(
         }
         val rgbMap = mapOf(
             "rojo" to "red", "azul" to "blue", "verde" to "green", "amarillo" to "yellow",
-            "naranja" to "orange", "morado" to "purple", "rosa" to "pink"
+            "naranja" to "orange", "morado" to "purple", "rosa" to "pink", "cian" to "cyan"
         )
         val colorName = rgbMap[cClean] ?: cClean
         payload.put("color_name", colorName)
@@ -599,24 +643,17 @@ class HomeAssistantClient(
             "bocinas" to listOf("altavoces", "speakers", "echo", "alexa"),
             "altavoz" to listOf("bocina", "speaker", "echo", "alexa"),
             "altavoces" to listOf("bocinas", "speakers", "echo", "alexa"),
-            "cuarto" to listOf("dormitorio", "recamara", "recámara", "habitacion", "habitación", "pieza", "colors", "ambiente"),
-            "recamara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "colors", "ambiente"),
-            "recámara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "colors", "ambiente"),
-            "dormitorio" to listOf("cuarto", "recamara", "recámara", "habitacion", "habitación", "colors", "ambiente"),
-            "habitacion" to listOf("cuarto", "dormitorio", "recamara", "recámara", "colors", "ambiente"),
-            "habitación" to listOf("cuarto", "dormitorio", "recamara", "recámara", "colors", "ambiente"),
+            "cuarto" to listOf("dormitorio", "recamara", "recámara", "habitacion", "habitación", "pieza", "bedroom", "room"),
+            "recamara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "bedroom"),
+            "recámara" to listOf("dormitorio", "cuarto", "habitacion", "habitación", "bedroom"),
+            "dormitorio" to listOf("cuarto", "recamara", "recámara", "habitacion", "habitación", "bedroom"),
+            "habitacion" to listOf("cuarto", "dormitorio", "recamara", "recámara", "bedroom"),
+            "habitación" to listOf("cuarto", "dormitorio", "recamara", "recámara", "bedroom"),
             "sala" to listOf("living", "estancia")
         )
 
-        val req = Request.Builder()
-            .url("${getBaseUrl()}/api/states")
-            .addHeader("Authorization", "Bearer $haToken")
-            .get()
-            .build()
-
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            val jsonArray = JSONArray(resp.body?.string().orEmpty())
+        val jsonArray = fetchStatesArray() ?: return null
+        run {
             val candidates = mutableListOf<Pair<HaEntity, Int>>()
             val allControllable = mutableListOf<HaEntity>()
 
@@ -772,6 +809,60 @@ class HomeAssistantClient(
         val snapshotUrl: String
     )
 
+    data class HaCameraGroup(
+        val key: String,
+        val friendlyName: String,
+        val primaryEntityId: String,
+        val snapshotEntityId: String,
+        val liveEntityId: String?,
+        val state: String,
+        val snapshotUrl: String
+    )
+
+    internal data class HomeEntitySnapshot(
+        val entityId: String,
+        val friendlyName: String,
+        val state: String,
+        val deviceClass: String = "",
+        val unitOfMeasurement: String = "",
+        val mediaTitle: String = "",
+        val mediaArtist: String = "",
+        val source: String = "",
+        val appName: String = "",
+        val temperature: Double? = null,
+        val currentTemperature: Double? = null,
+        val temperatureUnit: String = "°C",
+        val humidity: Double? = null,
+        val hvacAction: String = "",
+        val isAlexa: Boolean = false
+    )
+
+    internal data class MediaPlayerCandidate(
+        val entityId: String,
+        val friendlyName: String,
+        val state: String,
+        val deviceClass: String = "",
+        val isAlexa: Boolean = false
+    )
+
+    internal data class PlayMediaCommandDraft(
+        val mediaContentId: String,
+        val mediaContentType: String
+    )
+
+    internal enum class MediaIntent {
+        ROUTINE,
+        RADIO,
+        MUSIC
+    }
+
+    internal sealed class MediaTargetResolution {
+        data class Found(val target: MediaPlayerCandidate) : MediaTargetResolution()
+        data class Unreachable(val target: MediaPlayerCandidate, val available: List<MediaPlayerCandidate>) : MediaTargetResolution()
+        data class NotFound(val requested: String, val available: List<MediaPlayerCandidate>) : MediaTargetResolution()
+        data object NoPlayers : MediaTargetResolution()
+    }
+
     suspend fun getWeatherSummary(): String = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder()
@@ -804,24 +895,7 @@ class HomeAssistantClient(
                 val windSpeed = attrs.optDouble("wind_speed", Double.NaN)
                 val windSpeedUnit = attrs.optString("wind_speed_unit", "km/h")
 
-                val conditionSpanish = when (state.lowercase()) {
-                    "clear-night" -> "cielo despejado nocturno"
-                    "cloudy" -> "nublado"
-                    "exceptional" -> "condición excepcional"
-                    "fog" -> "con niebla"
-                    "hail" -> "granizo"
-                    "lightning" -> "tormenta eléctrica"
-                    "lightning-rainy" -> "tormenta eléctrica con lluvia"
-                    "partlycloudy" -> "parcialmente nublado"
-                    "pouring" -> "lluvia intensa"
-                    "rainy" -> "lluvioso"
-                    "snowy" -> "nevando"
-                    "snowy-rainy" -> "aguanieve"
-                    "sunny" -> "soleado y despejado"
-                    "windy" -> "ventoso"
-                    "windy-variant" -> "ventoso variable"
-                    else -> state
-                }
+                val conditionSpanish = translateWeatherConditionSpanish(state)
 
                 val sb = StringBuilder("Pronóstico de $friendlyName: Actualmente está $conditionSpanish")
                 if (!temp.isNaN()) sb.append(" con una temperatura de $temp$tempUnit")
@@ -843,11 +917,10 @@ class HomeAssistantClient(
         try {
             val q = deviceQuery.ifBlank { "media_player" }
             val entity = resolveEntity(q)
-            val targetEid = if (entity != null && entity.domain == "media_player") {
-                entity.id
-            } else {
-                findActiveMediaPlayer() ?: entity?.id ?: "media_player"
-            }
+            val targetEid = when {
+                entity != null && entity.domain == "media_player" -> entity.id
+                else -> findActiveMediaPlayer() ?: entity?.id
+            } ?: return@withContext "No se encontró ningún reproductor multimedia disponible en Home Assistant."
 
             val act = action.lowercase().trim()
             val (service, data) = when (act) {
@@ -903,34 +976,34 @@ class HomeAssistantClient(
 
     suspend fun triggerScene(sceneQuery: String): String = withContext(Dispatchers.IO) {
         try {
-            val clean = sceneQuery.trim().lowercase().replace("escena", "").trim()
-            val req = Request.Builder()
-                .url("${getBaseUrl()}/api/states")
-                .addHeader("Authorization", "Bearer $haToken")
-                .get()
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext "Error consultando escenas en Home Assistant (${resp.code})."
-                val array = JSONArray(resp.body?.string().orEmpty())
-                var targetEid: String? = null
-                var friendlyName = ""
-                for (i in 0 until array.length()) {
-                    val item = array.getJSONObject(i)
-                    val eid = item.getString("entity_id")
-                    if (eid.startsWith("scene.")) {
-                        val fn = item.optJSONObject("attributes")?.optString("friendly_name", "") ?: ""
-                        if (eid.contains(clean, ignoreCase = true) || fn.contains(clean, ignoreCase = true)) {
-                            targetEid = eid
-                            friendlyName = fn.ifBlank { eid }
-                            break
-                        }
+            val clean = sceneQuery.trim().lowercase().replace(Regex("\\bescena\\b"), "").trim()
+            if (clean.isBlank()) {
+                return@withContext "Por favor indica el nombre de la escena a activar."
+            }
+            val array = fetchStatesArray()
+                ?: return@withContext "Error consultando escenas en Home Assistant."
+            var targetEid: String? = null
+            var friendlyName = ""
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val eid = item.getString("entity_id")
+                if (eid.startsWith("scene.")) {
+                    val fn = item.optJSONObject("attributes")?.optString("friendly_name", "") ?: ""
+                    if (eid.contains(clean, ignoreCase = true) || fn.contains(clean, ignoreCase = true)) {
+                        targetEid = eid
+                        friendlyName = fn.ifBlank { eid }
+                        break
                     }
                 }
-                if (targetEid == null) {
-                    return@withContext "No se encontró ninguna escena que coincida con '$sceneQuery'."
-                }
-                callService("scene", "turn_on", JSONObject().put("entity_id", targetEid))
+            }
+            if (targetEid == null) {
+                return@withContext "No se encontró ninguna escena que coincida con '$sceneQuery'."
+            }
+            val result = callService("scene", "turn_on", JSONObject().put("entity_id", targetEid))
+            if (result.contains("correctamente")) {
                 "Escena '$friendlyName' activada con éxito."
+            } else {
+                result
             }
         } catch (e: Exception) {
             "Error activando escena: ${e.message}"
@@ -945,7 +1018,10 @@ class HomeAssistantClient(
                 .get()
                 .build()
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext emptyList()
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "getCameras() falló HTTP ${resp.code}")
+                    return@withContext emptyList()
+                }
                 val array = JSONArray(resp.body?.string().orEmpty())
                 val list = mutableListOf<CameraInfo>()
                 for (i in 0 until array.length()) {
@@ -965,7 +1041,7 @@ class HomeAssistantClient(
         }
     }
 
-    private fun getSynonymsForQuery(query: String): List<String> {
+    internal fun getSynonymsForQuery(query: String): List<String> {
         val q = query.lowercase().trim()
         val synonyms = mutableListOf(q)
         if (q.contains("ring") || q.contains("timbre") || q.contains("doorbell") || q.contains("intercom")) {
@@ -974,8 +1050,8 @@ class HomeAssistantClient(
         if (q.contains("puerta") || q.contains("entrada") || q.contains("frente") || q.contains("fachada") || q.contains("acceso")) {
             synonyms.addAll(listOf("puerta", "puerta_principal", "entrada", "doorbell", "front", "door"))
         }
-        if (q.contains("jardin") || q.contains("jardín") || q.contains("patio") || q.contains("china") || q.contains("trasero") || q.contains("backyard")) {
-            synonyms.addAll(listOf("china", "jardin", "jardín", "patio", "garden", "backyard"))
+        if (q.contains("jardin") || q.contains("jardín") || q.contains("patio") || q.contains("trasero") || q.contains("backyard")) {
+            synonyms.addAll(listOf("jardin", "jardín", "patio", "garden", "backyard"))
         }
         if (q.contains("cochera") || q.contains("garaje") || q.contains("garage") || q.contains("auto") || q.contains("carro") || q.contains("estacionamiento")) {
             synonyms.addAll(listOf("cochera", "garage", "garaje", "driveway", "parking"))
@@ -986,11 +1062,12 @@ class HomeAssistantClient(
         return synonyms.distinct()
     }
 
-    private fun rankCameraCandidates(cams: List<CameraInfo>, cameraQuery: String, preferSnapshot: Boolean = true): List<CameraInfo> {
+    internal fun rankCameraCandidates(cams: List<CameraInfo>, cameraQuery: String, preferSnapshot: Boolean = true): List<CameraInfo> {
         if (cams.isEmpty()) return emptyList()
         val clean = cameraQuery.trim().lowercase()
-            .replace("cámara", "").replace("camara", "")
-            .replace("la", "").replace("el", "").replace("de", "").trim()
+            .replace(Regex("\\b(c[aá]mara|camara|la|el|de|del)\\b"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
 
         val synonyms = if (clean.isNotBlank()) getSynonymsForQuery(clean) else emptyList()
 
@@ -1041,11 +1118,19 @@ class HomeAssistantClient(
                         if (resp.isSuccessful) {
                             val bytes = resp.body?.bytes()
                             if (bytes != null && bytes.isNotEmpty()) {
-                                return@withContext candidate to bytes
+                                val frameBytes = extractEmbeddedImageBytes(bytes)
+                                if (frameBytes != null) {
+                                    return@withContext candidate to frameBytes
+                                }
+                                Log.w(TAG, "Snapshot ${candidate.entityId} devolvió payload no decodificable (${bytes.size}B, CT=${resp.header("Content-Type")})")
                             }
                         } else {
-                            Log.w(TAG, "Snapshot falló para ${candidate.entityId} (HTTP ${resp.code}), probando siguiente candidato...")
+                            Log.w(TAG, "Snapshot falló para ${candidate.entityId} (HTTP ${resp.code}), probando stream/siguiente...")
                         }
+                    }
+                    // Fallback: intentar extraer el primer frame JPEG desde camera_proxy_stream
+                    fetchFirstStreamFrameBytes(candidate.entityId)?.let { streamFrame ->
+                        return@withContext candidate to streamFrame
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Excepción al consultar snapshot de ${candidate.entityId}: ${e.message}")
@@ -1054,6 +1139,63 @@ class HomeAssistantClient(
             null
         } catch (e: Exception) {
             Log.e(TAG, "Error obteniendo snapshot de cámara: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractEmbeddedImageBytes(bytes: ByteArray): ByteArray? {
+        if (bytes.size < 16) return null
+        // Direct JPEG, PNG, GIF, or RIFF/WebP header
+        val isJpeg = bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()
+        val isPng = bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte()
+        val isWebpOrGif = (bytes[0] == 'R'.code.toByte() && bytes[1] == 'I'.code.toByte()) ||
+            (bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() && bytes[2] == 'F'.code.toByte())
+        if (isJpeg || isPng || isWebpOrGif) return bytes
+
+        // Scan for embedded JPEG SOI (FF D8 FF) inside multipart response
+        for (i in 0 until bytes.size - 2) {
+            if (bytes[i] == 0xFF.toByte() && bytes[i + 1] == 0xD8.toByte() && bytes[i + 2] == 0xFF.toByte()) {
+                var end = bytes.size
+                for (j in i + 3 until bytes.size - 1) {
+                    if (bytes[j] == 0xFF.toByte() && bytes[j + 1] == 0xD9.toByte()) {
+                        end = j + 2
+                        break
+                    }
+                }
+                if (end - i > 64) return bytes.copyOfRange(i, end)
+            }
+        }
+        return null
+    }
+
+    private fun fetchFirstStreamFrameBytes(entityId: String): ByteArray? {
+        return try {
+            val req = Request.Builder()
+                .url("${getBaseUrl()}/api/camera_proxy_stream/$entityId")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val input = resp.body?.byteStream() ?: return null
+                val buf = ByteArray(16 * 1024)
+                val out = java.io.ByteArrayOutputStream(128 * 1024)
+                while (out.size() < 1500 * 1024) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                    val arr = out.toByteArray()
+                    val frame = extractEmbeddedImageBytes(arr)
+                    if (frame != null && frame.size >= 4 &&
+                        frame[frame.size - 2] == 0xFF.toByte() &&
+                        frame[frame.size - 1] == 0xD9.toByte()
+                    ) {
+                        return frame
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) {
             null
         }
     }
@@ -1067,6 +1209,7 @@ class HomeAssistantClient(
 
             // 1. Descubrir proveedor llmvision dinámicamente en la instancia de Home Assistant
             var providerId: String? = null
+            var fallbackLlmVisionEntryId: String? = null
             try {
                 val reqEntries = Request.Builder()
                     .url("${getBaseUrl()}/api/config/config_entries/entry")
@@ -1081,9 +1224,22 @@ class HomeAssistantClient(
                             if (obj.optString("domain") == "llmvision") {
                                 val title = obj.optString("title", "")
                                 val entryId = obj.optString("entry_id", "")
-                                if (title.contains("Provider", ignoreCase = true) || entryId != "01KQXAJ92F47JVWEH9JA7AF55B") {
+                                if (entryId.isBlank()) continue
+                                val looksLikeSettings = title.contains("setting", ignoreCase = true) ||
+                                    title.contains("config", ignoreCase = true)
+                                if (title.contains("Provider", ignoreCase = true) ||
+                                    title.contains("OpenAI", ignoreCase = true) ||
+                                    title.contains("Gemini", ignoreCase = true) ||
+                                    title.contains("Anthropic", ignoreCase = true) ||
+                                    title.contains("Claude", ignoreCase = true) ||
+                                    title.contains("Ollama", ignoreCase = true) ||
+                                    title.contains("Groq", ignoreCase = true) ||
+                                    !looksLikeSettings
+                                ) {
                                     providerId = entryId
                                     break
+                                } else if (fallbackLlmVisionEntryId == null) {
+                                    fallbackLlmVisionEntryId = entryId
                                 }
                             }
                         }
@@ -1094,7 +1250,7 @@ class HomeAssistantClient(
             }
 
             if (providerId.isNullOrBlank()) {
-                providerId = "01KQXB773AZRVMEANJTA2ZW04K"
+                providerId = fallbackLlmVisionEntryId
             }
 
             // Preparar entidades candidatas: priorizar la entidad de snapshot si es cámara de batería o live view
@@ -1109,7 +1265,9 @@ class HomeAssistantClient(
                 try {
                     val prompt = if (question.isBlank()) "Describe lo que ves en la cámara con detalle y concisión en español." else question
                     val payload = JSONObject().apply {
-                        put("provider", providerId)
+                        if (!providerId.isNullOrBlank()) {
+                            put("provider", providerId)
+                        }
                         put("image_entity", JSONArray().apply { put(eid) })
                         put("message", prompt)
                         put("include_filename", false)
@@ -1142,6 +1300,802 @@ class HomeAssistantClient(
         } catch (e: Exception) {
             Log.e(TAG, "Error general en analyzeCameraWithLlmVision: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Devuelve la lista de cámaras físicas deduplicadas agrupando entidades `_snapshot`
+     * con su contraparte en vivo (`_vista_en_vivo`, `_live`, `_stream`).
+     */
+    suspend fun getDeduplicatedCameras(): List<HaCameraGroup> {
+        val cams = getCameras()
+        return groupCameraCandidates(cams)
+    }
+
+    internal fun groupCameraCandidates(cams: List<CameraInfo>): List<HaCameraGroup> {
+        if (cams.isEmpty()) return emptyList()
+
+        data class ParsedCamera(
+            val cam: CameraInfo,
+            val key: String,
+            val cleanName: String,
+            val isSnapshot: Boolean,
+            val isLive: Boolean
+        )
+
+        val groups = linkedMapOf<String, MutableList<ParsedCamera>>()
+        for (cam in cams) {
+            val eidNoDomain = cam.entityId.substringAfter(".").trim()
+            val eidStripped = stripCameraEntitySuffix(eidNoDomain)
+            val hadEidSuffix = !eidStripped.equals(eidNoDomain, ignoreCase = true)
+
+            val fnStripped = stripCameraFriendlySuffix(cam.friendlyName)
+            val hadFnSuffix = fnStripped != cam.friendlyName.trim()
+
+            val groupKey = when {
+                hadEidSuffix && eidStripped.isNotBlank() -> eidStripped.lowercase()
+                hadFnSuffix && fnStripped.isNotBlank() -> slugifyText(fnStripped)
+                else -> eidNoDomain.lowercase()
+            }
+
+            val eidLower = eidNoDomain.lowercase()
+            val fnLower = normalizeAsciiLower(cam.friendlyName)
+            val isSnapshot = eidLower.endsWith("_snapshot") || Regex("""\bsnapshot\b""").containsMatchIn(fnLower)
+            val isLive = eidLower.endsWith("_vista_en_vivo") ||
+                eidLower.endsWith("_en_vivo") ||
+                eidLower.endsWith("_live") ||
+                eidLower.endsWith("_stream") ||
+                Regex("""\b(vista\s+en\s+vivo|en\s+vivo|live\s+view|live|stream)\b""").containsMatchIn(fnLower)
+
+            val cleanName = fnStripped.ifBlank {
+                groupKey.replace("_", " ").replaceFirstChar { it.uppercase() }
+            }
+
+            groups.getOrPut(groupKey) { mutableListOf() }
+                .add(ParsedCamera(cam, groupKey, cleanName, isSnapshot, isLive))
+        }
+
+        return groups.entries.map { (key, entries) ->
+            val available = entries.filter { it.cam.state.lowercase() !in listOf("unavailable", "unknown") }
+
+            val snapshotEntry = available.firstOrNull { it.isSnapshot }
+                ?: available.firstOrNull()
+                ?: entries.firstOrNull { it.isSnapshot }
+                ?: entries.first()
+
+            val liveEntry = available.firstOrNull { it.isLive }
+                ?: entries.firstOrNull { it.isLive }
+                ?: if (entries.size == 1 && !entries.first().isSnapshot) {
+                    entries.first()
+                } else {
+                    available.firstOrNull { it.cam.entityId != snapshotEntry.cam.entityId }
+                        ?: entries.firstOrNull { it.cam.entityId != snapshotEntry.cam.entityId }
+                }
+
+            val displayName = entries
+                .map { it.cleanName }
+                .firstOrNull { it.isNotBlank() && !it.startsWith("camera.", ignoreCase = true) }
+                ?: snapshotEntry.cleanName
+
+            val resolvedState = when {
+                snapshotEntry.cam.state.lowercase() !in listOf("unavailable", "unknown") -> snapshotEntry.cam.state
+                liveEntry != null && liveEntry.cam.state.lowercase() !in listOf("unavailable", "unknown") -> liveEntry.cam.state
+                else -> snapshotEntry.cam.state
+            }
+
+            HaCameraGroup(
+                key = key,
+                friendlyName = displayName,
+                primaryEntityId = snapshotEntry.cam.entityId,
+                snapshotEntityId = snapshotEntry.cam.entityId,
+                liveEntityId = liveEntry?.cam?.entityId,
+                state = resolvedState,
+                snapshotUrl = snapshotEntry.cam.snapshotUrl
+            )
+        }
+    }
+
+    /**
+     * Consulta /api/states una sola vez y devuelve un resumen ejecutivo en español
+     * con luces, multimedia/Alexas, clima/sensores, puertas/movimiento y cámaras deduplicadas.
+     */
+    suspend fun getHomeStatusSummary(): String = withContext(Dispatchers.IO) {
+        try {
+            if (!hasValidConfig()) {
+                return@withContext "Error: Home Assistant no está configurado con una URL válida (http/https) y token."
+            }
+            val array = fetchStatesArray(forceRefresh = true)
+                ?: return@withContext "No se pudo consultar el estado del hogar en Home Assistant."
+
+            val snapshots = ArrayList<HomeEntitySnapshot>(array.length())
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val eid = item.optString("entity_id")
+                if (eid.isBlank() || eid.contains("_segment_")) continue
+                val state = item.optString("state", "unknown")
+                val attrs = item.optJSONObject("attributes")
+                val friendlyName = attrs?.optString("friendly_name").orEmpty().ifBlank { eid }
+                val deviceClass = attrs?.optString("device_class").orEmpty()
+                val unit = attrs?.optString("unit_of_measurement").orEmpty()
+                val mediaTitle = attrs?.optString("media_title").orEmpty()
+                val mediaArtist = attrs?.optString("media_artist").orEmpty()
+                val source = attrs?.optString("source").orEmpty()
+                val appName = attrs?.optString("app_name").orEmpty()
+                val temp = attrs?.optDouble("temperature", Double.NaN)?.takeIf { !it.isNaN() }
+                val currentTemp = attrs?.optDouble("current_temperature", Double.NaN)?.takeIf { !it.isNaN() }
+                val tempUnit = attrs?.optString("temperature_unit").orEmpty().ifBlank { "°C" }
+                val humidity = attrs?.optDouble("humidity", Double.NaN)?.takeIf { !it.isNaN() }
+                val hvacAction = attrs?.optString("hvac_action").orEmpty()
+                val isAlexa = if (eid.startsWith("media_player.")) {
+                    isAlexaMediaPlayer(eid, friendlyName, deviceClass, emptySet())
+                } else {
+                    false
+                }
+
+                snapshots.add(
+                    HomeEntitySnapshot(
+                        entityId = eid,
+                        friendlyName = friendlyName,
+                        state = state,
+                        deviceClass = deviceClass,
+                        unitOfMeasurement = unit,
+                        mediaTitle = mediaTitle,
+                        mediaArtist = mediaArtist,
+                        source = source,
+                        appName = appName,
+                        temperature = temp,
+                        currentTemperature = currentTemp,
+                        temperatureUnit = tempUnit,
+                        humidity = humidity,
+                        hvacAction = hvacAction,
+                        isAlexa = isAlexa
+                    )
+                )
+            }
+            formatHomeStatusSummary(snapshots)
+        } catch (e: Exception) {
+            "Error obteniendo el resumen del hogar: ${e.message}"
+        }
+    }
+
+    internal fun formatHomeStatusSummary(entities: List<HomeEntitySnapshot>): String {
+        if (entities.isEmpty()) {
+            return "No se encontraron entidades en Home Assistant."
+        }
+        val sections = mutableListOf<String>()
+
+        // 1. Luces
+        val lights = entities.filter { it.entityId.startsWith("light.") }
+        val lightsOn = lights.filter { it.state.equals("on", ignoreCase = true) }
+        if (lights.isNotEmpty()) {
+            if (lightsOn.isEmpty()) {
+                sections.add("Luces: todas apagadas (${lights.size} en total).")
+            } else {
+                val names = lightsOn.take(8).joinToString(", ") { it.friendlyName }
+                val extra = if (lightsOn.size > 8) " y ${lightsOn.size - 8} más" else ""
+                sections.add("Luces encendidas (${lightsOn.size}/${lights.size}): $names$extra.")
+            }
+        }
+
+        // 2. Reproductores multimedia y Alexas
+        val players = entities.filter { it.entityId.startsWith("media_player.") }
+        if (players.isNotEmpty()) {
+            val playing = players.filter { it.state.equals("playing", ignoreCase = true) }
+            val availableAlexas = players.filter {
+                it.isAlexa && it.state.lowercase() !in listOf("unavailable", "unknown")
+            }
+            val playingText = if (playing.isNotEmpty()) {
+                val items = playing.take(5).joinToString("; ") { p ->
+                    val meta = listOfNotNull(
+                        p.mediaTitle.takeIf { it.isNotBlank() },
+                        p.mediaArtist.takeIf { it.isNotBlank() },
+                        p.source.takeIf { it.isNotBlank() } ?: p.appName.takeIf { it.isNotBlank() }
+                    ).joinToString(" - ")
+                    if (meta.isNotBlank()) "${p.friendlyName} ($meta)" else p.friendlyName
+                }
+                "Reproduciendo ahora: $items"
+            } else {
+                "Ningún reproductor está sonando ahora"
+            }
+            val alexaText = if (availableAlexas.isNotEmpty()) {
+                "Alexas disponibles (${availableAlexas.size}): ${availableAlexas.take(6).joinToString(", ") { it.friendlyName }}"
+            } else {
+                "sin bocinas Alexa disponibles"
+            }
+            sections.add("Multimedia: $playingText; $alexaText.")
+        }
+
+        // 3. Clima, temperatura y humedad
+        val weatherParts = mutableListOf<String>()
+        val weathers = entities.filter {
+            it.entityId.startsWith("weather.") && it.state.lowercase() !in listOf("unavailable", "unknown")
+        }
+        weathers.firstOrNull()?.let { w ->
+            val cond = translateWeatherConditionSpanish(w.state)
+            val tempStr = w.temperature?.let { " ${it}${w.temperatureUnit}" }.orEmpty()
+            val humStr = w.humidity?.let { ", ${it.toInt()}% hum." }.orEmpty()
+            weatherParts.add("Exterior (${w.friendlyName}): $cond$tempStr$humStr")
+        }
+
+        val climates = entities.filter {
+            it.entityId.startsWith("climate.") && it.state.lowercase() !in listOf("unavailable", "unknown")
+        }
+        for (c in climates.take(3)) {
+            val cur = c.currentTemperature?.let { "actual ${it}${c.temperatureUnit}" }
+            val tgt = c.temperature?.let { "objetivo ${it}${c.temperatureUnit}" }
+            val details = listOfNotNull(c.state, cur, tgt).joinToString(", ")
+            weatherParts.add("Clima ${c.friendlyName}: $details")
+        }
+
+        val tempSensors = entities.filter {
+            it.entityId.startsWith("sensor.") &&
+                it.state.lowercase() !in listOf("unavailable", "unknown") &&
+                (it.deviceClass.equals("temperature", ignoreCase = true) ||
+                    it.unitOfMeasurement in listOf("°C", "°F", "℃", "℉")) &&
+                it.state.toDoubleOrNull() != null
+        }
+        if (tempSensors.isNotEmpty()) {
+            val formatted = tempSensors.take(4).joinToString(", ") {
+                val unit = it.unitOfMeasurement.ifBlank { "°C" }
+                "${it.friendlyName}: ${it.state}$unit"
+            }
+            weatherParts.add("Temperaturas: $formatted")
+        }
+
+        val humSensors = entities.filter {
+            it.entityId.startsWith("sensor.") &&
+                it.state.lowercase() !in listOf("unavailable", "unknown") &&
+                (it.deviceClass.equals("humidity", ignoreCase = true) ||
+                    (it.unitOfMeasurement == "%" && (it.friendlyName.contains("hum", ignoreCase = true) || it.entityId.contains("hum", ignoreCase = true)))) &&
+                it.state.toDoubleOrNull() != null
+        }
+        if (humSensors.isNotEmpty()) {
+            val formatted = humSensors.take(4).joinToString(", ") { "${it.friendlyName}: ${it.state}%" }
+            weatherParts.add("Humedad: $formatted")
+        }
+        if (weatherParts.isNotEmpty()) {
+            sections.add("Ambiente: ${weatherParts.joinToString(" | ")}.")
+        }
+
+        // 4. Puertas, ventanas, cerraduras y movimiento
+        val securityClasses = setOf("door", "window", "garage_door", "opening", "lock", "motion", "occupancy", "presence")
+        val securityBinary = entities.filter {
+            it.entityId.startsWith("binary_sensor.") && it.deviceClass.lowercase() in securityClasses
+        }
+        val activeBinary = securityBinary.filter { it.state.equals("on", ignoreCase = true) }
+        val locks = entities.filter { it.entityId.startsWith("lock.") }
+        val unlockedLocks = locks.filter { it.state.lowercase() in listOf("unlocked", "open", "jammed") }
+        val covers = entities.filter { it.entityId.startsWith("cover.") }
+        val openCovers = covers.filter { it.state.lowercase() in listOf("open", "opening") }
+
+        val activeAlerts = mutableListOf<String>()
+        activeBinary.forEach { sensor ->
+            val label = when (sensor.deviceClass.lowercase()) {
+                "motion", "occupancy", "presence" -> "movimiento"
+                else -> "abierto"
+            }
+            activeAlerts.add("${sensor.friendlyName} ($label)")
+        }
+        unlockedLocks.forEach { lock ->
+            activeAlerts.add("${lock.friendlyName} (${lock.state})")
+        }
+        openCovers.forEach { cover ->
+            activeAlerts.add("${cover.friendlyName} (abierta)")
+        }
+
+        if (activeAlerts.isNotEmpty()) {
+            val shown = activeAlerts.take(8).joinToString(", ")
+            val extra = if (activeAlerts.size > 8) " y ${activeAlerts.size - 8} más" else ""
+            sections.add("Sensores y accesos activos (${activeAlerts.size}): $shown$extra.")
+        } else if (securityBinary.isNotEmpty() || locks.isNotEmpty() || covers.isNotEmpty()) {
+            sections.add("Puertas, ventanas y movimiento: todo cerrado y sin movimiento activo.")
+        }
+
+        // 5. Cámaras deduplicadas
+        val rawCams = entities
+            .filter { it.entityId.startsWith("camera.") }
+            .map { CameraInfo(it.entityId, it.friendlyName, it.state, "${getBaseUrl()}/api/camera_proxy/${it.entityId}") }
+        val groupedCams = groupCameraCandidates(rawCams)
+        if (groupedCams.isNotEmpty()) {
+            val availableCount = groupedCams.count { it.state.lowercase() !in listOf("unavailable", "unknown") }
+            val camList = groupedCams.take(8).joinToString(", ") { "${it.friendlyName} (${it.state})" }
+            val extra = if (groupedCams.size > 8) " y ${groupedCams.size - 8} más" else ""
+            sections.add("Cámaras (${groupedCams.size}, $availableCount disponibles): $camList$extra.")
+        } else {
+            sections.add("Cámaras: sin cámaras configuradas.")
+        }
+
+        return sections.joinToString("\n")
+    }
+
+    /**
+     * Reproduce música, artistas, playlists, rutinas o estaciones de radio en bocinas Alexa/Echo
+     * o reproductores multimedia (Cast/DLNA/TV) de Home Assistant.
+     */
+    suspend fun playMusicOrRadio(
+        query: String,
+        targetDevice: String = "",
+        mediaType: String = "auto",
+        provider: String = "auto"
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            if (!hasValidConfig()) {
+                return@withContext "Error: Home Assistant no está configurado con una URL válida (http/https) y token."
+            }
+            val trimmedQuery = query.trim()
+            val normType = mediaType.trim().lowercase()
+            if (trimmedQuery.isBlank() && normType != "radio") {
+                return@withContext if (normType == "routine") {
+                    "Por favor indica el nombre de la rutina de Alexa que deseas ejecutar."
+                } else {
+                    "Por favor indica qué canción, artista, género o estación de radio deseas reproducir."
+                }
+            }
+            val effectiveQuery = trimmedQuery.ifBlank { "una estación de radio" }
+
+            val states = fetchStatesArray()
+                ?: return@withContext "Error consultando los reproductores multimedia en Home Assistant."
+
+            val notifyServices = getAvailableServicesForDomain("notify")
+            val alexaNotifySuffixes = notifyServices
+                .filter { it.startsWith("alexa_media_") }
+                .map { it.removePrefix("alexa_media_").lowercase() }
+                .toSet()
+
+            val candidates = mutableListOf<MediaPlayerCandidate>()
+            for (i in 0 until states.length()) {
+                val item = states.getJSONObject(i)
+                val eid = item.optString("entity_id")
+                if (!eid.startsWith("media_player.") || eid.contains("_segment_")) continue
+                val attrs = item.optJSONObject("attributes")
+                val friendlyName = attrs?.optString("friendly_name").orEmpty().ifBlank { eid }
+                val deviceClass = attrs?.optString("device_class").orEmpty()
+                val state = item.optString("state", "unknown")
+                val isAlexa = isAlexaMediaPlayer(eid, friendlyName, deviceClass, alexaNotifySuffixes)
+                candidates.add(MediaPlayerCandidate(eid, friendlyName, state, deviceClass, isAlexa))
+            }
+
+            when (val resolution = resolveMediaPlayerTarget(candidates, targetDevice)) {
+                MediaTargetResolution.NoPlayers -> {
+                    "No se encontraron reproductores multimedia (media_player) en Home Assistant."
+                }
+                is MediaTargetResolution.NotFound -> {
+                    val availText = formatAvailablePlayers(resolution.available)
+                    "No encontré un reproductor que coincida con '${resolution.requested}'. Reproductores disponibles: $availText."
+                }
+                is MediaTargetResolution.Unreachable -> {
+                    val others = resolution.available.filter { it.entityId != resolution.target.entityId }
+                    val othersNote = if (others.isNotEmpty()) {
+                        " Otros disponibles: ${formatAvailablePlayers(others)}."
+                    } else {
+                        ""
+                    }
+                    "El reproductor '${resolution.target.friendlyName}' (${resolution.target.entityId}) no está disponible en este momento (estado: ${resolution.target.state}).$othersNote"
+                }
+                is MediaTargetResolution.Found -> {
+                    executePlayOnTarget(resolution.target, effectiveQuery, normType, provider)
+                }
+            }
+        } catch (e: Exception) {
+            "Error al reproducir contenido en Home Assistant: ${e.message}"
+        }
+    }
+
+    private suspend fun executePlayOnTarget(
+        target: MediaPlayerCandidate,
+        query: String,
+        mediaType: String,
+        provider: String
+    ): String {
+        val intent = detectMediaIntent(query, mediaType, provider)
+
+        if (!target.isAlexa) {
+            if (intent == MediaIntent.ROUTINE) {
+                return "Las rutinas solo están disponibles en dispositivos Alexa/Echo; '${target.friendlyName}' no es un dispositivo Alexa."
+            }
+            val directStream = query.startsWith("http://", ignoreCase = true) || query.startsWith("https://", ignoreCase = true)
+            val resolvedStation = if (directStream) null else radioBrowserClient.findBestStation(query)
+            val streamUrl = if (directStream) query.trim() else resolvedStation?.streamUrl.orEmpty()
+            if (streamUrl.isBlank()) {
+                return "No encontré un flujo de audio reproducible para '$query' en '${target.friendlyName}'."
+            }
+            val payload = JSONObject().apply {
+                put("entity_id", target.entityId)
+                put("media_content_id", streamUrl)
+                put("media_content_type", "music")
+            }
+            val result = callService("media_player", "play_media", payload)
+            return if (result.contains("correctamente")) {
+                val label = resolvedStation?.name ?: query
+                "Reproduciendo '$label' en '${target.friendlyName}'."
+            } else {
+                result
+            }
+        }
+
+        val needsUpfrontStation = intent == MediaIntent.RADIO &&
+            (radioBrowserClient.isGenericQuery(query) || isRadioGenreQuery(query))
+        val resolvedStation = if (needsUpfrontStation) {
+            radioBrowserClient.findBestStation(query)
+        } else {
+            null
+        }
+        val drafts = buildAlexaMediaDrafts(query, intent, provider, resolvedStation)
+
+        var lastError = ""
+        for (draft in drafts) {
+            val payload = JSONObject().apply {
+                put("entity_id", target.entityId)
+                put("media_content_id", draft.mediaContentId)
+                put("media_content_type", draft.mediaContentType)
+            }
+            val result = callService("media_player", "play_media", payload)
+            if (result.contains("correctamente")) {
+                return when (intent) {
+                    MediaIntent.ROUTINE -> "Rutina '$query' ejecutada en '${target.friendlyName}'."
+                    MediaIntent.RADIO -> {
+                        val label = when {
+                            draft.mediaContentType == "TUNEIN" -> draft.mediaContentId
+                            resolvedStation != null -> resolvedStation.name
+                            else -> cleanMediaCommandQuery(query).ifBlank { query }
+                        }
+                        "Sintonizando '$label' en '${target.friendlyName}'."
+                    }
+                    MediaIntent.MUSIC -> {
+                        val label = cleanMediaCommandQuery(query).ifBlank { query }
+                        "Reproduciendo '$label' en '${target.friendlyName}'."
+                    }
+                }
+            }
+            lastError = result
+        }
+
+        // Fallback con flujo de RadioBrowser cuando TuneIn/custom/Amazon Music fallaron
+        if (intent == MediaIntent.MUSIC || (intent == MediaIntent.RADIO && !needsUpfrontStation)) {
+            val fallbackStation = radioBrowserClient.findBestStation(query)
+            if (fallbackStation != null) {
+                val payload = JSONObject().apply {
+                    put("entity_id", target.entityId)
+                    put("media_content_id", fallbackStation.streamUrl)
+                    put("media_content_type", "music")
+                }
+                val result = callService("media_player", "play_media", payload)
+                if (result.contains("correctamente")) {
+                    return "Reproduciendo '${fallbackStation.name}' en '${target.friendlyName}'."
+                }
+            }
+        }
+
+        return if (lastError.isNotBlank()) lastError else "No se pudo iniciar la reproducción en '${target.friendlyName}'."
+    }
+
+    internal fun isAlexaMediaPlayer(
+        entityId: String,
+        friendlyName: String,
+        deviceClass: String,
+        alexaNotifySuffixes: Set<String>
+    ): Boolean {
+        val eidSuffix = entityId.substringAfter("media_player.").lowercase()
+        val fnNorm = normalizeAsciiLower(friendlyName)
+        val fnSlug = slugifyText(friendlyName)
+        if (alexaNotifySuffixes.any { it.isNotBlank() && (eidSuffix == it || fnSlug == it) }) {
+            return true
+        }
+
+        val eidTokens = eidSuffix.split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }.toSet()
+        val fnTokens = fnNorm.split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }.toSet()
+        val allTokens = eidTokens + fnTokens
+
+        val nonAlexaSingleWords = setOf(
+            "tv", "tele", "bravia", "samsung", "lg", "roku", "chromecast",
+            "dlna", "kodi", "xbox", "playstation"
+        )
+        val nonAlexaPhrases = listOf(
+            "google home", "google nest", "nest mini", "android tv", "fire tv", "apple tv"
+        )
+        val eidSpaces = eidSuffix.replace("_", " ")
+        if (deviceClass.equals("tv", ignoreCase = true) ||
+            allTokens.any { it in nonAlexaSingleWords } ||
+            nonAlexaPhrases.any { phrase -> eidSpaces.contains(phrase) || fnNorm.contains(phrase) }
+        ) {
+            return false
+        }
+
+        val alexaSingleWords = setOf("echo", "alexa", "dot", "show", "pop", "spot", "cuarto", "sala")
+        val alexaPhrases = listOf("todas partes", "en todas partes", "todas_partes", "en_todas_partes")
+        return allTokens.any { it in alexaSingleWords } ||
+            alexaPhrases.any { phrase -> eidSuffix.contains(phrase) || fnNorm.contains(phrase) }
+    }
+
+    internal fun resolveMediaPlayerTarget(
+        candidates: List<MediaPlayerCandidate>,
+        targetDevice: String
+    ): MediaTargetResolution {
+        if (candidates.isEmpty()) return MediaTargetResolution.NoPlayers
+
+        val available = candidates.filter { it.state.lowercase() !in listOf("unavailable", "unknown") }
+        val cleanTarget = normalizeAsciiLower(targetDevice)
+            .replace(Regex("^(en|el|la|los|las|de|del|mi|a)\\s+"), "")
+            .replace("_", " ")
+            .trim()
+
+        if (cleanTarget.isBlank()) {
+            val preferred = available.firstOrNull {
+                it.isAlexa && !it.entityId.contains("todas_partes", ignoreCase = true) && !it.entityId.contains("everywhere", ignoreCase = true)
+            } ?: available.firstOrNull { it.isAlexa }
+                ?: available.firstOrNull { !it.deviceClass.equals("tv", ignoreCase = true) }
+                ?: available.firstOrNull()
+
+            return if (preferred != null) {
+                MediaTargetResolution.Found(preferred)
+            } else {
+                MediaTargetResolution.Unreachable(candidates.first(), emptyList())
+            }
+        }
+
+        val isAllGroup = cleanTarget in setOf(
+            "todas", "todos", "all", "everywhere", "toda la casa", "en todas partes", "todas partes", "casa"
+        )
+        if (isAllGroup) {
+            val groupMatch = candidates.firstOrNull {
+                val eid = it.entityId.lowercase()
+                val fn = normalizeAsciiLower(it.friendlyName)
+                eid.contains("todas_partes") || eid.contains("everywhere") ||
+                    eid.contains("all_speakers") || fn.contains("todas partes") || fn.contains("everywhere")
+            }
+            if (groupMatch != null) {
+                return if (groupMatch.state.lowercase() !in listOf("unavailable", "unknown")) {
+                    MediaTargetResolution.Found(groupMatch)
+                } else {
+                    MediaTargetResolution.Unreachable(groupMatch, available)
+                }
+            }
+            val fallbackAlexa = available.firstOrNull { it.isAlexa } ?: available.firstOrNull()
+            return if (fallbackAlexa != null) {
+                MediaTargetResolution.Found(fallbackAlexa)
+            } else {
+                MediaTargetResolution.NotFound(targetDevice, available)
+            }
+        }
+
+        val roomSynonyms = mapOf(
+            "cuarto" to listOf("recamara", "dormitorio", "habitacion", "pieza", "bedroom", "room"),
+            "recamara" to listOf("cuarto", "dormitorio", "habitacion", "bedroom"),
+            "dormitorio" to listOf("cuarto", "recamara", "habitacion", "bedroom"),
+            "habitacion" to listOf("cuarto", "recamara", "dormitorio", "bedroom"),
+            "bedroom" to listOf("cuarto", "recamara", "dormitorio", "habitacion"),
+            "sala" to listOf("living", "estancia", "salon"),
+            "living" to listOf("sala", "estancia", "salon"),
+            "cocina" to listOf("kitchen"),
+            "kitchen" to listOf("cocina"),
+            "oficina" to listOf("estudio", "despacho", "office"),
+            "office" to listOf("oficina", "estudio"),
+            "bano" to listOf("bathroom"),
+            "patio" to listOf("jardin", "terraza", "backyard"),
+            "tv" to listOf("tele", "television", "televisor", "pantalla"),
+            "tele" to listOf("tv", "television", "televisor", "pantalla"),
+            "echo" to listOf("alexa", "dot", "show", "pop", "bocina"),
+            "alexa" to listOf("echo", "dot", "show", "pop", "bocina"),
+            "bocina" to listOf("echo", "alexa", "altavoz", "speaker")
+        )
+
+        val words = cleanTarget.split(Regex("\\s+")).filter { it.length >= 2 }
+        val nonGenericWords = words.filterNot { it in setOf("alexa", "echo", "bocina", "altavoz", "reproductor") }
+        val effectiveWords = nonGenericWords.ifEmpty { words }
+        val targetMentionsTv = words.any { it in setOf("tv", "tele", "television", "televisor", "pantalla") }
+
+        var bestCandidate: MediaPlayerCandidate? = null
+        var bestScore = 0
+
+        for (cand in candidates) {
+            val eidClean = normalizeAsciiLower(cand.entityId.substringAfter(".").replace("_", " "))
+            val fnClean = normalizeAsciiLower(cand.friendlyName.replace("_", " "))
+
+            if (cand.entityId.equals(targetDevice.trim(), ignoreCase = true) ||
+                eidClean == cleanTarget ||
+                fnClean == cleanTarget
+            ) {
+                return if (cand.state.lowercase() !in listOf("unavailable", "unknown")) {
+                    MediaTargetResolution.Found(cand)
+                } else {
+                    MediaTargetResolution.Unreachable(cand, available)
+                }
+            }
+
+            var matchScore = 0
+            if (eidClean.contains(cleanTarget) || fnClean.contains(cleanTarget)) {
+                matchScore += 60
+            }
+            for (w in effectiveWords) {
+                if (eidClean.contains(w) || fnClean.contains(w)) {
+                    matchScore += 45
+                }
+                val syns = roomSynonyms[w].orEmpty()
+                for (syn in syns) {
+                    if (eidClean.contains(syn) || fnClean.contains(syn)) {
+                        matchScore += 35
+                    }
+                }
+            }
+
+            if (matchScore == 0) continue
+
+            var totalScore = matchScore
+            if (cand.state.lowercase() !in listOf("unavailable", "unknown")) {
+                totalScore += 100
+            }
+            if (!targetMentionsTv && cand.isAlexa) {
+                totalScore += 25
+            } else if (!targetMentionsTv && cand.deviceClass.equals("tv", ignoreCase = true)) {
+                totalScore -= 15
+            }
+
+            if (totalScore > bestScore) {
+                bestScore = totalScore
+                bestCandidate = cand
+            }
+        }
+
+        if (bestCandidate == null) {
+            return MediaTargetResolution.NotFound(targetDevice, available)
+        }
+        return if (bestCandidate.state.lowercase() !in listOf("unavailable", "unknown")) {
+            MediaTargetResolution.Found(bestCandidate)
+        } else {
+            MediaTargetResolution.Unreachable(bestCandidate, available)
+        }
+    }
+
+    internal fun detectMediaIntent(query: String, mediaType: String, provider: String): MediaIntent {
+        val normType = mediaType.trim().lowercase()
+        val normProvider = provider.trim().lowercase()
+        if (normType == "routine" || normType == "rutina") return MediaIntent.ROUTINE
+        if (normType == "radio" || normProvider == "tunein") return MediaIntent.RADIO
+        if (normType in setOf("music", "artist", "song", "playlist", "genre")) return MediaIntent.MUSIC
+
+        val normQuery = normalizeAsciiLower(query)
+        val isRadioKeyword = Regex("""\b(radio|estacion|emisora|fm|am|tunein)\b""").containsMatchIn(normQuery) ||
+            Regex("""\b\d{2,3}\.\d\b""").containsMatchIn(normQuery)
+        return if (isRadioKeyword) MediaIntent.RADIO else MediaIntent.MUSIC
+    }
+
+    internal fun buildAlexaMediaDrafts(
+        query: String,
+        intent: MediaIntent,
+        provider: String,
+        resolvedStation: RadioStation?
+    ): List<PlayMediaCommandDraft> {
+        val clean = cleanMediaCommandQuery(query).ifBlank { query.trim() }
+        val normProvider = provider.trim().lowercase().replace(" ", "_")
+
+        if (intent == MediaIntent.ROUTINE) {
+            return listOf(PlayMediaCommandDraft(clean, "routine"))
+        }
+
+        if (intent == MediaIntent.RADIO) {
+            val isGenericOrGenre = radioBrowserClient.isGenericQuery(query) || isRadioGenreQuery(query)
+            val stationCleaned = radioBrowserClient.cleanRadioQuery(query).ifBlank { clean }
+            val drafts = mutableListOf<PlayMediaCommandDraft>()
+            if (!isGenericOrGenre && stationCleaned.isNotBlank()) {
+                drafts.add(PlayMediaCommandDraft(stationCleaned, "TUNEIN"))
+                drafts.add(PlayMediaCommandDraft("pon $stationCleaned en TuneIn", "custom"))
+            } else {
+                val stationName = resolvedStation?.name ?: stationCleaned.ifBlank { "Exa FM 104.9" }
+                drafts.add(PlayMediaCommandDraft("pon $stationName en TuneIn", "custom"))
+                drafts.add(PlayMediaCommandDraft(stationName, "TUNEIN"))
+            }
+            if (resolvedStation != null && resolvedStation.streamUrl.isNotBlank()) {
+                drafts.add(PlayMediaCommandDraft(resolvedStation.streamUrl, "music"))
+            }
+            return drafts.distinct()
+        }
+
+        return when (normProvider) {
+            "spotify" -> listOf(
+                PlayMediaCommandDraft(clean, "SPOTIFY"),
+                PlayMediaCommandDraft("reproduce $clean en spotify", "custom")
+            )
+            "amazon_music", "amazon" -> listOf(
+                PlayMediaCommandDraft(clean, "AMAZON_MUSIC"),
+                PlayMediaCommandDraft("reproduce $clean en amazon music", "custom")
+            )
+            else -> {
+                val providerLabel = when (normProvider) {
+                    "", "auto" -> ""
+                    "apple_music" -> "Apple Music"
+                    "youtube_music" -> "YouTube Music"
+                    else -> provider.trim()
+                }
+                val customCmd = if (providerLabel.isNotBlank()) {
+                    "reproduce $clean en $providerLabel"
+                } else {
+                    "reproduce $clean"
+                }
+                listOf(
+                    PlayMediaCommandDraft(customCmd, "custom"),
+                    PlayMediaCommandDraft(clean, "AMAZON_MUSIC")
+                )
+            }
+        }
+    }
+
+    private fun formatAvailablePlayers(players: List<MediaPlayerCandidate>): String {
+        if (players.isEmpty()) return "ninguno disponible"
+        return players.take(8).joinToString(", ") { "${it.friendlyName} (${it.entityId})" }
+    }
+
+    private fun cleanMediaCommandQuery(raw: String): String {
+        return raw.trim()
+            .replace(Regex("""^(?i)(pon|ponme|reproduce|toca|escuchar|play|ejecuta)\s+"""), "")
+            .trim()
+    }
+
+    private fun isRadioGenreQuery(query: String): Boolean {
+        val norm = normalizeAsciiLower(radioBrowserClient.cleanRadioQuery(query))
+        if (norm.isBlank()) return true
+        val genreWords = setOf(
+            "regional", "mexicana", "mexicano", "banda", "mariachi", "nortena", "norteno",
+            "rock", "clasico", "classic", "pop", "noticias", "news", "lofi", "lo-fi",
+            "jazz", "chill", "ambient", "cumbia", "salsa", "electronica", "baladas", "de"
+        )
+        val tokens = norm.split(Regex("\\s+")).filter { it.isNotBlank() }
+        return tokens.isNotEmpty() && tokens.all { tok -> genreWords.any { tok.startsWith(it) || it == tok } }
+    }
+
+    private fun stripCameraEntitySuffix(eidBody: String): String {
+        var result = eidBody.trim()
+        val suffixes = listOf("_vista_en_vivo", "_snapshot", "_en_vivo", "_stream", "_live")
+        for (suffix in suffixes) {
+            if (result.endsWith(suffix, ignoreCase = true) && result.length > suffix.length) {
+                result = result.dropLast(suffix.length)
+                break
+            }
+        }
+        return result.trimEnd('_')
+    }
+
+    private fun stripCameraFriendlySuffix(name: String): String {
+        var result = name.trim()
+        val pattern = Regex("""(?i)\s*(?:[-:|•]\s*)?(?:\(\s*)?(vista\s+en\s+vivo|en\s+vivo|snapshot|live\s+view|live|stream)(?:\s*\))?\s*$""")
+        while (true) {
+            val next = result.replace(pattern, "").trim()
+            if (next == result) break
+            result = next
+        }
+        return result
+    }
+
+    private fun slugifyText(input: String): String {
+        return normalizeAsciiLower(input)
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+    }
+
+    private fun normalizeAsciiLower(input: String): String {
+        val decomposed = Normalizer.normalize(input.lowercase().trim(), Normalizer.Form.NFD)
+        return decomposed.replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun translateWeatherConditionSpanish(state: String): String {
+        return when (state.lowercase()) {
+            "clear-night" -> "cielo despejado nocturno"
+            "cloudy" -> "nublado"
+            "exceptional" -> "condición excepcional"
+            "fog" -> "con niebla"
+            "hail" -> "granizo"
+            "lightning" -> "tormenta eléctrica"
+            "lightning-rainy" -> "tormenta eléctrica con lluvia"
+            "partlycloudy" -> "parcialmente nublado"
+            "pouring" -> "lluvia intensa"
+            "rainy" -> "lluvioso"
+            "snowy" -> "nevando"
+            "snowy-rainy" -> "aguanieve"
+            "sunny" -> "soleado y despejado"
+            "windy" -> "ventoso"
+            "windy-variant" -> "ventoso variable"
+            else -> state
         }
     }
 }
