@@ -120,6 +120,7 @@ class TrekoHabitManager(context: Context) {
             prefs.edit()
                 .putString("last_reset_date", today)
                 .putInt("water_glasses", 0)
+                .putLong("last_water_intake_ms", 0L)
                 .apply()
             _waterGlassesFlow.value = 0
             saveListLocked(resetItems)
@@ -191,29 +192,50 @@ class TrekoHabitManager(context: Context) {
         }
     }
 
-    fun setWaterGlasses(count: Int) {
+    fun setWaterGlasses(count: Int, nowMs: Long = System.currentTimeMillis()) {
         synchronized(lock) {
             ensureCurrentDayLocked()
+            val prev = _waterGlassesFlow.value
             val c = count.coerceIn(0, 20)
-            prefs.edit().putInt("water_glasses", c).apply()
+            val editor = prefs.edit().putInt("water_glasses", c)
+            if (c > prev) {
+                editor.putLong("last_water_intake_ms", nowMs)
+            } else if (c == 0) {
+                editor.putLong("last_water_intake_ms", 0L)
+            }
+            editor.apply()
             _waterGlassesFlow.value = c
         }
     }
 
-    fun listHabitsSummary(): String {
+    fun getLastWaterIntakeMs(): Long {
+        synchronized(lock) {
+            ensureCurrentDayLocked()
+            return prefs.getLong("last_water_intake_ms", 0L)
+        }
+    }
+
+    fun listHabitsSummary(nowMs: Long = System.currentTimeMillis()): String {
         synchronized(lock) {
             ensureCurrentDayLocked()
         }
         val list = _habitsFlow.value
         if (list.isEmpty()) return "No hay hábitos registrados actualmente."
         val water = _waterGlassesFlow.value
+        val lastWaterMs = prefs.getLong("last_water_intake_ms", 0L)
+        val sinceStr = if (lastWaterMs in 1..nowMs) {
+            val mins = ((nowMs - lastWaterMs) / 60_000L).coerceAtLeast(0L)
+            " (último vaso hace ${mins} min)"
+        } else {
+            ""
+        }
         val sb = StringBuilder("Hábitos registrados (${list.size}):\n")
         list.forEach {
             val status = if (it.isDone) "Completado" else "Pendiente"
             val last = it.lastCompletedDate?.let { d -> ", último: $d (${it.completedDates.size} días)" } ?: ""
             sb.append("• ${it.icon} ${it.title} [$status$last]\n")
         }
-        sb.append("• 💧 Hidratación: $water de 8 vasos")
+        sb.append("• 💧 Hidratación: $water de 8 vasos$sinceStr")
         return sb.toString().trim()
     }
 

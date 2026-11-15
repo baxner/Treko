@@ -21,12 +21,15 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.provider.AlarmClock
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.treko.assistant.MainActivity
 import com.treko.assistant.R
 import com.treko.assistant.data.CameraAnomalyCheckResult
+import com.treko.assistant.data.ProactiveCameraCandidate
 import com.treko.assistant.data.ProactiveDataSources
 import com.treko.assistant.data.ProactiveInsight
 import com.treko.assistant.data.TrekoProactiveManager
@@ -61,7 +64,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,6 +86,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 
 enum class WsConnectionStatus {
@@ -199,6 +207,19 @@ class TrekoAssistantService : Service() {
 
     @Volatile
     private var phoneMediaPlayer: MediaPlayer? = null
+
+    private var proactiveTtsFallbackJob: Job? = null
+
+    @Volatile
+    private var activeVoiceProactiveInsight: ProactiveInsight? = null
+
+    @Volatile
+    private var activeVoiceProactiveFromUserTap: Boolean = false
+
+    @Volatile
+    private var localTts: TextToSpeech? = null
+    private val isLocalTtsReady = AtomicBoolean(false)
+    private val proactiveUtteranceSeq = AtomicInteger(0)
 
     private val radioBrowserClient by lazy { RadioBrowserClient() }
     private val workflowManager by lazy { TrekoWorkflowManager(this) }
@@ -337,6 +358,7 @@ class TrekoAssistantService : Service() {
 
         private val proactiveFallbackScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         private val sharedProactiveLock = Any()
+        private val proactiveCameraCycle = AtomicInteger(0)
 
         @Volatile
         private var sharedProactiveManager: TrekoProactiveManager? = null
@@ -354,33 +376,50 @@ class TrekoAssistantService : Service() {
                             return HomeAssistantClient(haUrl, haToken).getHomeStatusSummary()
                         }
 
-                        override suspend fun scanPriorityCameraForAnomalies(): CameraAnomalyCheckResult? {
+                        override suspend fun scanPriorityCamerasForAnomalies(
+                            homeStatusSummary: String
+                        ): List<CameraAnomalyCheckResult> {
                             val p = TrekoPreferences(appCtx)
-                            if (!p.proactiveCameraAnomalyEnabled) return null
+                            if (!p.proactiveCameraAnomalyEnabled) return emptyList()
                             val haUrl = p.haUrl.trim()
                             val haToken = p.haToken.trim()
-                            if (haUrl.isBlank() || haToken.isBlank()) return null
+                            if (haUrl.isBlank() || haToken.isBlank()) return emptyList()
                             val client = HomeAssistantClient(haUrl, haToken)
-                            val groups = client.getDeduplicatedCameras()
-                                .filter { it.state.lowercase(Locale.ROOT) !in listOf("unavailable", "unknown") }
-                            if (groups.isEmpty()) return null
-                            val priorityKeywords = listOf("puerta", "entrada", "front", "door", "jardin", "patio", "cochera", "garage", "sala")
-                            val chosen = groups.firstOrNull { g ->
-                                val lower = g.friendlyName.lowercase(Locale.ROOT)
-                                priorityKeywords.any { lower.contains(it) }
-                            } ?: groups.first()
-                            val entityToInspect = chosen.snapshotEntityId.ifBlank { chosen.primaryEntityId }
-                            val report = client.analyzeCameraWithLlmVision(
-                                entityToInspect,
-                                "Revisa brevemente esta cámara en español como centinela del hogar: indica si hay alguna persona, paquete, puerta abierta o anomalía; si todo está tranquilo y normal, dilo en una frase corta."
-                            )?.trim().orEmpty()
-                            if (report.isBlank()) return null
-                            return CameraAnomalyCheckResult(
-                                cameraName = chosen.friendlyName,
-                                entityId = entityToInspect,
-                                visionReport = report,
-                                hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report)
+                            val candidates = client.getDeduplicatedCameras().map { group ->
+                                ProactiveCameraCandidate(
+                                    friendlyName = group.friendlyName,
+                                    entityId = group.snapshotEntityId.ifBlank { group.primaryEntityId },
+                                    state = group.state
+                                )
+                            }
+                            val selected = TrekoProactiveManager.selectImportantCamerasForScan(
+                                candidates = candidates,
+                                homeStatusSummary = homeStatusSummary,
+                                maxCameras = 3,
+                                rotationOffset = proactiveCameraCycle.getAndIncrement()
                             )
+                            if (selected.isEmpty()) return emptyList()
+
+                            return coroutineScope {
+                                selected.map { cam ->
+                                    async {
+                                        val report = client.analyzeCameraWithLlmVision(
+                                            cam.entityId,
+                                            TrekoProactiveManager.SENTINEL_VISION_PROMPT
+                                        )?.trim().orEmpty()
+                                        if (report.isBlank()) {
+                                            null
+                                        } else {
+                                            CameraAnomalyCheckResult(
+                                                cameraName = cam.friendlyName,
+                                                entityId = cam.entityId,
+                                                visionReport = report,
+                                                hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report)
+                                            )
+                                        }
+                                    }
+                                }.awaitAll().filterNotNull()
+                            }
                         }
 
                         override suspend fun getHabitsSummary(): String =
@@ -400,6 +439,9 @@ class TrekoAssistantService : Service() {
                         override fun getActiveTimersCount(): Int =
                             TrekoTimerManager.namedTimers.value.count { it.isRunning } +
                                 if (TrekoTimerManager.timerState.value.isRunning) 1 else 0
+
+                        override fun getLastWaterIntakeMs(): Long =
+                            TrekoHabitManager(appCtx).getLastWaterIntakeMs()
                     }
                 ).also { sharedProactiveManager = it }
             }
@@ -1102,6 +1144,20 @@ class TrekoAssistantService : Service() {
             }
         }
 
+        client.onServerAlert = { status, alertMsg ->
+            TrekoLogBuffer.w(TAG, "Xiaozhi server alert ($status): $alertMsg")
+            val pendingVoice = activeVoiceProactiveInsight
+            if (pendingVoice != null && _serviceState.value == TrekoState.THINKING) {
+                activeVoiceProactiveInsight = null
+                thinkingTimeoutJob?.cancel()
+                proactiveTtsFallbackJob?.cancel()
+                val reopenMic = activeVoiceProactiveFromUserTap && !_isMuted.value
+                serviceScope.launch {
+                    speakLocalProactiveFallback(pendingVoice, openMicAfter = reopenMic)
+                }
+            }
+        }
+
         client.onSttReceived = { transcript ->
             val clean = transcript.trim()
             if (clean.equals("谢谢观看", ignoreCase = true) || clean.contains("观看") || clean.isBlank()) {
@@ -1162,6 +1218,7 @@ class TrekoAssistantService : Service() {
                         wsClient?.abortSpeaking()
                     } else {
                         suppressIdleTts = false
+                        proactiveTtsFallbackJob?.cancel()
                         thinkingTimeoutJob?.cancel()
                         ttsDrainingJob?.cancel()
                         complementaryBioJob?.cancel()
@@ -1181,13 +1238,15 @@ class TrekoAssistantService : Service() {
                 }
                 "sentence_start" -> {
                     if (!suppressIdleTts && _serviceState.value != TrekoState.IDLE && _serviceState.value != TrekoState.ERROR) {
+                        proactiveTtsFallbackJob?.cancel()
                         if (_serviceState.value == TrekoState.THINKING) {
                             thinkingTimeoutJob?.cancel()
                             speakingStartTimestamp = System.currentTimeMillis()
                             val emotionToUse = if (hasTurnEmotion) null else TrekoEmotion.FELIZ_ABIERTO
                             transitionState(TrekoState.SPEAKING, emotionToUse)
                         }
-                        if (!text.isNullOrBlank()) {
+                        if (!text.isNullOrBlank() && !text.trimStart().startsWith("% ")) {
+                            activeVoiceProactiveInsight = null
                             val name = _assistantName.value
                             _subtitleText.value = "$name: $text"
                             addChatMessage(name, text)
@@ -2083,7 +2142,13 @@ class TrekoAssistantService : Service() {
         bargeInVoicedFrames = 0
         foreignVoiceResetJob?.cancel()
         thinkingTimeoutJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
+        activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
+        try {
+            localTts?.stop()
+        } catch (_: Exception) {
+        }
         isClosingTurn = false
         suppressIdleTts = false
         listeningOpenedByAutoFollowUp = false
@@ -2159,7 +2224,13 @@ class TrekoAssistantService : Service() {
         biometricCheckJob?.cancel()
         foreignVoiceResetJob?.cancel()
         thinkingTimeoutJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
+        activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
+        try {
+            localTts?.stop()
+        } catch (_: Exception) {
+        }
         isClosingTurn = false
         suppressIdleTts = false
         listeningOpenedByAutoFollowUp = true
@@ -2383,6 +2454,11 @@ class TrekoAssistantService : Service() {
                             if (targetId == -1) return@withContext "No habit matching '$title' found."
                             habitManager.deleteHabit(targetId)
                             "Habit deleted."
+                        }
+                        "add_water", "drink_water", "tomar_agua", "increment_water" -> {
+                            val nextCount = TrekoHabitManager.waterGlassesFlow.value + 1
+                            habitManager.setWaterGlasses(nextCount)
+                            "Registrado 1 vaso de agua. Ahora llevas $nextCount de 8 vasos hoy."
                         }
                         "set_water" -> {
                             if (waterCount < 0) return@withContext "water_count is required."
@@ -2862,36 +2938,49 @@ class TrekoAssistantService : Service() {
                 }
                 "manage_proactive_assistant" -> {
                     val action = normalizeAsciiLower(args.optString("action", "status"))
+                    val proactiveManager = getOrCreateProactiveManager(this@TrekoAssistantService)
                     when (action) {
-                        "deliver_pending", "pending", "leer", "read" -> {
+                        "deliver_pending", "read_pending_alert", "get_pending", "pending", "leer", "read", "briefing" -> {
+                            val activeVoice = activeVoiceProactiveInsight
                             val pending = _pendingProactiveInsight.value
-                            if (pending != null) {
+                            val recent = proactiveManager.lastDeliveredInsight?.takeIf {
+                                (System.currentTimeMillis() - it.createdAtMs) < 180_000L
+                            }
+                            val chosen = activeVoice ?: pending ?: recent
+                            if (chosen != null) {
+                                activeVoiceProactiveInsight = null
                                 _pendingProactiveInsight.value = null
                                 cancelProactiveNotification(this@TrekoAssistantService)
-                                "Tenías este aviso pendiente (${pending.title}): ${pending.summaryText}"
+                                "Di esto al usuario en voz alta ahora mismo con naturalidad: \"${chosen.spokenSpeechText}\"\nContexto detallado para preguntas de seguimiento: ${chosen.spokenPrompt}"
                             } else {
-                                val fresh = getOrCreateProactiveManager(this@TrekoAssistantService).evaluateNow(
+                                val fresh = proactiveManager.evaluateNow(
                                     includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
                                     force = true,
                                     assistantName = resolveAssistantName(this@TrekoAssistantService)
                                 )
                                 if (fresh != null) {
-                                    "No había avisos pendientes guardados. Revisando ahora mismo encontré: ${fresh.summaryText}"
+                                    "Di esto al usuario en voz alta ahora mismo: \"${fresh.spokenSpeechText}\"\nContexto adicional: ${fresh.spokenPrompt}"
                                 } else {
-                                    "No hay avisos pendientes ni novedades importantes en este momento."
+                                    "No hay avisos pendientes ni anomalías en este momento."
                                 }
                             }
                         }
                         "check_now", "check", "revisar", "checar" -> {
-                            val fresh = getOrCreateProactiveManager(this@TrekoAssistantService).evaluateNow(
+                            val fresh = proactiveManager.evaluateNow(
                                 includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
-                                force = true
+                                force = true,
+                                assistantName = resolveAssistantName(this@TrekoAssistantService)
                             )
                             if (fresh != null) {
-                                "Resultado del chequeo proactivo (${fresh.title}): ${fresh.summaryText}"
+                                "Resultado del chequeo proactivo (${fresh.title}): ${fresh.spokenSpeechText}"
                             } else {
                                 "Chequeo completado: todo en calma."
                             }
+                        }
+                        "snooze", "posponer", "mas_tarde", "luego", "delay" -> {
+                            val topic = args.optString("topic", "water").ifBlank { "water" }
+                            val durationMin = args.optInt("duration_minutes", 120).coerceIn(15, 720)
+                            proactiveManager.snoozeTopic(topic = topic, durationMinutes = durationMin)
                         }
                         "set_speak_out_loud", "configure", "config" -> {
                             val newVal = if (args.has("speak_out_loud")) {
@@ -3237,7 +3326,13 @@ class TrekoAssistantService : Service() {
         bargeInVoicedFrames = 0
         foreignVoiceResetJob?.cancel()
         thinkingTimeoutJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
+        activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
+        try {
+            localTts?.stop()
+        } catch (_: Exception) {
+        }
         isClosingTurn = false
         speechDetected = false
         _fullDuplexIndicator.value = FullDuplexIndicator.INACTIVE
@@ -3350,6 +3445,14 @@ class TrekoAssistantService : Service() {
         biometricCheckJob?.cancel()
         foreignVoiceResetJob?.cancel()
         proactiveLoopJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
+        try {
+            localTts?.stop()
+            localTts?.shutdown()
+        } catch (_: Exception) {
+        }
+        localTts = null
+        isLocalTtsReady.set(false)
         abandonAudioFocus()
         NativeAudioEngine.setPlaybackActive(false)
         NativeAudioEngine.onPcmData = null
@@ -3502,10 +3605,13 @@ class TrekoAssistantService : Service() {
         isComplementaryBioCheckInFlight = false
         foreignVoiceResetJob?.cancel()
         ttsDrainingJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
         isClosingTurn = false
         suppressIdleTts = false
         listeningOpenedByAutoFollowUp = false
         hasTurnEmotion = false
+        activeVoiceProactiveInsight = insight
+        activeVoiceProactiveFromUserTap = fromUserTap
 
         synchronized(opusSendOrderLock) {
             clearPendingOpusPackets()
@@ -3529,19 +3635,120 @@ class TrekoAssistantService : Service() {
                     waitedMs += 100L
                 }
             }
-            if (client.sendProactivePrompt(insight.spokenPrompt)) {
+            val trigger = "${_assistantName.value} lee tu aviso pendiente"
+            if (client.sendProactiveTrigger(trigger)) {
+                proactiveTtsFallbackJob = serviceScope.launch {
+                    delay(8500L)
+                    val pendingInsight = activeVoiceProactiveInsight
+                    if (pendingInsight?.id == insight.id && _serviceState.value == TrekoState.THINKING) {
+                        activeVoiceProactiveInsight = null
+                        thinkingTimeoutJob?.cancel()
+                        TrekoLogBuffer.w(TAG, "Xiaozhi proactive TTS timeout; falling back to local Android TTS.")
+                        speakLocalProactiveFallback(insight, openMicAfter = fromUserTap && !_isMuted.value)
+                    }
+                }
                 return
             }
         }
 
         // Fallback si el servidor Xiaozhi no está conectado en este instante
+        activeVoiceProactiveInsight = null
         thinkingTimeoutJob?.cancel()
-        _subtitleText.value = insight.summaryText
-        if (_serviceState.value == TrekoState.THINKING) {
+        speakLocalProactiveFallback(insight, openMicAfter = fromUserTap && !_isMuted.value)
+    }
+
+    private suspend fun ensureLocalTtsReady(): TextToSpeech? {
+        val existing = localTts
+        if (existing != null && isLocalTtsReady.get()) {
+            return existing
+        }
+        return withTimeoutOrNull(3500L) {
+            suspendCancellableCoroutine { cont ->
+                var created: TextToSpeech? = null
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                handler.post {
+                    try {
+                        created = TextToSpeech(this@TrekoAssistantService) { status ->
+                            val ready = (status == TextToSpeech.SUCCESS)
+                            isLocalTtsReady.set(ready)
+                            if (ready) {
+                                created?.language = Locale("es", "MX").takeIf {
+                                    created?.isLanguageAvailable(it) ?: -1 >= TextToSpeech.LANG_AVAILABLE
+                                } ?: Locale("es")
+                                created?.setAudioAttributes(
+                                    AudioAttributes.Builder()
+                                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                        .build()
+                                )
+                            }
+                            if (cont.isActive) {
+                                cont.resume(if (ready) created else null)
+                            }
+                        }
+                        localTts = created
+                    } catch (e: Exception) {
+                        TrekoLogBuffer.w(TAG, "No se pudo inicializar TextToSpeech local: ${e.message}")
+                        if (cont.isActive) cont.resume(null)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun speakLocalProactiveFallback(insight: ProactiveInsight, openMicAfter: Boolean) {
+        val textToSpeak = insight.spokenSpeechText.ifBlank { insight.summaryText }
+        val name = _assistantName.value
+        _subtitleText.value = "$name: $textToSpeak"
+        addChatMessage(name, textToSpeak)
+
+        val tts = ensureLocalTtsReady()
+        if (tts == null) {
             transitionState(
                 TrekoState.IDLE,
                 if (_isMuted.value) TrekoEmotion.SLEEPY else TrekoEmotion.FELIZ
             )
+            if (openMicAfter && !_isMuted.value) {
+                startActiveListening(prompt = getString(R.string.status_follow_up))
+            }
+            return
+        }
+
+        transitionState(TrekoState.SPEAKING, TrekoEmotion.FELIZ_ABIERTO)
+        val utteranceId = "proactive_${proactiveUtteranceSeq.incrementAndGet()}"
+        withTimeoutOrNull(28_000L) {
+            suspendCancellableCoroutine { cont ->
+                tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?) {
+                        if (id == utteranceId && cont.isActive) cont.resume(Unit)
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(id: String?) {
+                        if (id == utteranceId && cont.isActive) cont.resume(Unit)
+                    }
+
+                    override fun onError(id: String?, errorCode: Int) {
+                        if (id == utteranceId && cont.isActive) cont.resume(Unit)
+                    }
+                })
+                val res = tts.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                if (res != TextToSpeech.SUCCESS && cont.isActive) {
+                    cont.resume(Unit)
+                }
+            }
+        }
+
+        if (_serviceState.value == TrekoState.SPEAKING) {
+            if (openMicAfter && !_isMuted.value && wsClient?.isConnected == true) {
+                startActiveListening(prompt = getString(R.string.status_follow_up))
+            } else {
+                transitionState(
+                    TrekoState.IDLE,
+                    if (_isMuted.value) TrekoEmotion.SLEEPY else TrekoEmotion.RELAX
+                )
+            }
         }
     }
 

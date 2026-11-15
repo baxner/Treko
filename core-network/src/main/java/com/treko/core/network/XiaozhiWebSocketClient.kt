@@ -88,6 +88,7 @@ class XiaozhiWebSocketClient(
     var onAudioPacketReceived: ((ByteArray) -> Unit)? = null
     var onConnectionStateChanged: ((TrekoState) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onServerAlert: ((status: String, message: String) -> Unit)? = null
     var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
 
     internal fun computeReconnectDelayMs(attempt: Int): Long {
@@ -282,6 +283,12 @@ class XiaozhiWebSocketClient(
                     Log.d(TAG, "TTS estado: $state (texto: $subtitle)")
                     onTtsStateChanged?.invoke(state, subtitle)
                 }
+                "alert" -> {
+                    val status = json.optString("status", "ERROR")
+                    val message = json.optString("message", "")
+                    TrekoLogBuffer.w(TAG, "Alerta del servidor Xiaozhi ($status): $message")
+                    onServerAlert?.invoke(status, message)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error analizando JSON entrante: ${e.message}")
@@ -466,13 +473,13 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "manage_habits")
-                        put("description", "Gestiona los hábitos y rutinas diarias del usuario en la pantalla de Hábitos de Treko. Permite agregar un nuevo hábito ('add', ej. 'hacer la cama todas las mañanas'), marcar como hecho/pendiente ('toggle'), eliminar ('delete'), listar hábitos ('list'), o registrar vasos de agua ('set_water'). ¡ÚSALO SIEMPRE cuando el usuario mencione hábitos, rutinas diarias o registrar vasos de agua!")
+                        put("description", "Gestiona los hábitos y rutinas diarias del usuario en la pantalla de Hábitos de Treko. Permite agregar un nuevo hábito ('add', ej. 'hacer la cama todas las mañanas'), marcar como hecho/pendiente ('toggle'), eliminar ('delete'), listar hábitos ('list'), sumar un vaso de agua tomado ('add_water') o fijar vasos ('set_water'). ¡ÚSALO SIEMPRE cuando el usuario mencione hábitos, rutinas diarias o que tomó agua!")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "'add' para registrar nuevo hábito, 'list' para consultar hábitos actuales, 'toggle' para marcar/desmarcar hecho, 'delete' para eliminar, o 'set_water' para actualizar vasos de agua")
+                                    put("description", "'add' para registrar nuevo hábito, 'list' para consultar hábitos actuales, 'toggle' para marcar/desmarcar hecho, 'delete' para eliminar, 'add_water' para sumar un vaso de agua tomado ahora, o 'set_water' para fijar vasos de agua")
                                 })
                                 put("title", JSONObject().apply {
                                     put("type", "string")
@@ -769,17 +776,25 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "manage_proactive_assistant")
-                        put("description", "Triggers or checks Treko's proactive home, camera anomaly, habits, tasks, and memory briefing. Use when the user asks '¿Qué me ibas a decir?', 'haz un chequeo proactivo', or wants to configure proactive alerts.")
+                        put("description", "Lee el aviso proactivo actual de Treko (estado de casa, alertas reales de cámaras, hábitos, hidratación y tareas), ejecuta chequeos bajo demanda o pospone recordatorios (snooze). Úsala SIEMPRE cuando el usuario diga 'lee tu aviso pendiente', '¿qué me ibas a decir?', 'posponlo', 'recuérdame más tarde' o 'revisa la casa'.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
                                 put("action", JSONObject().apply {
                                     put("type", "string")
-                                    put("description", "Acción a realizar: 'deliver_pending', 'check_now', 'status' o 'set_speak_out_loud'")
+                                    put("description", "Acción a realizar: 'read_pending_alert' / 'deliver_pending', 'check_now', 'snooze', 'status' o 'set_speak_out_loud'")
                                 })
                                 put("speak_out_loud", JSONObject().apply {
                                     put("type", "boolean")
                                     put("description", "Opcional para action='set_speak_out_loud': true para iniciar conversación por voz automáticamente, false para enviar solo notificación")
+                                })
+                                put("topic", JSONObject().apply {
+                                    put("type", "string")
+                                    put("description", "Opcional para action='snooze': 'water', 'habits', 'tasks', 'home', 'cameras' o 'all'")
+                                })
+                                put("duration_minutes", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Opcional para action='snooze': minutos a posponer el recordatorio (por defecto 120)")
                                 })
                             })
                             put("required", JSONArray().apply { put("action") })
@@ -900,28 +915,30 @@ class XiaozhiWebSocketClient(
     }
 
     /**
-     * Inicia una conversación proactiva enviando un prompt de contexto al servidor Xiaozhi
-     * mediante un evento listen(state="detect", text=prompt) para que Treko hable al usuario.
+     * Inicia una conversación proactiva enviando un disparador breve en listen(state="detect")
+     * para que Xiaozhi consulte manage_proactive_assistant sin exceder el límite de longitud del servidor.
      */
-    fun sendProactivePrompt(prompt: String): Boolean {
+    fun sendProactiveTrigger(triggerText: String = "Treko lee tu aviso pendiente"): Boolean {
         val ws = webSocket ?: return false
         if (!isConnected) return false
         val sId = sessionId
         if (sId.isNullOrBlank()) return false
-        val cleanPrompt = prompt.trim()
-        if (cleanPrompt.isBlank()) return false
+        val raw = triggerText.trim()
+        val compact = if (raw.length <= 44 && raw.isNotBlank()) raw else "Treko lee tu aviso pendiente"
 
         val msg = JSONObject().apply {
             put("session_id", sId)
             put("type", "listen")
             put("state", "detect")
-            put("text", cleanPrompt)
+            put("text", compact)
         }
         val sent = ws.send(msg.toString())
-        TrekoLogBuffer.i(TAG, "Enviado prompt proactivo a Xiaozhi (sent=$sent, len=${cleanPrompt.length}).")
-        Log.i(TAG, "Prompt proactivo enviado a Xiaozhi (Session: $sId, sent=$sent).")
+        TrekoLogBuffer.i(TAG, "Enviado disparador proactivo a Xiaozhi (sent=$sent, text='$compact').")
+        Log.i(TAG, "Disparador proactivo enviado a Xiaozhi (Session: $sId, sent=$sent, text='$compact').")
         return sent
     }
+
+    fun sendProactivePrompt(prompt: String): Boolean = sendProactiveTrigger(prompt)
 
     fun sendAudio(opusData: ByteArray) {
         if (!isConnected || sessionId == null) return

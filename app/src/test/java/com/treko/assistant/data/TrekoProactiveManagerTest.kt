@@ -118,9 +118,141 @@ class TrekoProactiveManagerTest {
         val forced = manager.evaluateNow(includeCameraScan = false, force = true, hourOfDay = 12)
         assertNotNull(forced)
 
-        nowMs += 46L * 60_000L
+        nowMs += 125L * 60_000L
         val afterCooldown = manager.evaluateNow(includeCameraScan = false, force = false, hourOfDay = 12)
         assertNotNull(afterCooldown)
+    }
+
+    @Test
+    fun selectImportantCamerasForScan_correlatesSensorsAndPrioritizesPerimeterNames() {
+        val candidates = listOf(
+            ProactiveCameraCandidate("Cuarto Bebé", "camera.cuarto_bebe", "idle"),
+            ProactiveCameraCandidate("Patio Norte", "camera.patio_norte", "idle"),
+            ProactiveCameraCandidate("Entrada Residencial", "camera.entrada", "idle"),
+            ProactiveCameraCandidate("Estudio", "camera.estudio", "idle"),
+            ProactiveCameraCandidate("Jardín Principal", "camera.jardin", "idle")
+        )
+        val homeSummary = "Sensores y accesos activos (1): Movimiento Estudio (movimiento)."
+
+        val chosen = TrekoProactiveManager.selectImportantCamerasForScan(
+            candidates = candidates,
+            homeStatusSummary = homeSummary,
+            maxCameras = 3,
+            rotationOffset = 0
+        )
+
+        assertEquals(3, chosen.size)
+        assertEquals("camera.estudio", chosen[0].entityId)
+        assertTrue(chosen.any { it.entityId == "camera.entrada" })
+        assertTrue(chosen.any { it.entityId == "camera.patio_norte" || it.entityId == "camera.jardin" })
+    }
+
+    @Test
+    fun calmCameras_areOmittedFromSummaryAndSpeech() = runBlocking {
+        val sources = object : ProactiveDataSources {
+            override suspend fun getHomeStatusSummary(): String = ""
+            override suspend fun scanPriorityCamerasForAnomalies(homeStatusSummary: String): List<CameraAnomalyCheckResult> =
+                listOf(
+                    CameraAnomalyCheckResult(
+                        cameraName = "Jardín",
+                        entityId = "camera.jardin",
+                        visionReport = "[NORMAL]",
+                        hasAnomaly = false
+                    ),
+                    CameraAnomalyCheckResult(
+                        cameraName = "Entrada",
+                        entityId = "camera.entrada",
+                        visionReport = "La escena muestra un entorno tranquilo sin anomalías.",
+                        hasAnomaly = false
+                    )
+                )
+
+            override suspend fun getHabitsSummary(): String =
+                "Hábitos registrados (1):\n• 🧘 Meditación [Completado]"
+
+            override suspend fun getTasksSummary(): String =
+                "Tareas registradas (1):\n• Terminar reporte [Pendiente]"
+
+            override suspend fun getVaultMemories(): List<Pair<String, String>> = emptyList()
+            override fun getActiveTimersCount(): Int = 0
+        }
+        val manager = TrekoProactiveManager(sources)
+
+        val insight = manager.evaluateNow(includeCameraScan = true, force = true, hourOfDay = 15)
+
+        assertNotNull(insight)
+        assertEquals(ProactiveCategory.TASKS_AND_REMINDERS, insight!!.category)
+        assertFalse(insight.summaryText.contains("Jardín", ignoreCase = true))
+        assertFalse(insight.summaryText.contains("Entrada", ignoreCase = true))
+        assertFalse(insight.spokenSpeechText.contains("sin anomalías", ignoreCase = true))
+        assertTrue(insight.spokenSpeechText.contains("Terminar reporte"))
+    }
+
+    @Test
+    fun hydrationPacing_doesNotNagEvery15MinutesAndCalculatesCadenceToBedtime() {
+        val baseMs = 1_700_000_000_000L
+
+        // Just drank 20 min ago -> should NOT remind during 15-min checks
+        val recent = TrekoProactiveManager.evaluateHydrationPacing(
+            currentGlasses = 5,
+            targetGlasses = 8,
+            lastWaterIntakeMs = baseMs - 20L * 60_000L,
+            lastWaterReminderMs = 0L,
+            isWaterSnoozed = false,
+            nowMs = baseMs,
+            hourOfDay = 17,
+            force = false
+        )
+        assertFalse(recent.shouldRemind)
+
+        // 2 hours 10 min since last drink, 3 glasses left until 23:00 (6h left => ~1 every 2h) -> SHOULD remind once
+        val due = TrekoProactiveManager.evaluateHydrationPacing(
+            currentGlasses = 5,
+            targetGlasses = 8,
+            lastWaterIntakeMs = baseMs - 130L * 60_000L,
+            lastWaterReminderMs = 0L,
+            isWaterSnoozed = false,
+            nowMs = baseMs,
+            hourOfDay = 17,
+            force = false
+        )
+        assertTrue(due.shouldRemind)
+        assertEquals(3, due.remainingGlasses)
+        assertEquals(120, due.idealCadenceMinutes)
+        assertTrue(due.spokenCoaching.contains("antes de dormir"))
+
+        // 15 minutes after reminding -> must NOT nag again!
+        val fifteenMinLater = TrekoProactiveManager.evaluateHydrationPacing(
+            currentGlasses = 5,
+            targetGlasses = 8,
+            lastWaterIntakeMs = baseMs - 145L * 60_000L,
+            lastWaterReminderMs = baseMs,
+            isWaterSnoozed = false,
+            nowMs = baseMs + 15L * 60_000L,
+            hourOfDay = 17,
+            minuteOfHour = 15,
+            force = false
+        )
+        assertFalse(fifteenMinLater.shouldRemind)
+    }
+
+    @Test
+    fun snoozeTopic_suppressesWaterReminderDuringSnoozeWindow() = runBlocking {
+        var nowMs = 1_000_000_000L
+        val sources = FakeProactiveDataSources(
+            habitsSummary = "Hábitos registrados (1):\n• 💧 Hidratación: 4 de 8 vasos"
+        )
+        val manager = TrekoProactiveManager(sources, clockMs = { nowMs })
+
+        manager.snoozeTopic("water", durationMinutes = 120, nowMs = nowMs)
+        nowMs += 30L * 60_000L
+        val duringSnooze = manager.evaluateNow(includeCameraScan = false, force = false, hourOfDay = 16)
+        assertNull(duringSnooze)
+
+        nowMs += 100L * 60_000L
+        val afterSnooze = manager.evaluateNow(includeCameraScan = false, force = false, hourOfDay = 18)
+        assertNotNull(afterSnooze)
+        assertEquals(ProactiveCategory.HABITS_AND_WATER, afterSnooze!!.category)
     }
 
     @Test
