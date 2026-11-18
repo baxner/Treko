@@ -122,6 +122,7 @@ class TrekoAssistantService : Service() {
 
     private var ttsDrainingJob: Job? = null
     private var thinkingTimeoutJob: Job? = null
+    private val conversationWatchdog = ConversationWatchdog()
     private var biometricCheckJob: Job? = null
     private var complementaryBioJob: Job? = null
     private var foreignVoiceResetJob: Job? = null
@@ -1149,7 +1150,7 @@ class TrekoAssistantService : Service() {
             val pendingVoice = activeVoiceProactiveInsight
             if (pendingVoice != null && _serviceState.value == TrekoState.THINKING) {
                 activeVoiceProactiveInsight = null
-                thinkingTimeoutJob?.cancel()
+                cancelThinkingWatchdog()
                 proactiveTtsFallbackJob?.cancel()
                 val reopenMic = activeVoiceProactiveFromUserTap && !_isMuted.value
                 serviceScope.launch {
@@ -1240,7 +1241,7 @@ class TrekoAssistantService : Service() {
                     if (!suppressIdleTts && _serviceState.value != TrekoState.IDLE && _serviceState.value != TrekoState.ERROR) {
                         proactiveTtsFallbackJob?.cancel()
                         if (_serviceState.value == TrekoState.THINKING) {
-                            thinkingTimeoutJob?.cancel()
+                            cancelThinkingWatchdog()
                             speakingStartTimestamp = System.currentTimeMillis()
                             val emotionToUse = if (hasTurnEmotion) null else TrekoEmotion.FELIZ_ABIERTO
                             transitionState(TrekoState.SPEAKING, emotionToUse)
@@ -1304,6 +1305,18 @@ class TrekoAssistantService : Service() {
 
         client.onMcpToolCall = { toolName, args ->
             handleMcpToolCall(toolName, args, prefs)
+        }
+
+        client.onToolCallStarted = { toolName ->
+            val token = conversationWatchdog.onToolStarted(toolName, System.currentTimeMillis())
+            if (_serviceState.value == TrekoState.THINKING) scheduleThinkingWatchdog()
+            token
+        }
+
+        client.onToolCallFinished = { toolName, token, durationMs ->
+            TrekoLogBuffer.d(TAG, "MCP tool '$toolName' finished in ${durationMs}ms.")
+            (token as? Long)?.let { conversationWatchdog.onToolFinished(it, System.currentTimeMillis()) }
+            if (_serviceState.value == TrekoState.THINKING) scheduleThinkingWatchdog()
         }
 
         wsClient = client
@@ -2102,9 +2115,24 @@ class TrekoAssistantService : Service() {
     }
 
     private fun startThinkingTimeout() {
+        conversationWatchdog.onTurnSent(System.currentTimeMillis())
+        scheduleThinkingWatchdog()
+    }
+
+    private fun cancelThinkingWatchdog() {
+        conversationWatchdog.disarm()
+        thinkingTimeoutJob?.cancel()
+    }
+
+    /** (Re)programa el temporizador según el plazo vigente de [conversationWatchdog]. */
+    private fun scheduleThinkingWatchdog() {
         thinkingTimeoutJob?.cancel()
         thinkingTimeoutJob = serviceScope.launch {
-            delay(12000L)
+            while (true) {
+                val remaining = conversationWatchdog.remainingMs(System.currentTimeMillis()) ?: return@launch
+                delay(remaining)
+                if (conversationWatchdog.checkExpired(System.currentTimeMillis(), wsClient?.sessionId)) break
+            }
             if (_serviceState.value == TrekoState.THINKING) {
                 TrekoLogBuffer.w(TAG, "Thinking watchdog timeout; recovering to IDLE.")
                 _subtitleText.value = getString(R.string.status_thinking_timeout)
@@ -2223,7 +2251,7 @@ class TrekoAssistantService : Service() {
         listeningTurnGeneration++
         biometricCheckJob?.cancel()
         foreignVoiceResetJob?.cancel()
-        thinkingTimeoutJob?.cancel()
+        cancelThinkingWatchdog()
         proactiveTtsFallbackJob?.cancel()
         activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
@@ -3325,7 +3353,7 @@ class TrekoAssistantService : Service() {
         isComplementaryBioCheckInFlight = false
         bargeInVoicedFrames = 0
         foreignVoiceResetJob?.cancel()
-        thinkingTimeoutJob?.cancel()
+        cancelThinkingWatchdog()
         proactiveTtsFallbackJob?.cancel()
         activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
@@ -3642,7 +3670,7 @@ class TrekoAssistantService : Service() {
                     val pendingInsight = activeVoiceProactiveInsight
                     if (pendingInsight?.id == insight.id && _serviceState.value == TrekoState.THINKING) {
                         activeVoiceProactiveInsight = null
-                        thinkingTimeoutJob?.cancel()
+                        cancelThinkingWatchdog()
                         TrekoLogBuffer.w(TAG, "Xiaozhi proactive TTS timeout; falling back to local Android TTS.")
                         speakLocalProactiveFallback(insight, openMicAfter = fromUserTap && !_isMuted.value)
                     }
@@ -3653,7 +3681,7 @@ class TrekoAssistantService : Service() {
 
         // Fallback si el servidor Xiaozhi no está conectado en este instante
         activeVoiceProactiveInsight = null
-        thinkingTimeoutJob?.cancel()
+        cancelThinkingWatchdog()
         speakLocalProactiveFallback(insight, openMicAfter = fromUserTap && !_isMuted.value)
     }
 

@@ -90,6 +90,10 @@ class XiaozhiWebSocketClient(
     var onError: ((String) -> Unit)? = null
     var onServerAlert: ((status: String, message: String) -> Unit)? = null
     var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
+    /** Antes de ejecutar una herramienta MCP; devuelve un token que se pasa a [onToolCallFinished]. */
+    var onToolCallStarted: ((name: String) -> Any?)? = null
+    /** Al terminar una herramienta MCP (con éxito o error), antes de enviar la respuesta. */
+    var onToolCallFinished: ((name: String, token: Any?, durationMs: Long) -> Unit)? = null
 
     internal fun computeReconnectDelayMs(attempt: Int): Long {
         val exp = 1L shl attempt.coerceIn(0, 4) // 1, 2, 4, 8, 16 -> 2s..32s
@@ -821,6 +825,12 @@ class XiaozhiWebSocketClient(
                 Log.i(TAG, "Ejecutando herramienta MCP: $toolName con argumentos: $arguments")
 
                 scope.launch {
+                    val startedAt = System.currentTimeMillis()
+                    val toolToken = try {
+                        onToolCallStarted?.invoke(toolName)
+                    } catch (e: Exception) {
+                        null
+                    }
                     val callResp = try {
                         val resultText = onMcpToolCall?.invoke(toolName, arguments)
                             ?: "Herramienta $toolName ejecutada correctamente."
@@ -853,6 +863,11 @@ class XiaozhiWebSocketClient(
                                     put("message", e.message ?: "Error ejecutando herramienta $toolName")
                                 })
                             })
+                        }
+                    } finally {
+                        try {
+                            onToolCallFinished?.invoke(toolName, toolToken, System.currentTimeMillis() - startedAt)
+                        } catch (_: Exception) {
                         }
                     }
                     sendJson(callResp.toString())
