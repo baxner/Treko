@@ -1199,7 +1199,10 @@ class TrekoAssistantService : Service() {
         }
 
         client.onLlmReceived = { text, emotionStr ->
-            thinkingTimeoutJob?.cancel()
+            if (_serviceState.value == TrekoState.THINKING) {
+                conversationWatchdog.onLlmReceived(System.currentTimeMillis())
+                scheduleThinkingWatchdog()
+            }
             if (text.isNotBlank()) {
                 _subtitleText.value = "${_assistantName.value}: $text"
             }
@@ -1213,14 +1216,20 @@ class TrekoAssistantService : Service() {
             when (state) {
                 "start" -> {
                     val cur = _serviceState.value
-                    if (cur == TrekoState.IDLE || cur == TrekoState.ERROR) {
+                    val isLateReply = cur == TrekoState.IDLE &&
+                        conversationWatchdog.acceptsLateTts(System.currentTimeMillis(), wsClient?.sessionId)
+                    if (isLateReply) {
+                        conversationWatchdog.consumeLateTtsGrace()
+                        TrekoLogBuffer.i(TAG, "Playing late server TTS that arrived after the thinking watchdog.")
+                    }
+                    if ((cur == TrekoState.IDLE || cur == TrekoState.ERROR) && !isLateReply) {
                         suppressIdleTts = true
                         TrekoLogBuffer.i(TAG, "Ignoring unsolicited server TTS in state=$cur.")
                         wsClient?.abortSpeaking()
                     } else {
                         suppressIdleTts = false
                         proactiveTtsFallbackJob?.cancel()
-                        thinkingTimeoutJob?.cancel()
+                        cancelThinkingWatchdog()
                         ttsDrainingJob?.cancel()
                         complementaryBioJob?.cancel()
                         isComplementaryBioCheckInFlight = false
@@ -1571,7 +1580,12 @@ class TrekoAssistantService : Service() {
                         }
                     }
                 }
-                TrekoState.THINKING -> Unit
+                TrekoState.THINKING -> {
+                    // Decir la palabra de activación mientras piensa abre un turno nuevo.
+                    if (!isTrainingMode) {
+                        wakeWordDetector?.acceptWaveform(buffer, read)
+                    }
+                }
             }
         }
     }
@@ -2169,7 +2183,8 @@ class TrekoAssistantService : Service() {
         isComplementaryBioCheckInFlight = false
         bargeInVoicedFrames = 0
         foreignVoiceResetJob?.cancel()
-        thinkingTimeoutJob?.cancel()
+        cancelThinkingWatchdog()
+        conversationWatchdog.consumeLateTtsGrace()
         proactiveTtsFallbackJob?.cancel()
         activeVoiceProactiveInsight = null
         ttsDrainingJob?.cancel()
