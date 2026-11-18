@@ -1168,17 +1168,13 @@ class TrekoAssistantService : Service() {
                 _subtitleText.value = "$youPrefix: $clean"
                 addChatMessage("user", clean)
 
-                val lower = clean.lowercase(Locale.ROOT)
-                val isSleepIntent = listOf(
-                    "adiós", "adios", "duérmete", "duermete", "cállate", "callate",
-                    "hasta luego", "descansa", "eso es todo", "nada más", "nada mas",
-                    "bye", "goodbye", "silencio", "apágate", "apagate", "a dormir",
-                    "buenas noches", "go to sleep", "good night", "stop listening",
-                    "that's all", "thats all", "quiet", "shut up"
-                ).any { lower.contains(it) }
+                val isSleepIntent = SleepIntentDetector(
+                    assistantNames = listOf("Treko", _assistantName.value)
+                ).isSleepIntent(clean)
 
                 if (isSleepIntent) {
                     TrekoLogBuffer.i(TAG, "Sleep intent detected ('$clean').")
+                    cancelThinkingWatchdog()
                     serviceScope.launch {
                         client.stopListening()
                         client.abortSpeaking()
