@@ -626,8 +626,8 @@ class XiaozhiWebSocketClient(
                         })
                     })
                     put(JSONObject().apply {
-                        put("name", "get_weather")
-                        put("description", "Consulta el estado del clima actual y pronóstico (temperatura, lluvia, viento, humedad) desde Home Assistant.")
+                        put("name", "get_home_weather")
+                        put("description", "Consulta el clima actual y el pronóstico de la casa (temperatura, lluvia, viento, humedad) desde las entidades de Home Assistant.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject())

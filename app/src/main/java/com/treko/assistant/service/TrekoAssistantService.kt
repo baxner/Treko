@@ -2772,7 +2772,9 @@ class TrekoAssistantService : Service() {
                         "Failed to set alarm: ${e.message}"
                     }
                 }
-                "get_weather" -> {
+                // get_weather se renombró a get_home_weather: chocaba con la herramienta
+                // del servidor Xiaozhi ("Duplicate tool names").
+                "get_home_weather", "get_weather" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {

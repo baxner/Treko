@@ -138,6 +138,7 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
             "manage_timer" to "timer",
             "pomodoro" to "timer",
             "get_weather" to "weather",
+            "get_home_weather" to "weather",
             "home_status_summary" to "home_summary",
             "summary" to "home_summary",
             "tasks" to "tasks_summary",
