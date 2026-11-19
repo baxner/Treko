@@ -54,6 +54,30 @@ class HomeAssistantClientTest {
     }
 
     @Test
+    fun testRankCameraCandidatesReturnsEmptyWhenNothingMatches() {
+        val cams = listOf(
+            HomeAssistantClient.CameraInfo("camera.cochera", "Cochera", "idle", "http://x/1"),
+            HomeAssistantClient.CameraInfo("camera.sala", "Sala", "idle", "http://x/2")
+        )
+        val client = HomeAssistantClient("", "")
+        assertTrue(client.rankCameraCandidates(cams, "cámara de la cocina").isEmpty())
+        assertEquals(2, client.rankCameraCandidates(cams, "").size)
+    }
+
+    @Test
+    fun testRankCameraCandidatesIgnoresAccentsAndMatchesWords() {
+        val cams = listOf(
+            HomeAssistantClient.CameraInfo("camera.sotano", "Sótano", "idle", "http://x/1"),
+            HomeAssistantClient.CameraInfo("camera.patio_trasero", "Patio Trasero", "idle", "http://x/2"),
+            HomeAssistantClient.CameraInfo("camera.cuarto_bebe", "Cuarto Bebé", "idle", "http://x/3")
+        )
+        val client = HomeAssistantClient("", "")
+        assertEquals("camera.sotano", client.rankCameraCandidates(cams, "cámara del sótano").single().entityId)
+        assertEquals("camera.cuarto_bebe", client.rankCameraCandidates(cams, "cuarto del bebe").single().entityId)
+        assertEquals("camera.patio_trasero", client.rankCameraCandidates(cams, "patio trasero").first().entityId)
+    }
+
+    @Test
     fun testCameraSynonymsDoNotContainPersonalAliases() {
         val client = HomeAssistantClient("", "")
         val gardenSynonyms = client.getSynonymsForQuery("jardín")

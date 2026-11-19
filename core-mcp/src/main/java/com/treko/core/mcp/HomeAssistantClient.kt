@@ -1071,16 +1071,20 @@ class HomeAssistantClient(
 
         val synonyms = if (clean.isNotBlank()) getSynonymsForQuery(clean) else emptyList()
 
+        // Sin coincidencia devolvemos lista vacía: antes se usaban todas las cámaras y se
+        // describía la primera como si fuera la pedida.
         val matching = if (clean.isBlank()) {
             cams
         } else {
-            val filtered = cams.filter { cam ->
-                synonyms.any { syn ->
-                    cam.entityId.contains(syn, ignoreCase = true) ||
-                    cam.friendlyName.contains(syn, ignoreCase = true)
-                }
+            val terms = (synonyms + clean.split(" ").filter { it.length >= 4 })
+                .map { normalizeAsciiLower(it).replace(" ", "_") }
+                .filter { it.isNotBlank() }
+                .distinct()
+            cams.filter { cam ->
+                val eid = normalizeAsciiLower(cam.entityId)
+                val name = normalizeAsciiLower(cam.friendlyName).replace(" ", "_")
+                terms.any { term -> eid.contains(term) || name.contains(term) }
             }
-            if (filtered.isNotEmpty()) filtered else cams
         }
 
         return matching.sortedWith { a, b ->
@@ -1140,6 +1144,21 @@ class HomeAssistantClient(
         } catch (e: Exception) {
             Log.e(TAG, "Error obteniendo snapshot de cámara: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Explica al modelo por qué falló una consulta de cámara: si ningún nombre coincide,
+     * lista las cámaras disponibles para que pregunte en vez de inventar.
+     */
+    suspend fun describeCameraLookupFailure(cameraQuery: String): String {
+        val cams = getCameras()
+        if (cams.isEmpty()) return "No cameras found in Home Assistant."
+        val names = groupCameraCandidates(cams).joinToString(", ") { it.friendlyName }
+        return if (rankCameraCandidates(cams, cameraQuery).isEmpty()) {
+            "No camera matches '$cameraQuery'. Do not describe any other camera; tell the user and ask which one they mean. Available cameras: $names."
+        } else {
+            "Camera '$cameraQuery' exists but did not return an image (it may be offline). Available cameras: $names."
         }
     }
 

@@ -2865,7 +2865,7 @@ class TrekoAssistantService : Service() {
                     val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
                     if (snapshotPair == null) {
                         TrekoLogBuffer.w(TAG, "view_camera failed for query='$cameraQuery'")
-                        return@withContext "Could not reach camera '$cameraQuery' in Home Assistant."
+                        return@withContext haClient.describeCameraLookupFailure(cameraQuery)
                     }
 
                     val (camInfo, _) = snapshotPair
@@ -2900,7 +2900,9 @@ class TrekoAssistantService : Service() {
                     val haClient = HomeAssistantClient(haUrl, haToken)
 
                     val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
-                        ?: return@withContext "Could not capture frame from camera '$cameraQuery' in Home Assistant."
+                        ?: return@withContext haClient.describeCameraLookupFailure(cameraQuery).also {
+                            TrekoLogBuffer.w(TAG, "analyze_camera failed for query='$cameraQuery'")
+                        }
 
                     val (camInfo, bytes) = snapshotPair
                     _activeCameraFeed.value = CameraFeedState(
