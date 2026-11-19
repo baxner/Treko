@@ -77,6 +77,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -336,16 +337,9 @@ class TrekoAssistantService : Service() {
         fun addChatMessage(sender: String, text: String) {
             val clean = text.trim()
             if (clean.isBlank()) return
-            val current = _conversationHistory.value.toMutableList()
-            val last = current.lastOrNull()
-            val now = System.currentTimeMillis()
-            if (sender == "Treko" && last != null && last.sender == "Treko" && (now - last.timestamp < 10000L)) {
-                current[current.lastIndex] = last.copy(text = "${last.text} $clean", timestamp = now)
-                _conversationHistory.value = current
-            } else {
-                current.add(ChatMessage(sender = sender, text = clean, timestamp = now))
-                _conversationHistory.value = current.takeLast(60)
-            }
+            val message = ChatMessage(sender = sender, text = clean, timestamp = System.currentTimeMillis())
+            // update {} es atómico: dos hilos (STT y TTS) ya no se pisan los mensajes.
+            _conversationHistory.update { ChatMessage.append(it, message) }
         }
 
         fun clearHistory() {
@@ -806,7 +800,7 @@ class TrekoAssistantService : Service() {
                         TrekoEmotion.FELIZ_ABIERTO
                     }
                     _subtitleText.value = "${feed.friendlyName}: $summary"
-                    addChatMessage("Treko", "Análisis [${feed.friendlyName}]: $summary")
+                    addChatMessage(_assistantName.value, "Análisis [${feed.friendlyName}]: $summary")
                 } catch (e: Exception) {
                     TrekoLogBuffer.e("TrekoService", "UI camera vision error: ${e.message}")
                     _currentEmotion.value = if (_isMuted.value) TrekoEmotion.SLEEPY else TrekoEmotion.RELAX
