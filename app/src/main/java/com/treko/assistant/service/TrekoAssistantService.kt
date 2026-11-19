@@ -52,7 +52,9 @@ import com.treko.core.common.model.MultiCameraGridState
 import com.treko.core.common.model.TimerMode
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
+import com.treko.core.common.util.TargetLookup
 import com.treko.core.common.util.TrekoLogBuffer
+import com.treko.core.common.util.failureMessage
 import com.treko.core.kws.BiometricTurnGate
 import com.treko.core.kws.NeuralSpeechDenoiser
 import com.treko.core.kws.SpeakerBiometricEngine
@@ -2438,22 +2440,23 @@ class TrekoAssistantService : Service() {
                             "Habit added: '${item.title}' ${item.icon} (ID: ${item.id})."
                         }
                         "toggle", "check", "complete" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No habit matching '$title' found."
+                            val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
                             habitManager.toggleHabit(targetId)
                             val item = TrekoHabitManager.habitsFlow.value.find { it.id == targetId }
                             val state = if (item?.isDone == true) "completed" else "pending"
                             "Habit '${item?.title}' marked as $state."
                         }
                         "delete", "remove" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No habit matching '$title' found."
+                            val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
+                            val deletedTitle = (lookup as TargetLookup.Found).item.title
                             habitManager.deleteHabit(targetId)
-                            "Habit deleted."
+                            "Habit '$deletedTitle' deleted."
                         }
                         "add_water", "drink_water", "tomar_agua", "increment_water" -> {
                             val nextCount = TrekoHabitManager.waterGlassesFlow.value + 1
@@ -2482,22 +2485,23 @@ class TrekoAssistantService : Service() {
                             "Task added: '${item.title}' (ID: ${item.id})."
                         }
                         "toggle", "check", "complete" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No task matching '$title' found."
+                            val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
                             taskManager.toggleTask(targetId)
                             val item = TrekoTaskManager.tasksFlow.value.find { it.id == targetId }
                             val state = if (item?.isDone == true) "completed" else "pending"
                             "Task '${item?.title}' marked as $state."
                         }
                         "delete", "remove" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No task matching '$title' found."
+                            val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
+                            val deletedTitle = (lookup as TargetLookup.Found).item.title
                             taskManager.deleteTask(targetId)
-                            "Task deleted."
+                            "Task '$deletedTitle' deleted."
                         }
                         "list", "get" -> taskManager.listTasksSummary()
                         else -> "Unknown manage_tasks action '$action'."

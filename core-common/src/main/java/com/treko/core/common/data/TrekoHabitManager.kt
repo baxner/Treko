@@ -2,6 +2,7 @@ package com.treko.core.common.data
 
 import android.content.Context
 import com.treko.core.common.model.HabitItem
+import com.treko.core.common.util.TargetLookup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +25,10 @@ class TrekoHabitManager(context: Context) {
 
         @Volatile
         private var isInitialized = false
+
+        /** Busca por id o título sin elegir nunca uno al azar; ver [TargetLookup.find]. */
+        fun findTarget(id: Int?, title: String?): TargetLookup<HabitItem> =
+            TargetLookup.find(_habitsFlow.value, id, title, { it.id }, { it.title })
     }
 
     init {
