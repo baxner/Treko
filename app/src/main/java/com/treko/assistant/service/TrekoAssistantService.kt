@@ -108,8 +108,6 @@ class TrekoAssistantService : Service() {
 
     private val TAG = "TrekoService"
     private val CHANNEL_ID = "treko_assistant_service"
-    private val TIMER_CHANNEL_ID = "treko_timer_alerts"
-    private var nextTimerNotifId: Int = 2000
     private val NOTIFICATION_ID = 1001
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -882,9 +880,7 @@ class TrekoAssistantService : Service() {
         val prefs = TrekoPreferences(this)
         _isMuted.value = prefs.isMicMuted
 
-        TrekoTimerManager.onTimerFinished = { label, _ ->
-            notifyTimerFinished(label)
-        }
+        TimerAlarms.install(this)
         _isCinemaMode.value = prefs.cinemaModeEnabled
         syncPolicyPreferences(prefs)
 
@@ -3505,25 +3501,7 @@ class TrekoAssistantService : Service() {
         }
         manager.createNotificationChannel(channel)
 
-        val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        val timerChannel = NotificationChannel(
-            TIMER_CHANNEL_ID,
-            "Treko Timers & Reminders",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Alerts when a Treko timer or reminder finishes"
-            enableVibration(true)
-            vibrationPattern = longArrayOf(0L, 450L, 250L, 450L, 250L, 450L)
-            setSound(
-                alarmSound,
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-        }
-        manager.createNotificationChannel(timerChannel)
+        TimerAlarms.ensureChannel(this)
         ensureProactiveNotificationChannel(this)
     }
 
@@ -3748,34 +3726,6 @@ class TrekoAssistantService : Service() {
                 )
             }
         }
-    }
-
-    private fun notifyTimerFinished(label: String) {
-        TrekoLogBuffer.i(TAG, "Timer finished: $label")
-        addChatMessage(_assistantName.value, "⏰ $label")
-        val manager = getSystemService(NotificationManager::class.java) ?: return
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
-        val contentPendingIntent = PendingIntent.getActivity(
-            this,
-            nextTimerNotifId,
-            openAppIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        val notification = NotificationCompat.Builder(this, TIMER_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle("⏰ $label")
-            .setContentText(getString(R.string.timer_finished_notification_body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setSound(alarmSound)
-            .setAutoCancel(true)
-            .setContentIntent(contentPendingIntent)
-            .build()
-        manager.notify(nextTimerNotifId++, notification)
     }
 
     private fun updateNotification(state: TrekoState) {
