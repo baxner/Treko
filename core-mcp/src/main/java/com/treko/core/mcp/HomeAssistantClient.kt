@@ -1,6 +1,7 @@
 package com.treko.core.mcp
 
 import android.util.Log
+import com.treko.core.common.model.TrekoSkills
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -1453,12 +1454,25 @@ class HomeAssistantClient(
     }
 
     /**
-     * Entity ids that belong to an integration, whatever the user renamed them to.
-     * Null when the template API is unavailable, so callers can fall back to name matching.
+     * Which optional skills (HA integrations in [candidates]) this Home Assistant has.
+     * Null when Home Assistant cannot be reached, so callers keep their last known answer.
      */
-    private fun fetchIntegrationEntityIds(integration: String): Set<String>? {
-        if (!integration.matches(Regex("[a-z0-9_]+"))) return null
-        val template = "{{ integration_entities('$integration') | join(',') }}"
+    suspend fun detectSkills(candidates: List<String> = TrekoSkills.KNOWN): Set<String>? = withContext(Dispatchers.IO) {
+        if (!hasValidConfig()) return@withContext emptySet()
+        renderTemplate(SkillDetection.buildTemplate(candidates) ?: return@withContext emptySet())
+            ?.let { return@withContext SkillDetection.parseTemplateOutput(it, candidates) }
+        // Template API unavailable: fall back to default entity naming.
+        val array = try {
+            fetchStatesArray(forceRefresh = true)
+        } catch (e: Exception) {
+            null
+        } ?: return@withContext null
+        val ids = (0 until array.length()).map { array.getJSONObject(it).optString("entity_id") }
+        SkillDetection.fromEntityIds(ids)
+    }
+
+    /** Renders a Jinja template in Home Assistant; null if the call fails. */
+    private fun renderTemplate(template: String): String? {
         val body = JSONObject().put("template", template).toString()
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder()
@@ -1468,19 +1482,28 @@ class HomeAssistantClient(
             .build()
         return try {
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                resp.body?.string().orEmpty()
-                    .split(',')
-                    .map { it.trim() }
-                    .filter { it.contains('.') }
-                    .toSet()
-                    .takeIf { it.isNotEmpty() }
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else null
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Template lookup for '$integration' failed: ${e.message}")
+            Log.w(TAG, "Template render failed: ${e.message}")
             null
         }
     }
+
+    /**
+     * Entity ids that belong to an integration, whatever the user renamed them to.
+     * Null when the template API is unavailable, so callers can fall back to name matching.
+     */
+    private fun fetchIntegrationEntityIds(integration: String): Set<String>? {
+        if (!integration.matches(Regex("[a-z0-9_]+"))) return null
+        return renderTemplate("{{ integration_entities('$integration') | join(',') }}")
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.contains('.') }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+    }
+
 
     suspend fun getHomeStatusSummary(): String = withContext(Dispatchers.IO) {
         try {
