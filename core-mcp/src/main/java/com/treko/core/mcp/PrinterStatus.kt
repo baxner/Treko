@@ -71,14 +71,34 @@ internal object PrinterStatus {
         // Longest suffix first: "_printing_error" must not be read as "_printing".
         val keys = ALL_KEYS.sortedByDescending { it.suffix.length }
         for (entity in entities) {
-            val domain = entity.entityId.substringBefore('.')
-            val body = entity.entityId.substringAfter('.')
-            val key = keys.firstOrNull { it.domain == domain && body.endsWith(it.suffix) } ?: continue
-            val prefix = body.removeSuffix(key.suffix)
+            val (prefix, key) = splitEntity(entity.entityId, keys) ?: continue
             result.getOrPut(prefix) { mutableMapOf() }[key] = entity
         }
         // A group needs at least the state or the progress to describe a printer.
         return result.filterValues { it.containsKey(STATE) || it.containsKey(PERCENT) || it.containsKey(PRINTING) }
+    }
+
+    /**
+     * `sensor.octoprint_job_percentage` → ("octoprint", PERCENT). Home Assistant adds `_2`,
+     * `_3`… when a second printer has the same names; that number stays in the printer key.
+     */
+    private fun splitEntity(entityId: String, keys: List<Key>): Pair<String, Key>? {
+        val domain = entityId.substringBefore('.')
+        val body = entityId.substringAfter('.')
+        val numbered = Regex("^(.*)_(\\d+)$").find(body)
+        val candidates = listOfNotNull(body to "", numbered?.let { it.groupValues[1] to "_" + it.groupValues[2] })
+        for ((name, number) in candidates) {
+            val key = keys.firstOrNull { it.domain == domain && name.endsWith(it.suffix) } ?: continue
+            val prefix = name.removeSuffix(key.suffix)
+            if (prefix.isNotEmpty()) return (prefix + number) to key
+        }
+        return null
+    }
+
+    /** True if these ids include OctoPrint printer sensors (default "octoprint" naming). */
+    fun hasDefaultNamedPrinter(entityIds: List<String>): Boolean {
+        val keys = ALL_KEYS.sortedByDescending { it.suffix.length }
+        return entityIds.any { looksLikeOctoPrint(it) && splitEntity(it, keys) != null }
     }
 
     private fun describePrinter(prefix: String, byKey: Map<Key, Entity>, now: Instant, zone: ZoneId): String {

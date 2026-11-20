@@ -51,4 +51,12 @@ class SkillDetectionTest {
         assertEquals(setOf(TrekoSkills.MOTION_SENSORS), SkillDetection.fromStates(states))
         assertEquals(emptySet<String>(), SkillDetection.fromStates(states.drop(1)))
     }
+
+    @Test
+    fun `fallback recognises Frigate even when the device was renamed`() {
+        assertEquals(
+            setOf(TrekoSkills.FRIGATE),
+            SkillDetection.integrationsFromEntityIds(listOf("camera.patio", "binary_sensor.patio_patio_person_occupancy"))
+        )
+    }
 }

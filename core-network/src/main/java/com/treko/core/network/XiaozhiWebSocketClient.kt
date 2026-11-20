@@ -320,7 +320,8 @@ class XiaozhiWebSocketClient(
                         put("result", JSONObject().apply {
                             put("protocolVersion", "2024-11-05")
                             put("capabilities", JSONObject().apply {
-                                put("tools", JSONObject())
+                                // Tools depend on detected Home Assistant skills and can change.
+                                put("tools", JSONObject().put("listChanged", true))
                             })
                             put("serverInfo", JSONObject().apply {
                                 put("name", "Treko Android")

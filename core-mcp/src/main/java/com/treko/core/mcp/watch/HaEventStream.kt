@@ -14,23 +14,31 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Live connection to Home Assistant's WebSocket API that reports when any watched
- * binary sensor turns on. Subscribes with a state trigger limited to the watched
- * entities, so Home Assistant only sends what matters. Reconnects with backoff while
- * there is something to watch; closes when the watch list is empty.
+ * binary sensor turns on.
+ *
+ * Uses `subscribe_entities`, which any Home Assistant user may call (`subscribe_trigger`
+ * needs an admin), limited to the watched entities. Home Assistant first sends the current
+ * state of each one, then only changes; [SensorTransitions] turns that into "turned on"
+ * events, so a sensor that went on while the connection was down is still reported once.
+ * Reconnects with backoff while there is something to watch; closes when the list is empty.
  */
 class HaEventStream(
     baseUrl: String,
     private val token: String,
     private val onSensorOn: (entityId: String) -> Unit,
-    private val onStatus: (String) -> Unit = {}
+    /** Human-readable state of the live connection; [ok] false = alerts will not arrive. */
+    private val onStatus: (message: String, ok: Boolean) -> Unit = { _, _ -> }
 ) {
     private val wsUrl = toWebSocketUrl(baseUrl)
     private val http = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS)
         .connectTimeout(10, TimeUnit.SECONDS)
         .build()
-    private val scheduler = Executors.newSingleThreadScheduledExecutor()
+    private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "ha-event-stream").apply { isDaemon = true }
+    }
     private val lock = Any()
+    private val transitions = SensorTransitions()
 
     private var socket: WebSocket? = null
     private var authenticated = false
@@ -47,6 +55,7 @@ class HaEventStream(
         synchronized(lock) {
             if (released || entityIds == watched) return
             watched = entityIds
+            transitions.retainOnly(entityIds)
             when {
                 entityIds.isEmpty() -> closeLocked()
                 socket == null -> connectLocked()
@@ -57,11 +66,14 @@ class HaEventStream(
 
     fun release() {
         synchronized(lock) {
+            if (released) return
             released = true
             watched = emptySet()
             closeLocked()
         }
         scheduler.shutdownNow()
+        http.dispatcher.executorService.shutdown()
+        http.connectionPool.evictAll()
     }
 
     private fun connectLocked() {
@@ -73,7 +85,7 @@ class HaEventStream(
         val request = try {
             Request.Builder().url(wsUrl).build()
         } catch (e: IllegalArgumentException) {
-            onStatus("URL de Home Assistant inválida para eventos: ${e.message}")
+            onStatus("URL de Home Assistant inválida para eventos: ${e.message}", false)
             return
         }
         socket = http.newWebSocket(request, Listener())
@@ -97,11 +109,13 @@ class HaEventStream(
         if (watched.isEmpty()) return
         val id = nextMessageId++
         subscriptionId = id
-        val trigger = JSONObject()
-            .put("platform", "state")
-            .put("entity_id", JSONArray(watched.sorted()))
-            .put("to", "on")
-        ws.send(JSONObject().put("id", id).put("type", "subscribe_trigger").put("trigger", trigger).toString())
+        ws.send(
+            JSONObject()
+                .put("id", id)
+                .put("type", "subscribe_entities")
+                .put("entity_ids", JSONArray(watched.sorted()))
+                .toString()
+        )
     }
 
     private fun scheduleReconnectLocked() {
@@ -123,7 +137,8 @@ class HaEventStream(
             } catch (_: Exception) {
                 return
             }
-            var firedEntity: String? = null
+            val fired = ArrayList<String>()
+            var status: Pair<String, Boolean>? = null
             synchronized(lock) {
                 if (webSocket !== socket) return
                 when (msg.optString("type")) {
@@ -133,26 +148,36 @@ class HaEventStream(
                     "auth_ok" -> {
                         authenticated = true
                         reconnectDelayMs = INITIAL_BACKOFF_MS
-                        onStatus("Eventos de Home Assistant conectados (${watched.size} sensores).")
                         subscribeLocked()
                     }
                     "auth_invalid" -> {
                         authRejected = true
-                        onStatus("Home Assistant rechazó el token para eventos en tiempo real.")
+                        status = "Home Assistant rechazó el token para eventos en tiempo real." to false
                         closeLocked()
                     }
-                    "result" -> if (!msg.optBoolean("success", true)) {
-                        onStatus("Home Assistant rechazó la suscripción: ${msg.optJSONObject("error")?.optString("message")}")
+                    "result" -> if (msg.optInt("id") == subscriptionId) {
+                        status = if (msg.optBoolean("success", false)) {
+                            "Eventos de Home Assistant conectados (${watched.size} sensores)." to true
+                        } else {
+                            val error = msg.optJSONObject("error")
+                            "Home Assistant rechazó la suscripción a eventos: ${error?.optString("code")} ${error?.optString("message")}" to false
+                        }
                     }
                     "event" -> if (msg.optInt("id") == subscriptionId) {
-                        val trigger = msg.optJSONObject("event")?.optJSONObject("variables")?.optJSONObject("trigger")
-                        val entity = trigger?.optString("entity_id").orEmpty()
-                        val toState = trigger?.optJSONObject("to_state")?.optString("state")
-                        if (entity.isNotBlank() && (toState == null || toState == "on")) firedEntity = entity
+                        val event = msg.optJSONObject("event") ?: return
+                        fired += transitions.apply(parseCompressedStates(event))
                     }
                 }
             }
-            firedEntity?.let { onSensorOn(it) }
+            status?.let { (text, ok) -> onStatus(text, ok) }
+            fired.filter { it in watchedSnapshot() }.forEach { onSensorOn(it) }
+        }
+
+        // Home Assistant closed first (restart, reload): answer and reconnect right away
+        // instead of waiting for a failed ping.
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(1000, null)
+            dropped(webSocket)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -172,8 +197,11 @@ class HaEventStream(
                 subscriptionId = null
                 scheduleReconnectLocked()
             }
+            onStatus("Conexión de eventos con Home Assistant perdida; reconectando.", false)
         }
     }
+
+    private fun watchedSnapshot(): Set<String> = synchronized(lock) { watched }
 
     companion object {
         private const val TAG = "HaEventStream"
@@ -190,5 +218,52 @@ class HaEventStream(
             }
             return "$ws/api/websocket"
         }
+
+        /**
+         * `subscribe_entities` events: `a` = full states (`{"s": state}`), `c` = changes
+         * (`{"+": {"s": state}}`), `r` = removed. Returns entity → new state.
+         */
+        internal fun parseCompressedStates(event: JSONObject): Map<String, String?> {
+            val out = LinkedHashMap<String, String?>()
+            event.optJSONObject("a")?.let { added ->
+                for (key in added.keys()) out[key] = added.optJSONObject(key)?.optString("s")
+            }
+            event.optJSONObject("c")?.let { changed ->
+                for (key in changed.keys()) {
+                    val plus = changed.optJSONObject(key)?.optJSONObject("+") ?: continue
+                    if (plus.has("s")) out[key] = plus.optString("s")
+                }
+            }
+            event.optJSONArray("r")?.let { removed ->
+                for (i in 0 until removed.length()) out[removed.optString(i)] = null
+            }
+            return out
+        }
+    }
+}
+
+/**
+ * Remembers the last known state of each sensor and reports only off → on transitions.
+ * A sensor seen for the first time already "on" counts as a transition (someone is there
+ * now); after a reconnect, only sensors that were not "on" before are reported again.
+ */
+class SensorTransitions {
+    private val last = HashMap<String, String>()
+
+    fun apply(states: Map<String, String?>): List<String> {
+        val turnedOn = ArrayList<String>()
+        for ((entity, state) in states) {
+            if (state == null) {
+                last.remove(entity)
+                continue
+            }
+            if (state == "on" && last[entity] != "on") turnedOn += entity
+            last[entity] = state
+        }
+        return turnedOn
+    }
+
+    fun retainOnly(entityIds: Set<String>) {
+        last.keys.retainAll(entityIds)
     }
 }

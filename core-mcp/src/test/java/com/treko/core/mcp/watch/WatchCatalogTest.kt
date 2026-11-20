@@ -20,8 +20,15 @@ class WatchCatalogTest {
         HaStateLite("binary_sensor.pasillo_movimiento", "off", "Pasillo movimiento", "motion"),
         HaStateLite("light.sala", "on", "Sala")
     )
-    private val frigateIds = frigateHome.map { it.entityId }
-        .filter { it.contains("jardin") || it.contains("frente") || it.contains("banqueta") }.toSet()
+    private val frigateIds: Map<String, String> = frigateHome.map { it.entityId }
+        .filter { it.contains("jardin") || it.contains("frente") || it.contains("banqueta") }
+        .associateWith { id ->
+            when {
+                id.contains("jardin") -> "dev-jardin"
+                id.contains("frente") -> "dev-frente"
+                else -> "dev-banqueta"
+            }
+        }
 
     @Test
     fun `parses frigate occupancy sensors`() {
@@ -85,8 +92,57 @@ class WatchCatalogTest {
             HaStateLite("binary_sensor.patio_motion", "off", "Patio Motion", "motion"),
             HaStateLite("camera.patio", "idle", "Patio")
         )
-        val catalog = WatchCatalog.build(noFrigate, emptySet())
+        val catalog = WatchCatalog.build(noFrigate, emptyMap())
         assertEquals(1, catalog.size)
         assertEquals("camera.patio", catalog.single().cameraEntityId)
+    }
+
+    @Test
+    fun `renamed device - camera found through the shared device, zones through their own`() {
+        // Real-world shape: the camera's device was renamed, so its sensors got a doubled
+        // prefix (patio_patio_*) and the counters a third name; zones have no camera.
+        val states = listOf(
+            HaStateLite("camera.patio", "recording", "Patio"),
+            HaStateLite("binary_sensor.patio_patio_person_occupancy", "off", "Patio Person occupancy", "occupancy"),
+            HaStateLite("binary_sensor.patio_patio_all_occupancy", "off", "Patio All occupancy", "occupancy"),
+            HaStateLite("binary_sensor.patio_patio_motion", "off", "Patio Motion", "motion"),
+            HaStateLite("image.patio_patio_person", "2026-11-20T14:35:17", "Patio Person"),
+            HaStateLite("binary_sensor.acera_norte_person_occupancy", "off", "Acera Norte Person occupancy", "occupancy")
+        )
+        val devices = mapOf(
+            "camera.patio" to "d1",
+            "binary_sensor.patio_patio_person_occupancy" to "d1",
+            "binary_sensor.patio_patio_all_occupancy" to "d1",
+            "binary_sensor.patio_patio_motion" to "d1",
+            "image.patio_patio_person" to "d1",
+            "binary_sensor.acera_norte_person_occupancy" to "d2"
+        )
+        val catalog = WatchCatalog.build(states, devices)
+        val patio = catalog.first { it.entityId == "binary_sensor.patio_patio_person_occupancy" }
+        assertEquals(WatchSensor.Source.FRIGATE_CAMERA, patio.source)
+        assertEquals("camera.patio", patio.cameraEntityId)
+        assertEquals("image.patio_patio_person", patio.snapshotEntityId)
+        assertEquals("Patio", patio.areaName)
+        val acera = catalog.first { it.entityId == "binary_sensor.acera_norte_person_occupancy" }
+        assertEquals(WatchSensor.Source.FRIGATE_ZONE, acera.source)
+        assertEquals("Acera Norte", acera.areaName)
+        // Frigate's own motion sensor is not offered as a generic one.
+        assertTrue(catalog.none { it.entityId == "binary_sensor.patio_patio_motion" })
+
+        val r = WatchCatalog.resolve(catalog, listOf("acera", "el patio"), "person")
+        assertEquals(
+            setOf("binary_sensor.patio_patio_person_occupancy", "binary_sensor.acera_norte_person_occupancy"),
+            r.sensors.map { it.entityId }.toSet()
+        )
+    }
+
+    @Test
+    fun `without device info the camera is the longest id prefix`() {
+        val states = listOf(
+            HaStateLite("camera.patio", "recording", "Patio"),
+            HaStateLite("binary_sensor.patio_patio_person_occupancy", "off", "Patio Person occupancy", "occupancy")
+        )
+        val sensor = WatchCatalog.build(states, null).single()
+        assertEquals("camera.patio", sensor.cameraEntityId)
     }
 }

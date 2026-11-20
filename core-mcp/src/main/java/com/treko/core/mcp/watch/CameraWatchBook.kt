@@ -66,13 +66,18 @@ class CameraWatchBook(
         watch
     }
 
-    /** Stops watches covering any of [areaNames] (normalized match), or all when empty. */
-    fun stop(areaNames: List<String>): List<CameraWatch> = synchronized(lock) {
-        val keys = areaNames.map { WatchCatalog.normalize(it) }.filter { it.isNotBlank() }
-        val removed = if (keys.isEmpty()) {
+    /**
+     * Stops the watches covering the places named (same matching as when they were set),
+     * or all of them when nothing or "toda la casa" is named.
+     */
+    fun stop(places: List<String>): List<CameraWatch> = synchronized(lock) {
+        val queries = places.map { it.trim() }.filter { it.isNotEmpty() }
+        val removed = if (queries.isEmpty() || queries.any { WatchCatalog.isEverywhere(it) }) {
             watches.toList()
         } else {
-            watches.filter { w -> w.areaNames.any { name -> keys.any { WatchCatalog.sharesPlace(it, WatchCatalog.normalize(name)) } } }
+            val names = watches.flatMap { it.areaNames }.distinct()
+            val meant = queries.flatMap { WatchCatalog.matchPlaces(it, names) }.toSet()
+            watches.filter { w -> w.areaNames.any { it in meant } }
         }
         watches.removeAll(removed.toSet())
         persistLocked()
@@ -92,15 +97,18 @@ class CameraWatchBook(
      */
     fun onSensorActivated(sensorId: String, nowMs: Long): WatchHit? = synchronized(lock) {
         pruneLocked(nowMs)
-        val watch = watches.firstOrNull { sensorId in it.sensorIds } ?: return null
+        val covering = watches.filter { sensorId in it.sensorIds }
+        if (covering.isEmpty()) return null
         val last = lastAlertBySensor[sensorId]
         if (last != null && nowMs - last < cooldownMs) return null
         lastAlertBySensor[sensorId] = nowMs
-        if (watch.once) {
-            watches.remove(watch)
+        // One alert serves every watch on this sensor; each one-shot watch is used up.
+        val oneShots = covering.filter { it.once }
+        if (oneShots.isNotEmpty()) {
+            watches.removeAll(oneShots.toSet())
             persistLocked()
         }
-        WatchHit(watch, sensorId)
+        WatchHit(covering.first(), sensorId)
     }
 
     private fun pruneLocked(nowMs: Long) {

@@ -1499,7 +1499,25 @@ class HomeAssistantClient(
         } catch (e: Exception) {
             null
         } ?: return@withContext null
-        WatchCatalog.build(states, fetchIntegrationEntityIds(TrekoSkills.FRIGATE))
+        WatchCatalog.build(states, fetchIntegrationDevices(TrekoSkills.FRIGATE))
+    }
+
+    /**
+     * Entity id → device id for every entity of an integration (entities without a device
+     * map to ""). Null when the template API is unavailable.
+     */
+    private fun fetchIntegrationDevices(integration: String): Map<String, String>? {
+        if (!integration.matches(Regex("[a-z0-9_]+"))) return null
+        val output = renderTemplate(
+            "{% for e in integration_entities('$integration') %}{{ e }}={{ device_id(e) or '' }};{% endfor %}"
+        ) ?: return null
+        return output.split(';')
+            .mapNotNull { pair ->
+                val eid = pair.substringBefore('=').trim()
+                if (!eid.contains('.')) null else eid to pair.substringAfter('=', "").trim()
+            }
+            .toMap()
+            .takeIf { it.isNotEmpty() }
     }
 
     /** Current state of some entities ("on"/"off"…); missing ones are left out. */
@@ -1536,7 +1554,7 @@ class HomeAssistantClient(
     }
 
     /** Live event stream bound to this client's Home Assistant. */
-    fun openEventStream(onSensorOn: (String) -> Unit, onStatus: (String) -> Unit): HaEventStream =
+    fun openEventStream(onSensorOn: (String) -> Unit, onStatus: (message: String, ok: Boolean) -> Unit): HaEventStream =
         HaEventStream(getBaseUrl(), haToken, onSensorOn, onStatus)
 
     /** Renders a Jinja template in Home Assistant; null if the call fails. */
