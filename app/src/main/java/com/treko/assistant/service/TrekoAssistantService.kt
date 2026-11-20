@@ -1415,11 +1415,19 @@ class TrekoAssistantService : Service() {
                     TrekoLogBuffer.d(TAG, "Training detection '${event.keyword}' [${event.source}, snr=${snrLabel}dB]")
                     _trainingDetections.tryEmit(event)
                 } else {
-                    val sinceTimeoutMs = System.currentTimeMillis() - lastListeningTimeoutTimestamp
-                    if (event.source == "DTW" && (event.snrDb < 4.5f || sinceTimeoutMs < 750L)) {
+                    val sinceTimeoutMs = lastListeningTimeoutTimestamp
+                        .takeIf { it > 0L }
+                        ?.let { System.currentTimeMillis() - it }
+                    val rejection = WakeDetectionPolicy.rejectionReason(
+                        state = _serviceState.value,
+                        source = event.source,
+                        snrDb = event.snrDb,
+                        sinceTimeoutMs = sinceTimeoutMs
+                    )
+                    if (rejection != null) {
                         TrekoLogBuffer.d(
                             TAG,
-                            "Ignoring low-SNR/post-timeout DTW detection '${event.keyword}' [snr=${snrLabel}dB, sinceTimeout=${sinceTimeoutMs}ms]"
+                            "Ignoring ${event.source} detection '${event.keyword}' ($rejection) [snr=${snrLabel}dB, state=${_serviceState.value}]"
                         )
                         return@collect
                     }
