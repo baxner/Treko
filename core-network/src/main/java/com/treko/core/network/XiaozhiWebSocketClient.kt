@@ -698,7 +698,7 @@ class XiaozhiWebSocketClient(
                     })
                     put(JSONObject().apply {
                         put("name", "analyze_camera")
-                        put("description", "Analiza e interpreta visualmente con Inteligencia Artificial lo que está sucediendo en una cámara de seguridad en tiempo real (ej. '¿quién está en la puerta?', '¿hay alguien en el jardín?', '¿puedes ver la cámara del timbre?', '¿qué ves en el ring?', '¿hay paquetes o autos?'), y la despliega en pantalla.")
+                        put("description", "Analiza e interpreta visualmente con Inteligencia Artificial lo que está sucediendo en una cámara de seguridad en tiempo real (ej. '¿quién está en la puerta?', '¿hay alguien en el jardín?', '¿puedes ver la cámara del timbre?', '¿qué ves en el ring?', '¿hay paquetes o autos?'), y la despliega en pantalla. Para el progreso o estado de la impresora 3D usa get_3d_printer_status, no la cámara.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject().apply {
@@ -743,6 +743,14 @@ class XiaozhiWebSocketClient(
                     put(JSONObject().apply {
                         put("name", "home_status_summary")
                         put("description", "Genera un resumen ejecutivo de luces encendidas, Alexas/TVs reproduciendo, clima y temperatura, puertas/sensores activos y cámaras de seguridad del hogar.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject())
+                        })
+                    })
+                    put(JSONObject().apply {
+                        put("name", "get_3d_printer_status")
+                        put("description", "Estado real de la impresora 3D desde OctoPrint en Home Assistant: si está imprimiendo, porcentaje de progreso, archivo, hora estimada de fin, temperaturas de boquilla y cama, y errores. Úsalo SIEMPRE primero cuando pregunten por la impresora 3D o cómo va la impresión; usa analyze_camera solo si además quieren ver cómo luce la pieza.")
                         put("inputSchema", JSONObject().apply {
                             put("type", "object")
                             put("properties", JSONObject())
