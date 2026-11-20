@@ -69,6 +69,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.treko.assistant.R
+import com.treko.assistant.service.TrekoAssistantService
+import com.treko.assistant.ui.screens.BiometricVoiceEnrollmentDialog
 import com.treko.assistant.ui.theme.CardBorder
 import com.treko.assistant.ui.theme.DeepBackground
 import com.treko.assistant.ui.theme.NeonCyan
@@ -95,12 +97,15 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
 
 enum class WizardStep {
-    WELCOME, XIAOZHI, HOME_ASSISTANT, COMPLETED
+    WELCOME, XIAOZHI, HOME_ASSISTANT, VOICE, COMPLETED
 }
 
 @Composable
 fun SetupWizardScreen(
     prefs: TrekoPreferences,
+    hasMicPermission: Boolean,
+    onRequestMicPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     onFinish: () -> Unit
 ) {
     val context = LocalContext.current
@@ -197,12 +202,23 @@ fun SetupWizardScreen(
                                 }
                             },
                             onBack = { currentStep = WizardStep.XIAOZHI },
-                            onSkip = { currentStep = WizardStep.COMPLETED },
+                            onSkip = { currentStep = WizardStep.VOICE },
                             onNext = {
                                 prefs.haUrl = haUrl
                                 prefs.haToken = haToken
-                                currentStep = WizardStep.COMPLETED
+                                currentStep = WizardStep.VOICE
                             }
+                        )
+                    }
+
+                    WizardStep.VOICE -> {
+                        VoiceProfileStep(
+                            prefs = prefs,
+                            hasMicPermission = hasMicPermission,
+                            onRequestMicPermission = onRequestMicPermission,
+                            onOpenAppSettings = onOpenAppSettings,
+                            onBack = { currentStep = WizardStep.HOME_ASSISTANT },
+                            onNext = { currentStep = WizardStep.COMPLETED }
                         )
                     }
 
@@ -210,8 +226,13 @@ fun SetupWizardScreen(
                         CompletedStep(
                             prefs = prefs,
                             onStart = {
-                                prefs.isOnboardingCompleted = true
-                                onFinish()
+                                // The voice step cannot be skipped; guard against stale navigation anyway.
+                                if (!prefs.isBiometricVoiceEnrolled) {
+                                    currentStep = WizardStep.VOICE
+                                } else {
+                                    prefs.isOnboardingCompleted = true
+                                    onFinish()
+                                }
                             }
                         )
                     }
@@ -786,6 +807,134 @@ fun HomeAssistantStep(
     }
 }
 
+/**
+ * Required step: records the owner's voice print. Without it Treko cannot tell the owner
+ * from other people or from its own voice coming back through the loudspeaker.
+ */
+@Composable
+fun VoiceProfileStep(
+    prefs: TrekoPreferences,
+    hasMicPermission: Boolean,
+    onRequestMicPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
+    onBack: () -> Unit,
+    onNext: () -> Unit
+) {
+    val context = LocalContext.current
+    var isEnrolled by remember { mutableStateOf(prefs.isBiometricVoiceEnrolled) }
+    var showEnrollment by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(stringResource(R.string.wizard_voice_title), color = NeonCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.wizard_voice_desc), color = TextSecondary, fontSize = 13.sp)
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(stringResource(R.string.wizard_voice_why_title), color = NeonPurple, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(stringResource(R.string.wizard_voice_why_owner), color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_voice_why_echo), color = TextPrimary, fontSize = 12.sp)
+                Text(stringResource(R.string.wizard_voice_why_local), color = TextPrimary, fontSize = 12.sp)
+            }
+        }
+
+        Text(stringResource(R.string.wizard_voice_how), color = TextPrimary, fontSize = 13.sp)
+
+        if (!hasMicPermission) {
+            Text(stringResource(R.string.wizard_voice_mic_needed), color = Color(0xFFFF5252), fontSize = 13.sp)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onRequestMicPermission,
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(stringResource(R.string.wizard_voice_grant_mic), fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = onOpenAppSettings,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(stringResource(R.string.wizard_voice_open_settings), color = TextPrimary)
+                }
+            }
+        } else if (isEnrolled) {
+            Text(
+                stringResource(R.string.wizard_voice_done),
+                color = Color(0xFF00E676),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            OutlinedButton(
+                onClick = { showEnrollment = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(stringResource(R.string.wizard_voice_rerecord), color = NeonCyan)
+            }
+        } else {
+            Button(
+                onClick = { showEnrollment = true },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(stringResource(R.string.wizard_voice_record), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+            Text(stringResource(R.string.wizard_voice_required), color = TextSecondary, fontSize = 12.sp)
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(stringResource(R.string.action_back), color = TextPrimary)
+            }
+            Button(
+                onClick = onNext,
+                enabled = isEnrolled,
+                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(stringResource(R.string.action_next), fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+
+    if (showEnrollment && hasMicPermission) {
+        BiometricVoiceEnrollmentDialog(
+            onDismiss = { showEnrollment = false },
+            onEnrollmentApplied = { profileJson, recommendedThreshold ->
+                prefs.applyBiometricVoicePrint(profileJson, recommendedThreshold)
+                isEnrolled = prefs.isBiometricVoiceEnrolled
+                TrekoAssistantService.reloadConfiguration(context)
+            },
+            onResetProfile = {
+                prefs.resetBiometricVoicePrint()
+                isEnrolled = false
+                TrekoAssistantService.reloadConfiguration(context)
+            }
+        )
+    }
+}
+
 @Composable
 fun CompletedStep(
     prefs: TrekoPreferences,
@@ -830,6 +979,9 @@ fun CompletedStep(
                     stringResource(R.string.wizard_summary_ha_skip)
                 }
                 Text(haStatus, color = TextPrimary, fontSize = 13.sp)
+                if (prefs.isBiometricVoiceEnrolled) {
+                    Text(stringResource(R.string.wizard_summary_voice), color = Color(0xFF00E676), fontSize = 13.sp)
+                }
             }
         }
 

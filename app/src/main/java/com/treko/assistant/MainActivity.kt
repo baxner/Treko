@@ -87,6 +87,9 @@ class MainActivity : ComponentActivity() {
                 if (!isOnboardingCompleted) {
                     SetupWizardScreen(
                         prefs = prefs,
+                        hasMicPermission = hasMicPermission,
+                        onRequestMicPermission = { checkAndRequestPermissions() },
+                        onOpenAppSettings = { openAppSettings() },
                         onFinish = {
                             prefs.isOnboardingCompleted = true
                             isOnboardingCompleted = true

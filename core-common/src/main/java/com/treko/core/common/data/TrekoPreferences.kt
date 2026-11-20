@@ -303,6 +303,13 @@ class TrekoPreferences(context: Context) {
     val isBiometricVoiceEnrolled: Boolean
         get() = biometricVoicePrintJson.isNotBlank()
 
+    /** Saves a freshly recorded voice print and turns voice verification on. */
+    fun applyBiometricVoicePrint(profileJson: String, recommendedThreshold: Float) {
+        biometricVoicePrintJson = profileJson
+        biometricSpeakerThreshold = recommendedThreshold
+        biometricSpeakerGateEnabled = true
+    }
+
     fun effectiveAutoFollowUp(): Boolean = resolveEffectiveAutoFollowUp(autoFollowUpEnabled, cinemaModeEnabled)
 
     fun effectiveVoiceBargeIn(): Boolean = resolveEffectiveVoiceBargeIn(voiceBargeInEnabled, cinemaModeEnabled)
