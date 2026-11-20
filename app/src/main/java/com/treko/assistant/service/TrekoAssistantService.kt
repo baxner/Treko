@@ -1237,6 +1237,14 @@ class TrekoAssistantService : Service() {
                             biometricEnabled = effectiveBiometricGateEnabled,
                             nowMs = nowMs
                         )
+                        if (effectiveFullDuplexMode == FullDuplexMode.COMPLEMENTARY &&
+                            !complementaryCaptureAllowed()
+                        ) {
+                            TrekoLogBuffer.d(
+                                TAG,
+                                "Remarks during speech off: loudspeaker without voice verification would capture Treko's own echo."
+                            )
+                        }
                         _fullDuplexIndicator.value = FullDuplexIndicator.INACTIVE
                         val emotionToUse = if (hasTurnEmotion) null else TrekoEmotion.FELIZ_ABIERTO
                         transitionState(TrekoState.SPEAKING, emotionToUse)
@@ -1266,6 +1274,10 @@ class TrekoAssistantService : Service() {
                         ttsDrainingJob?.cancel()
                         ttsDrainingJob = serviceScope.launch {
                             opusCodec?.waitUntilPlaybackDrained(1400L) ?: delay(650)
+                            if (isComplementaryBioCheckInFlight) {
+                                // Let the voice check on a queued remark finish before deciding.
+                                withTimeoutOrNull(900L) { complementaryBioJob?.join() }
+                            }
                             if (_serviceState.value == TrekoState.SPEAKING) {
                                 val flushPlan = complementaryQueue.onPlaybackFinished()
                                 val client = wsClient
@@ -1469,7 +1481,7 @@ class TrekoAssistantService : Service() {
 
                         when (effectiveFullDuplexMode) {
                             FullDuplexMode.HALF_DUPLEX -> Unit
-                            FullDuplexMode.COMPLEMENTARY -> {
+                            FullDuplexMode.COMPLEMENTARY -> if (complementaryCaptureAllowed()) {
                                 val metrics = NativeAudioEngine.lastFrameMetrics
                                 val qSnap = complementaryQueue.onSpeakingFrame(
                                     cleanPcm16k = cleanForSpeaking,
@@ -1618,6 +1630,12 @@ class TrekoAssistantService : Service() {
             sendOrQueueOpusLocked(queued)
         }
     }
+
+    private fun complementaryCaptureAllowed(): Boolean =
+        FullDuplexComplementaryQueue.captureAllowed(
+            voiceVerificationActive = effectiveBiometricGateEnabled,
+            headsetRouted = NativeAudioEngine.isHeadsetRouted
+        )
 
     private fun launchComplementaryBiometricCheck(snapshot: ShortArray, expectedGen: Long) {
         complementaryBioJob?.cancel()

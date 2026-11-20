@@ -61,6 +61,9 @@ class FullDuplexComplementaryQueue(
     private var biometricRequired: Boolean = false
     private var biometricVerdict: BiometricVerdict = BiometricVerdict.DISABLED
     private var generation: Long = 0L
+    /** Loudest recent playback level; keeps the echo guard up while the room still rings. */
+    private var playbackPeakRms: Float = 0f
+    private var playbackPeakAtMs: Long = Long.MIN_VALUE
 
     fun configurePolicy(
         minSpeechMs: Long,
@@ -89,6 +92,8 @@ class FullDuplexComplementaryQueue(
             isSpeechActiveNow = false
             biometricRequired = biometricEnabled
             biometricVerdict = if (biometricEnabled) BiometricVerdict.PENDING else BiometricVerdict.DISABLED
+            playbackPeakRms = 0f
+            playbackPeakAtMs = Long.MIN_VALUE
         }
     }
 
@@ -157,8 +162,15 @@ class FullDuplexComplementaryQueue(
 
             // Double-talk guard: during loud speaker bursts, demand either clear residual SNR
             // or sufficient post-AEC RMS relative to playback level so residual echo never queues.
-            val doubleTalkMinRms = if (playbackRms > 0.04f) max(0.015f, playbackRms * 0.14f) else 0f
-            val effectiveMetrics = if (playbackRms > 0.04f && metrics.rms < doubleTalkMinRms && metrics.snrDb < (gate.minSnrDb + 3.0f)) {
+            // The reference is the recent playback peak, not the instantaneous level: between
+            // sentences and right after playback the speaker's echo still reaches the mic.
+            if (playbackRms >= playbackPeakRms || nowMs - playbackPeakAtMs > PLAYBACK_ECHO_HANGOVER_MS) {
+                playbackPeakRms = playbackRms
+                playbackPeakAtMs = nowMs
+            }
+            val echoReferenceRms = max(playbackRms, playbackPeakRms)
+            val doubleTalkMinRms = if (echoReferenceRms > 0.04f) max(0.015f, echoReferenceRms * 0.14f) else 0f
+            val effectiveMetrics = if (echoReferenceRms > 0.04f && metrics.rms < doubleTalkMinRms && metrics.snrDb < (gate.minSnrDb + 3.0f)) {
                 metrics.copy(isSpeech = false)
             } else {
                 metrics
@@ -223,7 +235,9 @@ class FullDuplexComplementaryQueue(
                 // User started speaking shortly before TTS ended and is STILL talking -> seamless handoff
                 isSpeechActiveNow && voicedFrameCount >= MIN_LIVE_HANDOFF_FRAMES ->
                     FlushDecision.HANDOFF_LIVE_LISTENING
-                hasConfirmedUtterance ->
+                // A finished remark is sent as-is, so with voice verification on it must be
+                // confirmed as the owner's voice; an unchecked one may be Treko's own echo.
+                hasConfirmedUtterance && biometricVerdict != BiometricVerdict.PENDING ->
                     FlushDecision.SEND_COMPLETE_UTTERANCE
                 else ->
                     FlushDecision.NONE
@@ -252,6 +266,8 @@ class FullDuplexComplementaryQueue(
         hasConfirmedUtterance = false
         isSpeechActiveNow = false
         biometricVerdict = if (biometricRequired) BiometricVerdict.PENDING else BiometricVerdict.DISABLED
+        playbackPeakRms = 0f
+        playbackPeakAtMs = Long.MIN_VALUE
     }
 
     private fun snapshotLocked(): QueueSnapshot {
@@ -276,6 +292,15 @@ class FullDuplexComplementaryQueue(
     }
 
     companion object {
+        /**
+         * Over the phone's loudspeaker the mic hears Treko's own voice; acoustic echo
+         * cancellation alone leaves enough of it to be taken as a remark. Without voice
+         * verification remarks are only captured through a headset.
+         */
+        fun captureAllowed(voiceVerificationActive: Boolean, headsetRouted: Boolean): Boolean =
+            voiceVerificationActive || headsetRouted
+
+        const val PLAYBACK_ECHO_HANGOVER_MS = 700L
         const val FRAME_DURATION_MS = 60L
         const val DEFAULT_MIN_COMPLEMENTARY_SPEECH_MS = 420L
         const val MAX_BUFFERED_FRAMES = 250 // 15 seconds @ 60ms/frame

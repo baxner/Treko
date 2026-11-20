@@ -125,4 +125,76 @@ class FullDuplexComplementaryQueueTest {
         assertEquals(FullDuplexComplementaryQueue.FlushDecision.NONE, plan.decision)
         assertTrue(plan.pcmFrames.isEmpty())
     }
+
+    @Test
+    fun `unverified remark is not sent when voice verification is on`() {
+        val queue = FullDuplexComplementaryQueue(minComplementarySpeechMs = 420L)
+        queue.reset(biometricEnabled = true, nowMs = 0L)
+
+        var t = 60L
+        repeat(12) {
+            queue.onSpeakingFrame(frame(), 960, speechMetrics(), playbackRms = 0.02f, nowMs = t)
+            t += 60L
+        }
+        repeat(20) {
+            queue.onSpeakingFrame(frame(10), 960, silenceMetrics(), playbackRms = 0.02f, nowMs = t)
+            t += 60L
+        }
+
+        // The voice check never answered: it may be Treko's own echo.
+        val plan = queue.onPlaybackFinished()
+        assertEquals(FullDuplexComplementaryQueue.FlushDecision.NONE, plan.decision)
+    }
+
+    @Test
+    fun `verified remark is sent when voice verification is on`() {
+        val queue = FullDuplexComplementaryQueue(minComplementarySpeechMs = 420L)
+        queue.reset(biometricEnabled = true, nowMs = 0L)
+        val gen = queue.currentGeneration()
+
+        var t = 60L
+        repeat(12) {
+            queue.onSpeakingFrame(frame(), 960, speechMetrics(), playbackRms = 0.02f, nowMs = t)
+            t += 60L
+        }
+        repeat(20) {
+            queue.onSpeakingFrame(frame(10), 960, silenceMetrics(), playbackRms = 0.02f, nowMs = t)
+            t += 60L
+        }
+        queue.setBiometricVerdict(gen, verified = true)
+
+        val plan = queue.onPlaybackFinished()
+        assertEquals(FullDuplexComplementaryQueue.FlushDecision.SEND_COMPLETE_UTTERANCE, plan.decision)
+    }
+
+    @Test
+    fun `echo right after a loud sentence is not queued`() {
+        val queue = FullDuplexComplementaryQueue(minComplementarySpeechMs = 420L)
+        queue.reset(biometricEnabled = false, nowMs = 0L)
+
+        // Treko speaks loudly; the mic only hears residual echo (low rms, low SNR).
+        val echo = speechMetrics(rms = 0.03f, snrDb = 9f)
+        var t = 60L
+        repeat(5) {
+            queue.onSpeakingFrame(frame(300), 960, echo, playbackRms = 0.30f, nowMs = t)
+            t += 60L
+        }
+        // Gap between sentences: playback level drops but the room still rings.
+        var sawCapture = false
+        repeat(10) {
+            val snap = queue.onSpeakingFrame(frame(300), 960, echo, playbackRms = 0.01f, nowMs = t)
+            if (snap.indicator != FullDuplexIndicator.INACTIVE) sawCapture = true
+            t += 60L
+        }
+
+        assertFalse(sawCapture)
+        assertEquals(FullDuplexComplementaryQueue.FlushDecision.NONE, queue.onPlaybackFinished().decision)
+    }
+
+    @Test
+    fun `remarks over the loudspeaker need voice verification`() {
+        assertFalse(FullDuplexComplementaryQueue.captureAllowed(voiceVerificationActive = false, headsetRouted = false))
+        assertTrue(FullDuplexComplementaryQueue.captureAllowed(voiceVerificationActive = false, headsetRouted = true))
+        assertTrue(FullDuplexComplementaryQueue.captureAllowed(voiceVerificationActive = true, headsetRouted = false))
+    }
 }
