@@ -1018,9 +1018,7 @@ fun SettingsScreen(
         BiometricVoiceEnrollmentDialog(
             onDismiss = { showBiometricDialog = false },
             onEnrollmentApplied = { profileJson, recommendedThreshold ->
-                prefs.biometricVoicePrintJson = profileJson
-                prefs.biometricSpeakerThreshold = recommendedThreshold
-                prefs.biometricSpeakerGateEnabled = true
+                prefs.applyBiometricVoicePrint(profileJson, recommendedThreshold)
                 biometricEnrolled = prefs.isBiometricVoiceEnrolled
                 biometricThreshold = recommendedThreshold
                 biometricGateEnabled = true

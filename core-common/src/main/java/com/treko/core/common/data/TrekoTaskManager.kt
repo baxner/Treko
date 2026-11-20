@@ -2,6 +2,7 @@ package com.treko.core.common.data
 
 import android.content.Context
 import com.treko.core.common.model.TaskItem
+import com.treko.core.common.util.TargetLookup
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +20,10 @@ class TrekoTaskManager(context: Context) {
 
         @Volatile
         private var isInitialized = false
+
+        /** Busca por id o título sin elegir nunca uno al azar; ver [TargetLookup.find]. */
+        fun findTarget(id: Int?, title: String?): TargetLookup<TaskItem> =
+            TargetLookup.find(_tasksFlow.value, id, title, { it.id }, { it.title })
     }
 
     init {

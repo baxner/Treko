@@ -92,6 +92,7 @@ import com.treko.assistant.ui.theme.TextPrimary
 import com.treko.assistant.ui.theme.TextSecondary
 import com.treko.core.common.model.AudioLevel
 import com.treko.core.common.model.ChatMessage
+import com.treko.core.common.model.ChatRole
 import com.treko.core.common.model.FullDuplexIndicator
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
@@ -863,9 +864,7 @@ fun FaceScreen(
 
 @Composable
 fun ChatBubble(msg: ChatMessage, assistantName: String = "") {
-    val isUser = msg.sender.equals("Tú", ignoreCase = true) ||
-        msg.sender.equals("You", ignoreCase = true) ||
-        msg.sender.equals("user", ignoreCase = true)
+    val isUser = msg.role == ChatRole.USER
     val displaySender = if (isUser) stringResource(R.string.speaker_you) else assistantName.ifBlank { stringResource(R.string.speaker_treko) }
 
     Column(

@@ -52,7 +52,9 @@ import com.treko.core.common.model.MultiCameraGridState
 import com.treko.core.common.model.TimerMode
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
+import com.treko.core.common.util.TargetLookup
 import com.treko.core.common.util.TrekoLogBuffer
+import com.treko.core.common.util.failureMessage
 import com.treko.core.kws.BiometricTurnGate
 import com.treko.core.kws.NeuralSpeechDenoiser
 import com.treko.core.kws.SpeakerBiometricEngine
@@ -75,6 +77,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -105,8 +108,6 @@ class TrekoAssistantService : Service() {
 
     private val TAG = "TrekoService"
     private val CHANNEL_ID = "treko_assistant_service"
-    private val TIMER_CHANNEL_ID = "treko_timer_alerts"
-    private var nextTimerNotifId: Int = 2000
     private val NOTIFICATION_ID = 1001
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -335,16 +336,9 @@ class TrekoAssistantService : Service() {
         fun addChatMessage(sender: String, text: String) {
             val clean = text.trim()
             if (clean.isBlank()) return
-            val current = _conversationHistory.value.toMutableList()
-            val last = current.lastOrNull()
-            val now = System.currentTimeMillis()
-            if (sender == "Treko" && last != null && last.sender == "Treko" && (now - last.timestamp < 10000L)) {
-                current[current.lastIndex] = last.copy(text = "${last.text} $clean", timestamp = now)
-                _conversationHistory.value = current
-            } else {
-                current.add(ChatMessage(sender = sender, text = clean, timestamp = now))
-                _conversationHistory.value = current.takeLast(60)
-            }
+            val message = ChatMessage(sender = sender, text = clean, timestamp = System.currentTimeMillis())
+            // update {} es atómico: dos hilos (STT y TTS) ya no se pisan los mensajes.
+            _conversationHistory.update { ChatMessage.append(it, message) }
         }
 
         fun clearHistory() {
@@ -805,7 +799,7 @@ class TrekoAssistantService : Service() {
                         TrekoEmotion.FELIZ_ABIERTO
                     }
                     _subtitleText.value = "${feed.friendlyName}: $summary"
-                    addChatMessage("Treko", "Análisis [${feed.friendlyName}]: $summary")
+                    addChatMessage(_assistantName.value, "Análisis [${feed.friendlyName}]: $summary")
                 } catch (e: Exception) {
                     TrekoLogBuffer.e("TrekoService", "UI camera vision error: ${e.message}")
                     _currentEmotion.value = if (_isMuted.value) TrekoEmotion.SLEEPY else TrekoEmotion.RELAX
@@ -887,9 +881,7 @@ class TrekoAssistantService : Service() {
         val prefs = TrekoPreferences(this)
         _isMuted.value = prefs.isMicMuted
 
-        TrekoTimerManager.onTimerFinished = { label, _ ->
-            notifyTimerFinished(label)
-        }
+        TimerAlarms.install(this)
         _isCinemaMode.value = prefs.cinemaModeEnabled
         syncPolicyPreferences(prefs)
 
@@ -2503,22 +2495,23 @@ class TrekoAssistantService : Service() {
                             "Habit added: '${item.title}' ${item.icon} (ID: ${item.id})."
                         }
                         "toggle", "check", "complete" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No habit matching '$title' found."
+                            val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
                             habitManager.toggleHabit(targetId)
                             val item = TrekoHabitManager.habitsFlow.value.find { it.id == targetId }
                             val state = if (item?.isDone == true) "completed" else "pending"
                             "Habit '${item?.title}' marked as $state."
                         }
                         "delete", "remove" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoHabitManager.habitsFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No habit matching '$title' found."
+                            val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
+                            val deletedTitle = (lookup as TargetLookup.Found).item.title
                             habitManager.deleteHabit(targetId)
-                            "Habit deleted."
+                            "Habit '$deletedTitle' deleted."
                         }
                         "add_water", "drink_water", "tomar_agua", "increment_water" -> {
                             val nextCount = TrekoHabitManager.waterGlassesFlow.value + 1
@@ -2547,22 +2540,23 @@ class TrekoAssistantService : Service() {
                             "Task added: '${item.title}' (ID: ${item.id})."
                         }
                         "toggle", "check", "complete" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No task matching '$title' found."
+                            val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
                             taskManager.toggleTask(targetId)
                             val item = TrekoTaskManager.tasksFlow.value.find { it.id == targetId }
                             val state = if (item?.isDone == true) "completed" else "pending"
                             "Task '${item?.title}' marked as $state."
                         }
                         "delete", "remove" -> {
-                            val targetId = if (id != -1) id else {
-                                TrekoTaskManager.tasksFlow.value.find { it.title.contains(title, ignoreCase = true) }?.id ?: -1
-                            }
-                            if (targetId == -1) return@withContext "No task matching '$title' found."
+                            val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
+                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                                ?.let { return@withContext it }
+                            val targetId = (lookup as TargetLookup.Found).item.id
+                            val deletedTitle = (lookup as TargetLookup.Found).item.title
                             taskManager.deleteTask(targetId)
-                            "Task deleted."
+                            "Task '$deletedTitle' deleted."
                         }
                         "list", "get" -> taskManager.listTasksSummary()
                         else -> "Unknown manage_tasks action '$action'."
@@ -3576,25 +3570,7 @@ class TrekoAssistantService : Service() {
         }
         manager.createNotificationChannel(channel)
 
-        val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        val timerChannel = NotificationChannel(
-            TIMER_CHANNEL_ID,
-            "Treko Timers & Reminders",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Alerts when a Treko timer or reminder finishes"
-            enableVibration(true)
-            vibrationPattern = longArrayOf(0L, 450L, 250L, 450L, 250L, 450L)
-            setSound(
-                alarmSound,
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-        }
-        manager.createNotificationChannel(timerChannel)
+        TimerAlarms.ensureChannel(this)
         ensureProactiveNotificationChannel(this)
     }
 
@@ -3819,34 +3795,6 @@ class TrekoAssistantService : Service() {
                 )
             }
         }
-    }
-
-    private fun notifyTimerFinished(label: String) {
-        TrekoLogBuffer.i(TAG, "Timer finished: $label")
-        addChatMessage(_assistantName.value, "⏰ $label")
-        val manager = getSystemService(NotificationManager::class.java) ?: return
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
-        val contentPendingIntent = PendingIntent.getActivity(
-            this,
-            nextTimerNotifId,
-            openAppIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        val notification = NotificationCompat.Builder(this, TIMER_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle("⏰ $label")
-            .setContentText(getString(R.string.timer_finished_notification_body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setSound(alarmSound)
-            .setAutoCancel(true)
-            .setContentIntent(contentPendingIntent)
-            .build()
-        manager.notify(nextTimerNotifId++, notification)
     }
 
     private fun updateNotification(state: TrekoState) {

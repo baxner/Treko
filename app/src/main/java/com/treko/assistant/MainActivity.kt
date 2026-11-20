@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
+import com.treko.assistant.service.TimerAlarms
 import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.ui.components.SetupWizardScreen
 import com.treko.assistant.ui.screens.CameraViewerDialog
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TimerAlarms.install(this)
 
         refreshPermissionState()
         checkAndRequestPermissions()
@@ -87,6 +89,9 @@ class MainActivity : ComponentActivity() {
                 if (!isOnboardingCompleted) {
                     SetupWizardScreen(
                         prefs = prefs,
+                        hasMicPermission = hasMicPermission,
+                        onRequestMicPermission = { checkAndRequestPermissions() },
+                        onOpenAppSettings = { openAppSettings() },
                         onFinish = {
                             prefs.isOnboardingCompleted = true
                             isOnboardingCompleted = true
