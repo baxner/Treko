@@ -1108,11 +1108,13 @@ class TrekoAssistantService : Service() {
             token = activeWsToken
         ).apply {
             advertiseAecFeature = prefs.softwareAec3Enabled
+            availableSkills = prefs.detectedSkills
         }
 
         client.onSessionStarted = { sid ->
             _activeSessionId.value = sid
             _connectionStatus.value = WsConnectionStatus.CONNECTED
+            refreshHomeAssistantSkills()
             flushPendingOpusPackets(client)
         }
 
@@ -1334,7 +1336,41 @@ class TrekoAssistantService : Service() {
         if (proactiveLoopJob?.isActive != true) {
             startProactiveLoop()
         }
+        refreshHomeAssistantSkills(force = true)
         updateNotification(_serviceState.value)
+    }
+
+    private val skillRefreshIntervalMs = 15 * 60_000L
+    private var lastSkillRefreshMs = 0L
+    private var skillRefreshJob: Job? = null
+
+    /**
+     * Detects which optional skills (OctoPrint, …) this user's Home Assistant supports and
+     * offers only those tools to the model. Throttled to every 15 min unless [force].
+     */
+    private fun refreshHomeAssistantSkills(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastSkillRefreshMs < skillRefreshIntervalMs) return
+        if (skillRefreshJob?.isActive == true) return
+        lastSkillRefreshMs = now
+        skillRefreshJob = serviceScope.launch(Dispatchers.IO) {
+            val prefs = TrekoPreferences(this@TrekoAssistantService)
+            val haUrl = prefs.haUrl.trim()
+            val haToken = prefs.haToken.trim()
+            val found = if (haUrl.isBlank() || haToken.isBlank()) {
+                emptySet()
+            } else {
+                // Unreachable Home Assistant: keep the last known skills.
+                HomeAssistantClient(haUrl, haToken).detectSkills() ?: return@launch
+            }
+            val previous = prefs.detectedSkills
+            wsClient?.availableSkills = found
+            if (found != previous) {
+                prefs.detectedSkills = found
+                TrekoLogBuffer.i(TAG, "Home Assistant skills changed: $previous -> $found")
+                wsClient?.notifyToolsChanged()
+            }
+        }
     }
 
     private fun flushPendingOpusPackets(client: XiaozhiWebSocketClient) {

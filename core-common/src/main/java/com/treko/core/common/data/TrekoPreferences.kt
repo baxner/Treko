@@ -62,6 +62,7 @@ class TrekoPreferences(context: Context) {
         private const val KEY_BIOMETRIC_SPEAKER_GATE_ENABLED = "biometric_speaker_gate_enabled"
         private const val KEY_BIOMETRIC_SPEAKER_THRESHOLD = "biometric_speaker_threshold"
         private const val KEY_BIOMETRIC_VOICEPRINT_JSON = "biometric_voiceprint_json"
+        private const val KEY_DETECTED_SKILLS = "detected_ha_skills"
         private const val KEY_FULL_DUPLEX_MODE = "full_duplex_mode"
         private const val KEY_SOFTWARE_AEC3_ENABLED = "software_aec3_enabled"
         private const val KEY_COMPLEMENTARY_MIN_SPEECH_MS = "complementary_min_speech_ms"
@@ -299,6 +300,11 @@ class TrekoPreferences(context: Context) {
     var proactiveQuietHoursEnabled: Boolean
         get() = prefs.getBoolean(KEY_PROACTIVE_QUIET_HOURS_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_PROACTIVE_QUIET_HOURS_ENABLED, value).apply()
+
+    /** Home Assistant integrations found last time (see TrekoSkills); empty until detected. */
+    var detectedSkills: Set<String>
+        get() = prefs.getStringSet(KEY_DETECTED_SKILLS, emptySet())?.toSet() ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_DETECTED_SKILLS, value.toSet()).apply()
 
     val isBiometricVoiceEnrolled: Boolean
         get() = biometricVoicePrintJson.isNotBlank()

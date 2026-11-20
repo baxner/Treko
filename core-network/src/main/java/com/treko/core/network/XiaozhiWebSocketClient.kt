@@ -1,6 +1,7 @@
 package com.treko.core.network
 
 import android.util.Log
+import com.treko.core.common.model.TrekoSkills
 import com.treko.core.common.model.TrekoState
 import com.treko.core.common.util.TrekoLogBuffer
 import kotlinx.coroutines.CoroutineScope
@@ -53,6 +54,10 @@ class XiaozhiWebSocketClient(
     @Volatile
     var sessionId: String? = null
         private set
+
+    /** Home Assistant integrations detected for this user; gates skill tools (TrekoSkills). */
+    @Volatile
+    var availableSkills: Set<String> = emptySet()
 
     @Volatile
     var isConnected: Boolean = false
@@ -817,7 +822,7 @@ class XiaozhiWebSocketClient(
                         put("jsonrpc", "2.0")
                         put("id", idValue)
                         put("result", JSONObject().apply {
-                            put("tools", toolsArray)
+                            put("tools", filterToolsForSkills(toolsArray))
                         })
                     })
                 }
@@ -955,6 +960,30 @@ class XiaozhiWebSocketClient(
         } catch (e: Exception) {
             Log.w(TAG, "Error enviando paquete Opus: ${e.message}")
         }
+    }
+
+    private fun filterToolsForSkills(tools: JSONArray): JSONArray {
+        val skills = availableSkills
+        val filtered = JSONArray()
+        for (i in 0 until tools.length()) {
+            val tool = tools.optJSONObject(i) ?: continue
+            if (TrekoSkills.isToolAvailable(tool.optString("name"), skills)) filtered.put(tool)
+        }
+        return filtered
+    }
+
+    /** Asks the server to fetch tools/list again after the detected skills changed (MCP). */
+    fun notifyToolsChanged() {
+        if (!isConnected) return
+        val notification = JSONObject().apply {
+            put("session_id", sessionId ?: "")
+            put("type", "mcp")
+            put("payload", JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("method", "notifications/tools/list_changed")
+            })
+        }
+        sendJson(notification.toString())
     }
 
     fun sendJson(json: String) {
