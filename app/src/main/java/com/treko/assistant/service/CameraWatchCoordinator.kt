@@ -50,15 +50,19 @@ class CameraWatchCoordinator(
     private val addChat: (String) -> Unit,
     /** True when the camera sentinel should follow Frigate detections. */
     private val sentinelEnabled: () -> Boolean = { false },
-    /** Frigate saw something on a camera: the sentinel takes a look at it. */
-    private val onSentinelDetection: suspend (cameraName: String) -> Unit = {}
+    /** Frigate saw something on a camera: the sentinel takes a look. False if it could not run. */
+    private val onSentinelDetection: suspend (cameraName: String) -> Boolean = { true }
 ) {
     private val book = CameraWatchBook(SharedPrefsWatchPersistence(context))
     private var stream: HaEventStream? = null
     private var streamClient: HomeAssistantClient? = null
     private var catalog: List<WatchSensor> = emptyList()
     private var expiryJob: Job? = null
-    private val notificationSeq = AtomicInteger(0)
+    /** Seeded from the clock so ids do not repeat across restarts while alerts are on screen. */
+    private val notificationSeq = AtomicInteger(((System.currentTimeMillis() / 1000) % 100_000).toInt())
+    @Volatile private var released = false
+    /** Last problem of the live connection; null while alerts can arrive. */
+    @Volatile private var liveProblem: String? = null
     private var sentinelSensors: Set<String> = emptySet()
     private val lastSentinelRunByCamera = HashMap<String, Long>()
 
@@ -73,7 +77,8 @@ class CameraWatchCoordinator(
         ensureChannel()
         scope.launch(Dispatchers.IO) {
             refreshCatalog()
-            syncStream(rebuild = true)
+            // Rebuilt only if the Home Assistant URL/token changed (see syncStream).
+            syncStream(rebuild = false)
         }
         if (expiryJob?.isActive != true) {
             expiryJob = scope.launch {
@@ -88,10 +93,13 @@ class CameraWatchCoordinator(
         }
     }
 
+    @Synchronized
     fun release() {
+        released = true
         expiryJob?.cancel()
         stream?.release()
         stream = null
+        _activeAreas.value = emptyList()
     }
 
     fun stopAll(): Int {
@@ -144,6 +152,7 @@ class CameraWatchCoordinator(
         )
         syncStream(rebuild = false)
         val until = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(watch.expiresAtMs))
+        val withPicture = resolution.sensors.any { it.snapshotEntityId != null || it.cameraEntityId != null }
         val generic = resolution.sensors.filter { it.source == WatchSensor.Source.GENERIC }.map { it.areaName }.distinct()
         val notes = buildList {
             if (resolution.unknownQueries.isNotEmpty()) {
@@ -152,10 +161,11 @@ class CameraWatchCoordinator(
             if (generic.isNotEmpty()) {
                 add("En ${generic.joinToString()} solo hay sensor de movimiento: avisaré de cualquier movimiento, no solo de ${objectLabel(objectGroup)}.")
             }
+            liveProblem?.let { add("Ojo: la conexión en tiempo real con Home Assistant falla ahora mismo ($it); los avisos llegarán cuando se recupere.") }
         }
         return "Vigilando ${areaNames.joinToString()} (${objectLabel(objectGroup)}) " +
             (if (once) "hasta el primer aviso, como máximo hasta las $until. " else "hasta las $until o hasta que me digas que pare. ") +
-            "Aviso con voz y notificación con foto." +
+            (if (withPicture) "Aviso con voz y notificación con foto." else "Aviso con voz y notificación (sin foto: no hay cámara asociada).") +
             (if (notes.isEmpty()) "" else " " + notes.joinToString(" "))
     }
 
@@ -165,12 +175,13 @@ class CameraWatchCoordinator(
         val format = DateFormat.getTimeInstance(DateFormat.SHORT)
         return "Vigilancias activas: " + active.joinToString("; ") { w ->
             "${w.areaNames.joinToString()} (${objectLabel(w.objectGroup)}${if (w.once) ", un solo aviso" else ""}) hasta las ${format.format(Date(w.expiresAtMs))}"
-        } + "."
+        } + "." + (liveProblem?.let { " Problema actual con la conexión en tiempo real: $it." } ?: "")
     }
 
     /** Points the event stream at the currently watched sensors and updates the UI list. */
     @Synchronized
     private fun syncStream(rebuild: Boolean) {
+        if (released) return
         val active = book.active(now())
         _activeAreas.value = active.flatMap { it.areaNames }.distinct()
         sentinelSensors = if (sentinelEnabled()) {
@@ -193,7 +204,10 @@ class CameraWatchCoordinator(
         }
         val current = stream ?: client?.openEventStream(
             onSensorOn = { entityId -> scope.launch { onSensorOn(entityId) } },
-            onStatus = { TrekoLogBuffer.i(TAG, it) }
+            onStatus = { message, ok ->
+                TrekoLogBuffer.i(TAG, message)
+                liveProblem = if (ok) null else message
+            }
         )?.also { stream = it }
         current?.setWatched(ids)
     }
@@ -205,7 +219,8 @@ class CameraWatchCoordinator(
     }
 
     private suspend fun onSensorOn(entityId: String) {
-        if (entityId in sentinelSensors) maybeRunSentinel(entityId)
+        // The sentinel can take a while (vision model): never let it delay the alert.
+        if (entityId in sentinelSensors) scope.launch { maybeRunSentinel(entityId) }
         val hit = book.onSensorActivated(entityId, now()) ?: return
         if (hit.watch.once) syncStream(rebuild = false)
         deliver(hit)
@@ -220,7 +235,10 @@ class CameraWatchCoordinator(
             if (last != null && nowMs - last < SENTINEL_COOLDOWN_MS) return
             lastSentinelRunByCamera[camera] = nowMs
         }
-        onSentinelDetection(sensor.areaName)
+        if (!onSentinelDetection(sensor.areaName)) {
+            // It could not run: do not mute this camera for the cooldown.
+            synchronized(lastSentinelRunByCamera) { lastSentinelRunByCamera.remove(camera) }
+        }
     }
 
     private suspend fun deliver(hit: WatchHit) {
@@ -228,7 +246,7 @@ class CameraWatchCoordinator(
         val area = sensor?.areaName ?: hit.watch.areaNames.firstOrNull().orEmpty()
         val text = alertText(sensor, hit.watch.objectGroup, area)
         TrekoLogBuffer.i(TAG, "Watch alert: $text (${hit.sensorId})")
-        val notificationId = NOTIFICATION_BASE_ID + (notificationSeq.getAndIncrement() % 50)
+        val notificationId = NOTIFICATION_BASE_ID + (notificationSeq.getAndIncrement() % 100_000)
 
         // 1. Right away: notification and voice. Nothing slow before this.
         post(notificationId, text, null, null)

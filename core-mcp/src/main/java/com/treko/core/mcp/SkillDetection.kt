@@ -8,7 +8,7 @@ import com.treko.core.mcp.watch.WatchCatalog
 internal object SkillDetection {
 
     private val DOMAIN = Regex("[a-z0-9_]+")
-    private val MOTION_CLASSES = setOf("motion", "occupancy", "presence")
+    private val MOTION_CLASSES = setOf("motion", "occupancy")
 
     /** Template printing each installed integration (with at least one entity), space-separated. */
     fun buildTemplate(candidates: List<String>): String? {
@@ -33,12 +33,13 @@ internal object SkillDetection {
     /** Fallback when the template API is unavailable: default entity naming of each integration. */
     fun integrationsFromEntityIds(entityIds: List<String>): Set<String> {
         val found = mutableSetOf<String>()
-        if (entityIds.any { PrinterStatus.looksLikeOctoPrint(it) && (it.startsWith("sensor.") || it.startsWith("binary_sensor.")) }) {
+        if (PrinterStatus.hasDefaultNamedPrinter(entityIds)) {
             found += TrekoSkills.OCTOPRINT
         }
-        val cameras = entityIds.filter { it.startsWith("camera.") }.map { it.substringAfter('.') }.toSet()
+        val cameras = entityIds.filter { it.startsWith("camera.") }.map { it.substringAfter('.') }
         if (entityIds.any { id ->
-                id.startsWith("binary_sensor.") && WatchCatalog.parseFrigateOccupancy(id)?.first in cameras
+                val area = if (id.startsWith("binary_sensor.")) WatchCatalog.parseFrigateOccupancy(id)?.first else null
+                area != null && cameras.any { cam -> area == cam || area.startsWith("${cam}_") }
             }
         ) {
             found += TrekoSkills.FRIGATE

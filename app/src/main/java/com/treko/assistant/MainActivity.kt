@@ -154,7 +154,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         val prefs = TrekoPreferences(applicationContext)
-        if (!isChangingConfigurations && !prefs.isAlwaysListeningInBackground) {
+        // Keep the service while the user has camera watches running.
+        if (!isChangingConfigurations && !prefs.isAlwaysListeningInBackground &&
+            TrekoAssistantService.activeWatchAreas.value.isEmpty()
+        ) {
             TrekoAssistantService.stopService(this)
         }
         super.onDestroy()

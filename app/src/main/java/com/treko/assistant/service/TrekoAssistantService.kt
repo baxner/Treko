@@ -397,20 +397,24 @@ class TrekoAssistantService : Service() {
                             if (haUrl.isBlank() || haToken.isBlank()) return emptyList()
                             val client = HomeAssistantClient(haUrl, haToken)
                             val groups = client.getDeduplicatedCameras()
-                            // With Frigate, only look at cameras where it is detecting something now:
-                            // no blind vision calls on empty scenes.
-                            val frigateActive: Set<String>? = if (TrekoSkills.FRIGATE in p.detectedSkills) {
+                            // Frigate cameras are only looked at while Frigate detects something in
+                            // them (no blind vision calls on empty scenes). Cameras outside Frigate
+                            // keep the regular scan. If Home Assistant can't say, scan as before.
+                            var frigateCameras: Set<String> = emptySet()
+                            var frigateBusy: Set<String> = emptySet()
+                            if (TrekoSkills.FRIGATE in p.detectedSkills) {
                                 val sensors = client.getWatchCatalog().orEmpty()
-                                    .filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.objectType != null }
+                                    .filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.cameraEntityId != null }
                                 val states = client.getStates(sensors.map { it.entityId }.toSet())
-                                sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
-                            } else {
-                                null
+                                if (sensors.isNotEmpty() && states.isNotEmpty()) {
+                                    frigateCameras = sensors.mapNotNull { it.cameraEntityId }.toSet()
+                                    frigateBusy = sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
+                                }
                             }
                             val candidates = groups
                                 .filter { group ->
-                                    frigateActive == null ||
-                                        group.primaryEntityId in frigateActive || group.snapshotEntityId in frigateActive
+                                    val ids = setOf(group.primaryEntityId, group.snapshotEntityId)
+                                    ids.none { it in frigateCameras } || ids.any { it in frigateBusy }
                                 }
                                 .map { group ->
                                     ProactiveCameraCandidate(
@@ -1406,7 +1410,18 @@ class TrekoAssistantService : Service() {
             },
             onSentinelDetection = { cameraName ->
                 TrekoLogBuffer.i(TAG, "Frigate saw something at $cameraName; running the camera sentinel now.")
-                runProactiveCheck(force = false, camerasOnly = true)
+                // Another check in progress: wait for it rather than drop this detection.
+                var waitedMs = 0L
+                while (_isProactiveCheckRunning.value && waitedMs < 90_000L) {
+                    delay(1_000L)
+                    waitedMs += 1_000L
+                }
+                if (_isProactiveCheckRunning.value) {
+                    false
+                } else {
+                    runProactiveCheck(force = false, camerasOnly = true)
+                    true
+                }
             }
         )
         cameraWatch = coordinator
@@ -1437,8 +1452,11 @@ class TrekoAssistantService : Service() {
     private fun refreshHomeAssistantSkills(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastSkillRefreshMs < skillRefreshIntervalMs) return
-        if (skillRefreshJob?.isActive == true) return
-        lastSkillRefreshMs = now
+        if (skillRefreshJob?.isActive == true) {
+            // Settings changed mid-detection: run again with the new ones afterwards.
+            if (force) skillRefreshPending = true
+            return
+        }
         skillRefreshJob = serviceScope.launch(Dispatchers.IO) {
             val prefs = TrekoPreferences(this@TrekoAssistantService)
             val haUrl = prefs.haUrl.trim()
@@ -1446,16 +1464,41 @@ class TrekoAssistantService : Service() {
             val found = if (haUrl.isBlank() || haToken.isBlank()) {
                 emptySet()
             } else {
-                // Unreachable Home Assistant: keep the last known skills.
-                HomeAssistantClient(haUrl, haToken).detectSkills() ?: return@launch
+                // Unreachable Home Assistant: keep the last known skills, retry next time.
+                HomeAssistantClient(haUrl, haToken).detectSkills()
             }
-            val previous = prefs.detectedSkills
-            wsClient?.availableSkills = found
-            if (found != previous) {
-                prefs.detectedSkills = found
-                TrekoLogBuffer.i(TAG, "Home Assistant skills changed: $previous -> $found")
-                wsClient?.notifyToolsChanged()
+            if (found != null) {
+                lastSkillRefreshMs = System.currentTimeMillis()
+                val previous = prefs.detectedSkills
+                wsClient?.availableSkills = found
+                if (found != previous) {
+                    prefs.detectedSkills = found
+                    TrekoLogBuffer.i(TAG, "Home Assistant skills changed: $previous -> $found")
+                    announceToolsChanged()
+                }
             }
+            if (skillRefreshPending) {
+                skillRefreshPending = false
+                withContext(Dispatchers.Main) { refreshHomeAssistantSkills(force = true) }
+            }
+        }
+    }
+
+    @Volatile private var skillRefreshPending = false
+
+    /**
+     * The server asks for tools/list when the session starts, often before skills are
+     * detected. Tell it the list changed (MCP), and reconnect while idle so a server that
+     * ignores the notification still gets the new list.
+     */
+    private fun announceToolsChanged() {
+        val client = wsClient ?: return
+        client.notifyToolsChanged()
+        if (_serviceState.value == TrekoState.IDLE && client.isConnected) {
+            TrekoLogBuffer.i(TAG, "Reconnecting Xiaozhi so the server sees the new tool list.")
+            client.disconnect()
+            _connectionStatus.value = WsConnectionStatus.CONNECTING
+            client.connect()
         }
     }
 
@@ -3568,6 +3611,7 @@ class TrekoAssistantService : Service() {
         super.onDestroy()
         cameraWatch?.release()
         cameraWatch = null
+        _activeWatchAreas.value = emptyList()
         isServiceRunning = false
         isTrainingMode = false
 
@@ -3817,8 +3861,9 @@ class TrekoAssistantService : Service() {
                             val ready = (status == TextToSpeech.SUCCESS)
                             isLocalTtsReady.set(ready)
                             if (ready) {
-                                created?.language = Locale("es", "MX").takeIf {
-                                    created?.isLanguageAvailable(it) ?: -1 >= TextToSpeech.LANG_AVAILABLE
+                                // The phone's language (alert texts follow it too); Spanish as fallback.
+                                created?.language = listOf(Locale.getDefault(), Locale("es", "MX"), Locale("es")).firstOrNull {
+                                    (created?.isLanguageAvailable(it) ?: -1) >= TextToSpeech.LANG_AVAILABLE
                                 } ?: Locale("es")
                                 created?.setAudioAttributes(
                                     AudioAttributes.Builder()
