@@ -402,4 +402,17 @@
     <string name="proactive_interval_label">Check interval:</string>
     <string name="proactive_test_now">Test proactive check now</string>
     <string name="proactive_test_started">Running proactive check across home, cameras, habits, and tasks…</string>
+    <string name="watch_alert_person">Someone is at %1$s</string>
+    <string name="watch_alert_vehicle">A vehicle is at %1$s</string>
+    <string name="watch_alert_animal">An animal is at %1$s</string>
+    <string name="watch_alert_package">A package is at %1$s</string>
+    <string name="watch_alert_any">Something was detected at %1$s</string>
+    <string name="watch_alert_motion">Motion at %1$s</string>
+    <string name="watch_alert_body">Tap to open Treko.</string>
+    <string name="watch_channel_name">Camera watch</string>
+    <string name="watch_channel_desc">Alerts when Treko sees someone where you asked it to watch</string>
+    <string name="watch_vision_question">Describe in one short sentence who or what is visible (person, vehicle, animal) and what they are doing. No preamble.</string>
+    <string name="watch_chip">Watching: %1$s</string>
+    <string name="watch_stop_cd">Stop watching</string>
+    <string name="notification_watching">Watching: %1$s</string>
 </resources>

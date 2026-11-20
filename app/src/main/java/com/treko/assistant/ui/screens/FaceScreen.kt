@@ -1,5 +1,7 @@
 package com.treko.assistant.ui.screens
 
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -121,6 +123,7 @@ fun FaceScreen(
     val history by TrekoAssistantService.conversationHistory.collectAsState()
     val fullDuplexIndicator by TrekoAssistantService.fullDuplexIndicator.collectAsState()
     val pendingInsight by TrekoAssistantService.pendingProactiveInsight.collectAsState()
+    val watchAreas by TrekoAssistantService.activeWatchAreas.collectAsState()
     val listState = rememberLazyListState()
 
     LaunchedEffect(history.size, showHistory) {
@@ -281,6 +284,47 @@ fun FaceScreen(
                                 fontWeight = if (isCinemaMode) FontWeight.Bold else FontWeight.Medium,
                                 maxLines = 1
                             )
+                        }
+                    }
+                }
+                if (watchAreas.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Surface(
+                        color = Color(0xFF22C55E).copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, Color(0xFF22C55E).copy(alpha = 0.6f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 8.dp, end = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Visibility,
+                                contentDescription = null,
+                                tint = Color(0xFF86EFAC),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = stringResource(R.string.watch_chip, watchAreas.joinToString(", ")),
+                                color = Color(0xFF86EFAC),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 200.dp)
+                            )
+                            IconButton(
+                                onClick = { TrekoAssistantService.stopAllWatches() },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = stringResource(R.string.watch_stop_cd),
+                                    tint = Color(0xFF86EFAC),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
                         }
                     }
                 }

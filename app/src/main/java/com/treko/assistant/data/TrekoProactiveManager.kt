@@ -471,7 +471,9 @@ class TrekoProactiveManager(
         force: Boolean = false,
         hourOfDay: Int = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
         assistantName: String = "Treko",
-        minuteOfHour: Int = Calendar.getInstance().get(Calendar.MINUTE)
+        minuteOfHour: Int = Calendar.getInstance().get(Calendar.MINUTE),
+        /** Only the camera sentinel (run when a detector saw something); no other topics. */
+        camerasOnly: Boolean = false
     ): ProactiveInsight? {
         val now = clockMs()
         val cleanAssistantName = assistantName.trim().ifBlank { "Treko" }
@@ -543,6 +545,8 @@ class TrekoProactiveManager(
                 spokenSpeechText = spokenSpeech
             ).also { recordDeliveredInsight(it) }
         }
+
+        if (camerasOnly) return null
 
         // Evaluación inteligente de Casa (Home Assistant), Hábitos, Hidratación y Tareas
         val highlights = mutableListOf<String>()

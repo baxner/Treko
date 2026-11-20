@@ -2,6 +2,10 @@ package com.treko.core.mcp
 
 import android.util.Log
 import com.treko.core.common.model.TrekoSkills
+import com.treko.core.mcp.watch.HaEventStream
+import com.treko.core.mcp.watch.HaStateLite
+import com.treko.core.mcp.watch.WatchCatalog
+import com.treko.core.mcp.watch.WatchSensor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -1438,19 +1442,83 @@ class HomeAssistantClient(
      * Which optional skills (HA integrations in [candidates]) this Home Assistant has.
      * Null when Home Assistant cannot be reached, so callers keep their last known answer.
      */
-    suspend fun detectSkills(candidates: List<String> = TrekoSkills.KNOWN): Set<String>? = withContext(Dispatchers.IO) {
+    suspend fun detectSkills(candidates: List<String> = TrekoSkills.KNOWN_INTEGRATIONS): Set<String>? = withContext(Dispatchers.IO) {
         if (!hasValidConfig()) return@withContext emptySet()
-        renderTemplate(SkillDetection.buildTemplate(candidates) ?: return@withContext emptySet())
-            ?.let { return@withContext SkillDetection.parseTemplateOutput(it, candidates) }
-        // Template API unavailable: fall back to default entity naming.
-        val array = try {
-            fetchStatesArray(forceRefresh = true)
+        val states = try {
+            fetchStatesLite(forceRefresh = true)
         } catch (e: Exception) {
             null
         } ?: return@withContext null
-        val ids = (0 until array.length()).map { array.getJSONObject(it).optString("entity_id") }
-        SkillDetection.fromEntityIds(ids)
+        val integrations = SkillDetection.buildTemplate(candidates)
+            ?.let { renderTemplate(it) }
+            ?.let { SkillDetection.parseTemplateOutput(it, candidates) }
+            // Template API unavailable: fall back to default entity naming.
+            ?: SkillDetection.integrationsFromEntityIds(states.map { it.entityId })
+        integrations + SkillDetection.fromStates(states)
     }
+
+    /** All states, reduced to what the watch catalog and skill detection need. */
+    private fun fetchStatesLite(forceRefresh: Boolean): List<HaStateLite>? {
+        val array = fetchStatesArray(forceRefresh) ?: return null
+        return (0 until array.length()).map { i ->
+            val item = array.getJSONObject(i)
+            val attrs = item.optJSONObject("attributes")
+            HaStateLite(
+                entityId = item.optString("entity_id"),
+                state = item.optString("state"),
+                friendlyName = attrs?.optString("friendly_name").orEmpty(),
+                deviceClass = attrs?.optString("device_class").orEmpty()
+            )
+        }
+    }
+
+    /** What can be watched in this home: Frigate cameras/zones and generic motion sensors. */
+    suspend fun getWatchCatalog(): List<WatchSensor>? = withContext(Dispatchers.IO) {
+        if (!hasValidConfig()) return@withContext null
+        val states = try {
+            fetchStatesLite(forceRefresh = true)
+        } catch (e: Exception) {
+            null
+        } ?: return@withContext null
+        WatchCatalog.build(states, fetchIntegrationEntityIds(TrekoSkills.FRIGATE))
+    }
+
+    /** Current state of some entities ("on"/"off"…); missing ones are left out. */
+    suspend fun getStates(entityIds: Set<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        val states = try {
+            fetchStatesLite(forceRefresh = true)
+        } catch (e: Exception) {
+            null
+        } ?: return@withContext emptyMap()
+        states.filter { it.entityId in entityIds }.associate { it.entityId to it.state }
+    }
+
+    /** JPEG/PNG bytes of a camera or image entity, through Home Assistant's proxy. */
+    suspend fun fetchEntityImage(entityId: String): ByteArray? = withContext(Dispatchers.IO) {
+        if (!hasValidConfig()) return@withContext null
+        val path = when {
+            entityId.startsWith("image.") -> "image_proxy"
+            entityId.startsWith("camera.") -> "camera_proxy"
+            else -> return@withContext null
+        }
+        val req = Request.Builder()
+            .url("${getBaseUrl()}/api/$path/$entityId")
+            .addHeader("Authorization", "Bearer $haToken")
+            .get()
+            .build()
+        try {
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.bytes()?.takeIf { it.isNotEmpty() } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Image fetch for $entityId failed: ${e.message}")
+            null
+        }
+    }
+
+    /** Live event stream bound to this client's Home Assistant. */
+    fun openEventStream(onSensorOn: (String) -> Unit, onStatus: (String) -> Unit): HaEventStream =
+        HaEventStream(getBaseUrl(), haToken, onSensorOn, onStatus)
 
     /** Renders a Jinja template in Home Assistant; null if the call fails. */
     private fun renderTemplate(template: String): String? {

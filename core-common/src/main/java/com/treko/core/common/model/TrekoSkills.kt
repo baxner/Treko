@@ -1,25 +1,33 @@
 package com.treko.core.common.model
 
 /**
- * Optional abilities that depend on a Home Assistant integration being installed.
+ * Optional abilities that depend on what this user's Home Assistant has.
  *
  * Treko runs against anyone's Home Assistant: a skill's tools are offered to the model
- * only when its integration is detected, so a home without OctoPrint never sees printer tools.
- * Each skill id is the Home Assistant integration domain.
+ * only when the skill is detected, so a home without OctoPrint never sees printer tools.
  */
 object TrekoSkills {
+    /** OctoPrint integration: 3D printer status. */
     const val OCTOPRINT = "octoprint"
 
-    /** Integrations to look for in Home Assistant. */
-    val KNOWN: List<String> = listOf(OCTOPRINT)
+    /** Frigate integration: object detection per camera and zone. */
+    const val FRIGATE = "frigate"
 
-    private val TOOL_REQUIREMENTS: Map<String, String> = mapOf(
-        "get_3d_printer_status" to OCTOPRINT
+    /** Any motion / occupancy / presence binary sensor (any brand, any integration). */
+    const val MOTION_SENSORS = "motion_sensors"
+
+    /** Home Assistant integration domains to look for. */
+    val KNOWN_INTEGRATIONS: List<String> = listOf(OCTOPRINT, FRIGATE)
+
+    /** Tool → skills that enable it (any one is enough). */
+    private val TOOL_REQUIREMENTS: Map<String, Set<String>> = mapOf(
+        "get_3d_printer_status" to setOf(OCTOPRINT),
+        "watch_cameras" to setOf(FRIGATE, MOTION_SENSORS)
     )
 
-    fun requiredSkill(toolName: String): String? = TOOL_REQUIREMENTS[toolName]
+    fun requiredSkills(toolName: String): Set<String>? = TOOL_REQUIREMENTS[toolName]
 
     /** Tools without a requirement are always available. */
     fun isToolAvailable(toolName: String, detectedSkills: Set<String>): Boolean =
-        requiredSkill(toolName)?.let { it in detectedSkills } ?: true
+        requiredSkills(toolName)?.let { needed -> needed.any { it in detectedSkills } } ?: true
 }
