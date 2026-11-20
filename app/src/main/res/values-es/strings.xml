@@ -417,4 +417,17 @@
     <string name="proactive_interval_label">Frecuencia de revisión:</string>
     <string name="proactive_test_now">Probar chequeo proactivo ahora</string>
     <string name="proactive_test_started">Ejecutando chequeo proactivo de hogar, cámaras, hábitos y tareas…</string>
+    <string name="watch_alert_person">Hay alguien en %1$s</string>
+    <string name="watch_alert_vehicle">Hay un vehículo en %1$s</string>
+    <string name="watch_alert_animal">Hay un animal en %1$s</string>
+    <string name="watch_alert_package">Hay un paquete en %1$s</string>
+    <string name="watch_alert_any">Detecté algo en %1$s</string>
+    <string name="watch_alert_motion">Hubo movimiento en %1$s</string>
+    <string name="watch_alert_body">Toca para abrir Treko.</string>
+    <string name="watch_channel_name">Vigilancia de cámaras</string>
+    <string name="watch_channel_desc">Avisos cuando Treko ve a alguien donde se lo pediste</string>
+    <string name="watch_vision_question">Describe en una sola frase corta quién o qué se ve (persona, vehículo, animal) y qué está haciendo. Sin introducciones.</string>
+    <string name="watch_chip">Vigilando: %1$s</string>
+    <string name="watch_stop_cd">Dejar de vigilar</string>
+    <string name="notification_watching">Vigilando: %1$s</string>
 </resources>

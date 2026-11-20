@@ -21,4 +21,11 @@ class TrekoSkillsTest {
         assertTrue(TrekoSkills.isToolAvailable("view_camera", emptySet()))
         assertTrue(TrekoSkills.isToolAvailable("manage_timer", emptySet()))
     }
+
+    @Test
+    fun `camera watches need Frigate or any motion sensor`() {
+        assertFalse(TrekoSkills.isToolAvailable("watch_cameras", setOf(TrekoSkills.OCTOPRINT)))
+        assertTrue(TrekoSkills.isToolAvailable("watch_cameras", setOf(TrekoSkills.FRIGATE)))
+        assertTrue(TrekoSkills.isToolAvailable("watch_cameras", setOf(TrekoSkills.MOTION_SENSORS)))
+    }
 }

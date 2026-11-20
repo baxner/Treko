@@ -60,6 +60,8 @@ import com.treko.core.kws.NeuralSpeechDenoiser
 import com.treko.core.kws.SpeakerBiometricEngine
 import com.treko.core.kws.TrekoWakeWordDetector
 import com.treko.core.mcp.HomeAssistantClient
+import com.treko.core.mcp.watch.WatchSensor
+import com.treko.core.common.model.TrekoSkills
 import com.treko.core.mcp.RadioBrowserClient
 import com.treko.core.network.XiaozhiWebSocketClient
 import kotlinx.coroutines.CoroutineScope
@@ -230,6 +232,7 @@ class TrekoAssistantService : Service() {
         const val ACTION_TOGGLE_CONVERSATION = "com.treko.assistant.action.TOGGLE_CONVERSATION"
         const val ACTION_TOGGLE_MUTE = "com.treko.assistant.action.TOGGLE_MUTE"
         const val ACTION_TOGGLE_CINEMA_MODE = "com.treko.assistant.action.TOGGLE_CINEMA_MODE"
+        const val ACTION_STOP_WATCHES = "com.treko.assistant.action.STOP_WATCHES"
         const val ACTION_RELOAD_CONFIG = "com.treko.assistant.action.RELOAD_CONFIG"
         const val ACTION_CONSUME_PROACTIVE_INSIGHT = "com.treko.assistant.action.CONSUME_PROACTIVE_INSIGHT"
         const val ACTION_DISMISS_PROACTIVE_INSIGHT = "com.treko.assistant.action.DISMISS_PROACTIVE_INSIGHT"
@@ -267,6 +270,14 @@ class TrekoAssistantService : Service() {
 
         private val _fullDuplexIndicator = MutableStateFlow(FullDuplexIndicator.INACTIVE)
         val fullDuplexIndicator: StateFlow<FullDuplexIndicator> = _fullDuplexIndicator.asStateFlow()
+
+        private val _activeWatchAreas = MutableStateFlow<List<String>>(emptyList())
+        /** Places Treko is watching for the user (camera watches), for the UI. */
+        val activeWatchAreas: StateFlow<List<String>> = _activeWatchAreas.asStateFlow()
+
+        fun stopAllWatches() {
+            instance?.cameraWatch?.stopAll()
+        }
 
         private val _conversationHistory = MutableStateFlow<List<ChatMessage>>(emptyList())
         val conversationHistory: StateFlow<List<ChatMessage>> = _conversationHistory.asStateFlow()
@@ -380,13 +391,29 @@ class TrekoAssistantService : Service() {
                             val haToken = p.haToken.trim()
                             if (haUrl.isBlank() || haToken.isBlank()) return emptyList()
                             val client = HomeAssistantClient(haUrl, haToken)
-                            val candidates = client.getDeduplicatedCameras().map { group ->
-                                ProactiveCameraCandidate(
-                                    friendlyName = group.friendlyName,
-                                    entityId = group.snapshotEntityId.ifBlank { group.primaryEntityId },
-                                    state = group.state
-                                )
+                            val groups = client.getDeduplicatedCameras()
+                            // With Frigate, only look at cameras where it is detecting something now:
+                            // no blind vision calls on empty scenes.
+                            val frigateActive: Set<String>? = if (TrekoSkills.FRIGATE in p.detectedSkills) {
+                                val sensors = client.getWatchCatalog().orEmpty()
+                                    .filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.objectType != null }
+                                val states = client.getStates(sensors.map { it.entityId }.toSet())
+                                sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
+                            } else {
+                                null
                             }
+                            val candidates = groups
+                                .filter { group ->
+                                    frigateActive == null ||
+                                        group.primaryEntityId in frigateActive || group.snapshotEntityId in frigateActive
+                                }
+                                .map { group ->
+                                    ProactiveCameraCandidate(
+                                        friendlyName = group.friendlyName,
+                                        entityId = group.snapshotEntityId.ifBlank { group.primaryEntityId },
+                                        state = group.state
+                                    )
+                                }
                             val selected = TrekoProactiveManager.selectImportantCamerasForScan(
                                 candidates = candidates,
                                 homeStatusSummary = homeStatusSummary,
@@ -877,6 +904,7 @@ class TrekoAssistantService : Service() {
 
         isServiceRunning = true
         TrekoLogBuffer.i(TAG, "TrekoAssistantService started in foreground.")
+        startCameraWatches()
 
         val prefs = TrekoPreferences(this)
         _isMuted.value = prefs.isMicMuted
@@ -1359,7 +1387,65 @@ class TrekoAssistantService : Service() {
             startProactiveLoop()
         }
         refreshHomeAssistantSkills(force = true)
+        cameraWatch?.start()
         updateNotification(_serviceState.value)
+    }
+
+    var cameraWatch: CameraWatchCoordinator? = null
+        private set
+    private var watchHaClient: HomeAssistantClient? = null
+    private var watchHaKey: String? = null
+
+    /** One HA client per configuration, so the live event stream is not rebuilt needlessly. */
+    @Synchronized
+    private fun currentWatchHaClient(): HomeAssistantClient? {
+        val prefs = TrekoPreferences(this)
+        val haUrl = prefs.haUrl.trim()
+        val haToken = prefs.haToken.trim()
+        if (haUrl.isBlank() || haToken.isBlank()) {
+            watchHaClient = null
+            watchHaKey = null
+            return null
+        }
+        val key = "$haUrl\n$haToken"
+        if (key != watchHaKey) {
+            watchHaClient = HomeAssistantClient(haUrl, haToken)
+            watchHaKey = key
+        }
+        return watchHaClient
+    }
+
+    private fun startCameraWatches() {
+        val coordinator = CameraWatchCoordinator(
+            context = this,
+            scope = serviceScope,
+            haClientProvider = { currentWatchHaClient() },
+            speak = { text -> speakWatchAlert(text) },
+            addChat = { text -> addChatMessage(_assistantName.value, text) },
+            sentinelEnabled = {
+                val p = TrekoPreferences(this)
+                p.proactiveEnabled && p.proactiveCameraAnomalyEnabled && TrekoSkills.FRIGATE in p.detectedSkills
+            },
+            onSentinelDetection = { cameraName ->
+                TrekoLogBuffer.i(TAG, "Frigate saw something at $cameraName; running the camera sentinel now.")
+                runProactiveCheck(force = false, camerasOnly = true)
+            }
+        )
+        cameraWatch = coordinator
+        serviceScope.launch {
+            coordinator.activeAreas.collect { areas ->
+                _activeWatchAreas.value = areas
+                updateNotification(_serviceState.value)
+            }
+        }
+        coordinator.start()
+    }
+
+    /** Short spoken alert with the phone's own voice, only when Treko is not mid-conversation. */
+    private suspend fun speakWatchAlert(text: String) {
+        if (_serviceState.value != TrekoState.IDLE || isTrainingMode) return
+        val tts = ensureLocalTtsReady() ?: return
+        tts.speak(text, TextToSpeech.QUEUE_ADD, null, "watch_${System.currentTimeMillis()}")
     }
 
     private val skillRefreshIntervalMs = 15 * 60_000L
@@ -2982,6 +3068,9 @@ class TrekoAssistantService : Service() {
                     val liveAll = args.optBoolean("live", false)
                     openMultiCameraPanelInternal(prefs, liveAll = liveAll)
                 }
+                "watch_cameras" -> {
+                    cameraWatch?.handleTool(args) ?: "La vigilancia de cámaras no está lista todavía."
+                }
                 "get_3d_printer_status" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
@@ -3490,6 +3579,7 @@ class TrekoAssistantService : Service() {
             ACTION_TOGGLE_CINEMA_MODE -> {
                 toggleCinemaMode(this)
             }
+            ACTION_STOP_WATCHES -> cameraWatch?.stopAll()
             ACTION_RELOAD_CONFIG -> applyLatestPreferences()
             ACTION_CONSUME_PROACTIVE_INSIGHT -> {
                 cancelProactiveNotification(this)
@@ -3527,7 +3617,10 @@ class TrekoAssistantService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val prefs = TrekoPreferences(this)
-        if (!prefs.isAlwaysListeningInBackground) {
+        if (cameraWatch?.hasActiveWatches == true) {
+            // A watch the user asked for must keep running, or the alert would never come.
+            TrekoLogBuffer.i(TAG, "Task removed; staying alive for active camera watches.")
+        } else if (!prefs.isAlwaysListeningInBackground) {
             TrekoLogBuffer.i(TAG, "Task removed and background listening disabled; stopping service.")
             stopSelf()
         }
@@ -3536,6 +3629,8 @@ class TrekoAssistantService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cameraWatch?.release()
+        cameraWatch = null
         isServiceRunning = false
         isTrainingMode = false
 
@@ -3634,10 +3729,15 @@ class TrekoAssistantService : Service() {
         }
     }
 
-    private suspend fun runProactiveCheck(force: Boolean, overrideSpeak: Boolean? = null) {
+    private suspend fun runProactiveCheck(
+        force: Boolean,
+        overrideSpeak: Boolean? = null,
+        camerasOnly: Boolean = false
+    ) {
         if (_isProactiveCheckRunning.value) return
         _isProactiveCheckRunning.value = true
-        lastProactiveCheckMs = System.currentTimeMillis()
+        // A detector-triggered camera check does not reset the regular schedule.
+        if (!camerasOnly) lastProactiveCheckMs = System.currentTimeMillis()
         try {
             val prefs = TrekoPreferences(this)
             if (!force && !prefs.proactiveEnabled) return
@@ -3649,7 +3749,8 @@ class TrekoAssistantService : Service() {
                 includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
                 force = force,
                 hourOfDay = hour,
-                assistantName = resolveAssistantName(this)
+                assistantName = resolveAssistantName(this),
+                camerasOnly = camerasOnly
             ) ?: return
 
             val speakOutLoud = overrideSpeak ?: prefs.proactiveSpeakOutLoud
@@ -3901,7 +4002,7 @@ class TrekoAssistantService : Service() {
             getString(R.string.notification_action_mute)
         }
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.assistant_header_title, resolveAssistantName(this)))
             .setContentText(statusText)
             .setSmallIcon(R.drawable.ic_treko_notif)
@@ -3910,6 +4011,17 @@ class TrekoAssistantService : Service() {
             .addAction(android.R.drawable.ic_lock_silent_mode, muteLabel, mutePendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .build()
+        val watching = _activeWatchAreas.value
+        if (watching.isNotEmpty()) {
+            builder.setSubText(getString(R.string.notification_watching, watching.joinToString(", ")))
+            val stopWatches = PendingIntent.getService(
+                this,
+                3,
+                Intent(this, TrekoAssistantService::class.java).apply { action = ACTION_STOP_WATCHES },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.watch_stop_cd), stopWatches)
+        }
+        return builder.build()
     }
 }

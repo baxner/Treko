@@ -758,6 +758,39 @@ class XiaozhiWebSocketClient(
                         })
                     })
                     put(JSONObject().apply {
+                        put("name", "watch_cameras")
+                        put("description", "Vigila en tiempo real lugares de la casa y avisa al usuario (voz y notificación con foto) cuando aparece alguien o algo. Úsalo cuando pidan 'avísame cuando veas/llegue alguien en el frente', 'vigila el jardín', 'ya no vigiles' o '¿qué estás vigilando?'. Los lugares son los nombres que use el usuario; si alguno no existe, la respuesta lista los disponibles. No inventes lugares.")
+                        put("inputSchema", JSONObject().apply {
+                            put("type", "object")
+                            put("properties", JSONObject().apply {
+                                put("action", JSONObject().apply {
+                                    put("type", "string")
+                                    put("enum", JSONArray().apply { put("start"); put("stop"); put("list") })
+                                    put("description", "start = empezar a vigilar, stop = dejar de vigilar (todo si no hay lugares), list = qué se está vigilando")
+                                })
+                                put("places", JSONObject().apply {
+                                    put("type", "array")
+                                    put("items", JSONObject().put("type", "string"))
+                                    put("description", "Lugares tal como los dijo el usuario (ej. 'frente', 'jardín'); vacío o 'toda la casa' = todas las cámaras")
+                                })
+                                put("object", JSONObject().apply {
+                                    put("type", "string")
+                                    put("enum", JSONArray().apply { put("person"); put("car"); put("animal"); put("package"); put("any") })
+                                    put("description", "Qué detectar. Por defecto 'person' (alguien).")
+                                })
+                                put("once", JSONObject().apply {
+                                    put("type", "boolean")
+                                    put("description", "true si pidió un solo aviso ('avísame cuando llegue alguien'); false para seguir vigilando")
+                                })
+                                put("duration_minutes", JSONObject().apply {
+                                    put("type", "integer")
+                                    put("description", "Opcional. Por defecto y como máximo 720 (12 h).")
+                                })
+                            })
+                            put("required", JSONArray().apply { put("action") })
+                        })
+                    })
+                    put(JSONObject().apply {
                         put("name", "get_3d_printer_status")
                         put("description", "Estado real de la impresora 3D desde OctoPrint en Home Assistant: si está imprimiendo, porcentaje de progreso, archivo, hora estimada de fin, temperaturas de boquilla y cama, y errores. Úsalo SIEMPRE primero cuando pregunten por la impresora 3D o cómo va la impresión; usa analyze_camera solo si además quieren ver cómo luce la pieza.")
                         put("inputSchema", JSONObject().apply {

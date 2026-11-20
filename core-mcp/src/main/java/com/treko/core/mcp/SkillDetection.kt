@@ -1,11 +1,14 @@
 package com.treko.core.mcp
 
 import com.treko.core.common.model.TrekoSkills
+import com.treko.core.mcp.watch.HaStateLite
+import com.treko.core.mcp.watch.WatchCatalog
 
 /** Works out which optional Treko skills this user's Home Assistant supports. */
 internal object SkillDetection {
 
     private val DOMAIN = Regex("[a-z0-9_]+")
+    private val MOTION_CLASSES = setOf("motion", "occupancy", "presence")
 
     /** Template printing each installed integration (with at least one entity), space-separated. */
     fun buildTemplate(candidates: List<String>): String? {
@@ -18,11 +21,27 @@ internal object SkillDetection {
     fun parseTemplateOutput(output: String, candidates: List<String>): Set<String> =
         output.split(Regex("\\s+")).filter { it in candidates }.toSet()
 
+    /** Skills that only depend on entity attributes, whatever integration made them. */
+    fun fromStates(states: List<HaStateLite>): Set<String> {
+        val found = mutableSetOf<String>()
+        if (states.any { it.entityId.startsWith("binary_sensor.") && it.deviceClass in MOTION_CLASSES }) {
+            found += TrekoSkills.MOTION_SENSORS
+        }
+        return found
+    }
+
     /** Fallback when the template API is unavailable: default entity naming of each integration. */
-    fun fromEntityIds(entityIds: List<String>): Set<String> {
+    fun integrationsFromEntityIds(entityIds: List<String>): Set<String> {
         val found = mutableSetOf<String>()
         if (entityIds.any { PrinterStatus.looksLikeOctoPrint(it) && (it.startsWith("sensor.") || it.startsWith("binary_sensor.")) }) {
             found += TrekoSkills.OCTOPRINT
+        }
+        val cameras = entityIds.filter { it.startsWith("camera.") }.map { it.substringAfter('.') }.toSet()
+        if (entityIds.any { id ->
+                id.startsWith("binary_sensor.") && WatchCatalog.parseFrigateOccupancy(id)?.first in cameras
+            }
+        ) {
+            found += TrekoSkills.FRIGATE
         }
         return found
     }

@@ -28,9 +28,27 @@ class SkillDetectionTest {
     fun `fallback finds OctoPrint by its default entity names`() {
         assertEquals(
             setOf(TrekoSkills.OCTOPRINT),
-            SkillDetection.fromEntityIds(listOf("light.sala", "sensor.octoprint_job_percentage"))
+            SkillDetection.integrationsFromEntityIds(listOf("light.sala", "sensor.octoprint_job_percentage"))
         )
         // A camera alone named octoprint is not the integration.
-        assertEquals(emptySet<String>(), SkillDetection.fromEntityIds(listOf("camera.octoprint_camera", "light.sala")))
+        assertEquals(emptySet<String>(), SkillDetection.integrationsFromEntityIds(listOf("camera.octoprint_camera", "light.sala")))
+    }
+
+    @Test
+    fun `fallback recognises Frigate by camera occupancy sensors`() {
+        assertEquals(
+            setOf(TrekoSkills.FRIGATE),
+            SkillDetection.integrationsFromEntityIds(listOf("camera.jardin", "binary_sensor.jardin_person_occupancy"))
+        )
+    }
+
+    @Test
+    fun `any brand of motion sensor enables the generic watch skill`() {
+        val states = listOf(
+            com.treko.core.mcp.watch.HaStateLite("binary_sensor.patio_motion", "off", "Patio", "motion"),
+            com.treko.core.mcp.watch.HaStateLite("binary_sensor.puerta", "off", "Puerta", "door")
+        )
+        assertEquals(setOf(TrekoSkills.MOTION_SENSORS), SkillDetection.fromStates(states))
+        assertEquals(emptySet<String>(), SkillDetection.fromStates(states.drop(1)))
     }
 }
