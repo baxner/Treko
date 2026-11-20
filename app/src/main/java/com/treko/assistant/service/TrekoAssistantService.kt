@@ -2946,6 +2946,14 @@ class TrekoAssistantService : Service() {
                     val liveAll = args.optBoolean("live", false)
                     openMultiCameraPanelInternal(prefs, liveAll = liveAll)
                 }
+                "get_3d_printer_status" -> {
+                    val haUrl = prefs.haUrl.trim()
+                    val haToken = prefs.haToken.trim()
+                    if (haUrl.isBlank() || haToken.isBlank()) {
+                        return@withContext "Home Assistant is not configured in Treko Settings."
+                    }
+                    HomeAssistantClient(haUrl, haToken).get3dPrinterStatus()
+                }
                 "home_status_summary" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()

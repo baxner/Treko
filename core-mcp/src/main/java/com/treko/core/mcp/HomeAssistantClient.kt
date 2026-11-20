@@ -1418,6 +1418,70 @@ class HomeAssistantClient(
      * Consulta /api/states una sola vez y devuelve un resumen ejecutivo en español
      * con luces, multimedia/Alexas, clima/sensores, puertas/movimiento y cámaras deduplicadas.
      */
+    /**
+     * 3D printer status from the OctoPrint integration (progress, state, finish time,
+     * temperatures). Real data, unlike reading the progress off the printer's camera.
+     */
+    suspend fun get3dPrinterStatus(): String = withContext(Dispatchers.IO) {
+        try {
+            if (!hasValidConfig()) {
+                return@withContext "Error: Home Assistant no está configurado con una URL válida (http/https) y token."
+            }
+            val array = fetchStatesArray(forceRefresh = true)
+                ?: return@withContext "No se pudo consultar Home Assistant para ver la impresora."
+            val integrationIds = fetchIntegrationEntityIds("octoprint")
+            val printerEntities = ArrayList<PrinterStatus.Entity>()
+            val cameraIds = ArrayList<String>()
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val eid = item.optString("entity_id")
+                if (eid.startsWith("camera.")) cameraIds += eid
+                val belongs = integrationIds?.contains(eid) ?: PrinterStatus.looksLikeOctoPrint(eid)
+                if (!belongs) continue
+                val attrs = item.optJSONObject("attributes")
+                printerEntities += PrinterStatus.Entity(
+                    entityId = eid,
+                    friendlyName = attrs?.optString("friendly_name").orEmpty().ifBlank { eid },
+                    state = item.optString("state", "unknown"),
+                    unit = attrs?.optString("unit_of_measurement").orEmpty()
+                )
+            }
+            PrinterStatus.summarize(printerEntities, cameraIds)
+        } catch (e: Exception) {
+            "Error consultando la impresora 3D: ${e.message}"
+        }
+    }
+
+    /**
+     * Entity ids that belong to an integration, whatever the user renamed them to.
+     * Null when the template API is unavailable, so callers can fall back to name matching.
+     */
+    private fun fetchIntegrationEntityIds(integration: String): Set<String>? {
+        if (!integration.matches(Regex("[a-z0-9_]+"))) return null
+        val template = "{{ integration_entities('$integration') | join(',') }}"
+        val body = JSONObject().put("template", template).toString()
+            .toRequestBody("application/json".toMediaType())
+        val req = Request.Builder()
+            .url("${getBaseUrl()}/api/template")
+            .addHeader("Authorization", "Bearer $haToken")
+            .post(body)
+            .build()
+        return try {
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string().orEmpty()
+                    .split(',')
+                    .map { it.trim() }
+                    .filter { it.contains('.') }
+                    .toSet()
+                    .takeIf { it.isNotEmpty() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Template lookup for '$integration' failed: ${e.message}")
+            null
+        }
+    }
+
     suspend fun getHomeStatusSummary(): String = withContext(Dispatchers.IO) {
         try {
             if (!hasValidConfig()) {
