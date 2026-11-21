@@ -20,7 +20,7 @@ object TrekoToolCatalog {
             "Responde en 1 o 2 frases cortas, naturales para decirse en voz alta: sin listas, emoji, IDs ni números entre paréntesis. " +
             "Habla en español salvo que el usuario use otro idioma. " +
             "Si la intención es clara, actúa sin preguntar; pregunta solo si falta un dato necesario. " +
-            "Antes de quitar el seguro a una cerradura, abrir un portón o cochera, o desarmar una alarma, pregunta al usuario y espera su sí. " +
+            "Para quitar seguros, abrir portones o cocheras o desarmar alarmas, llama la herramienta; si la respuesta pide confirmación, pregunta una vez y repite la llamada con confirm=true. " +
             "Prefiere la herramienta específica; home_assistant_call_service es el último recurso."
 
     internal class Param(
@@ -43,7 +43,7 @@ object TrekoToolCatalog {
     private fun num(name: String, description: String) = Param(name, "number", description)
     private fun bool(name: String, description: String) = Param(name, "boolean", description)
 
-    private const val CONFIRM_DESC = "true solo si el usuario ya confirmó la acción sensible"
+    private const val CONFIRM_DESC = "true solo al repetir una llamada cuya respuesta pidió confirmación"
 
     /** The tools for a home with [skills], already filtered by TrekoSkills requirements. */
     internal fun tools(skills: Set<String>): List<Tool> {
@@ -72,7 +72,7 @@ object TrekoToolCatalog {
                 "Último recurso: llama un servicio de Home Assistant si ninguna otra herramienta sirve " +
                     "(ej. climate.set_temperature, vacuum.start). Encender/apagar: home_assistant_control; música: " +
                     "play_music_or_radio; anuncios: home_assistant_broadcast. entity_id desconocido: home_assistant_list_entities. " +
-                    "Cerraduras, portones y alarmas: pregunta al usuario y repite con confirm=true.",
+                    "Cerraduras, portones y alarmas: si la respuesta pide confirmación, pregunta y repite con confirm=true.",
                 listOf(
                     str("domain", "ej. 'climate'"),
                     str("service", "ej. 'set_temperature'"),
@@ -112,10 +112,10 @@ object TrekoToolCatalog {
             Tool(
                 "home_assistant_control",
                 "Enciende, apaga o alterna un aparato por su nombre coloquial (luces, enchufes, teles, persianas…); también " +
-                    "brillo, color, blanco y entrada de la tele. Portones y cocheras: pregunta y repite con confirm=true.",
+                    "brillo, color, blanco y entrada de la tele. Portones y cocheras: si pide confirmación, pregunta y repite con confirm=true.",
                 listOf(
                     str("entity_id", "Nombre del aparato como lo dijo el usuario, o su entity_id"),
-                    str("action", "", listOf("turn_on", "turn_off", "toggle", "select_source")),
+                    str("action", "turn_on también abre y turn_off también cierra (persianas, portones)", listOf("turn_on", "turn_off", "toggle", "select_source")),
                     str("source", "Entrada de la tele, ej. 'HDMI 1'"),
                     str("color", "ej. 'azul', 'cálido'"),
                     int("brightness", "1-100 %"),

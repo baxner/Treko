@@ -9,6 +9,8 @@ import com.treko.assistant.data.SpokenText
 import com.treko.assistant.data.VisionVerdict
 import com.treko.assistant.data.parseVisionVerdict
 import com.treko.core.common.data.TrekoAlertLog
+import com.treko.core.common.data.TrekoPreferences
+import com.treko.core.common.model.TrekoSkills
 import com.treko.core.common.model.AlertEvent
 import com.treko.core.common.model.AlertSource
 import com.treko.core.common.util.TrekoLogBuffer
@@ -391,6 +393,10 @@ class CameraWatchCoordinator(
         // Kept for the alerts screen; encoding must not delay the description.
         if (image != null) scope.launch { TrekoAlertLog.attachSnapshot(alertId, image) }
         val camera = cameraEntity ?: return
+        // Without LLM Vision there is no description to get (an empty set: detection has not
+        // run yet, so it is tried as before).
+        val skills = TrekoPreferences(context).detectedSkills
+        if (skills.isNotEmpty() && TrekoSkills.LLM_VISION !in skills) return
         // One vision call gives the notification's text and the description (same JSON verdict
         // as the sentinel), looking at the detector's own picture first, then the live camera.
         val prompt = VisionPrompts(context).watch(
@@ -406,7 +412,8 @@ class CameraWatchCoordinator(
         }
         val raw = answer ?: return
         val verdict = parseVisionVerdict(raw)
-        val description = verdict?.describe()?.takeIf { it.isNotBlank() } ?: raw
+        // A parsed verdict is never shown as raw JSON; the raw answer only when it was plain text.
+        val description = verdict?.fallbackLine(cameraAlertTexts(context)) ?: raw
         val shortText = verdict?.spokenAlert?.takeIf { it.isNotBlank() }
             ?.let { SpokenText.limitWords(it, VisionVerdict.MAX_SPOKEN_WORDS) }
             ?: description

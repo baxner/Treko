@@ -52,6 +52,37 @@ class HomeAssistantClient(
             if (base.isEmpty()) return null
             return id.substring(0, dot + 1) + base + "_snapshot"
         }
+
+        /** True when [action] (tool enum value or a Spanish/English word) means off / close. */
+        internal fun isOffAction(action: String): Boolean {
+            val a = action.trim().lowercase()
+            return a.startsWith("apa") || a == "turn_off" || a.endsWith("_off") ||
+                a.startsWith("close") || a.startsWith("cerr") ||
+                a in listOf("off", "desactivar", "detener", "stop")
+        }
+
+        /**
+         * The Home Assistant service home_assistant_control runs for [action] on a [domain]
+         * entity. Covers open or close (turn_off also means close); [hasSettings] (brightness or
+         * color given) keeps a light on.
+         */
+        internal fun serviceFor(domain: String, action: String, hasSettings: Boolean): String {
+            val a = action.trim().lowercase()
+            val isOff = isOffAction(a)
+            val isToggle = a in listOf("alternar", "toggle")
+            return when (domain) {
+                "cover" -> when {
+                    isOff -> "close_cover"
+                    isToggle -> "toggle"
+                    else -> "open_cover"
+                }
+                else -> when {
+                    isOff && !hasSettings -> "turn_off"
+                    isToggle -> "toggle"
+                    else -> "turn_on"
+                }
+            }
+        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -549,17 +580,7 @@ class HomeAssistantClient(
             }
 
             val hasSettings = colorOrTemp.isNotBlank() || brillo > 0
-            val isOff = a.startsWith("apa") || a in listOf("off", "desactivar", "apagar", "cerrar", "close", "detener", "stop")
-            val isToggle = a in listOf("alternar", "toggle")
-
-            val svc = when (domain) {
-                "cover" -> if (isOff) "close_cover" else "open_cover"
-                else -> when {
-                    isOff && !hasSettings -> "turn_off"
-                    isToggle -> "toggle"
-                    else -> "turn_on"
-                }
-            }
+            val svc = serviceFor(domain, a, hasSettings)
 
             gate?.review(
                 ServiceCallPlan(domain, svc, listOf(ActionTarget(entity.id, entity.friendlyName, entity.deviceClass)))
@@ -588,9 +609,11 @@ class HomeAssistantClient(
 
             client.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
-                    val statusText = when {
-                        isOff -> "apagado"
-                        isToggle -> "alternado"
+                    val statusText = when (svc) {
+                        "turn_off" -> "apagado"
+                        "close_cover" -> "cerrado"
+                        "open_cover" -> "abierto"
+                        "toggle" -> "alternado"
                         else -> "encendido"
                     }
                     return@withContext "Dispositivo '${entity.friendlyName}' ($domain) $statusText correctamente."

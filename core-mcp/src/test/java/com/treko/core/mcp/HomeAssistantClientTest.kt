@@ -466,4 +466,21 @@ class HomeAssistantClientTest {
         assertTrue(summary, summary.contains("Multimedia: Ningún reproductor está sonando ahora."))
         assertFalse(summary, summary.contains("Alexa"))
     }
+
+    @Test
+    fun testServiceForMapsToolActionsToServices() {
+        assertEquals("turn_off", HomeAssistantClient.serviceFor("light", "turn_off", false))
+        assertEquals("turn_on", HomeAssistantClient.serviceFor("light", "turn_on", false))
+        assertEquals("toggle", HomeAssistantClient.serviceFor("light", "toggle", false))
+        assertEquals("toggle", HomeAssistantClient.serviceFor("switch", "toggle", false))
+        assertEquals("close_cover", HomeAssistantClient.serviceFor("cover", "turn_off", false))
+        assertEquals("open_cover", HomeAssistantClient.serviceFor("cover", "turn_on", false))
+        assertEquals("toggle", HomeAssistantClient.serviceFor("cover", "toggle", false))
+        assertEquals("close_cover", HomeAssistantClient.serviceFor("cover", "cerrar", false))
+        assertEquals("close_cover", HomeAssistantClient.serviceFor("cover", "close", false))
+        assertEquals("turn_off", HomeAssistantClient.serviceFor("switch", "apagar", false))
+        assertEquals("turn_off", HomeAssistantClient.serviceFor("light", " Turn_Off ", false))
+        // Brightness or colour keeps a light on.
+        assertEquals("turn_on", HomeAssistantClient.serviceFor("light", "turn_off", true))
+    }
 }

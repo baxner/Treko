@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.CountDownLatch
 
 /** Where the alerts log is kept (a JSON file in the app; a list in memory in tests). */
 interface AlertPersistence {
@@ -27,7 +28,10 @@ interface AlertPersistence {
  *
  * Process-wide like [TrekoTimerManager]: the service, the activity and the timer receiver
  * all call [init] (idempotent) and then use the object. Thread-safe; reads come from
- * [events] / [unreadCount]. Writes go to disk on a background thread, coalesced.
+ * [events] / [unreadCount]. Writes go to disk on a background thread, coalesced; every save
+ * (background or [flush]) is serialized and an older snapshot never replaces a newer one.
+ * The file is read and parsed outside [lock]: [record] never waits for it; calls that need
+ * the saved entries (get, update, delete…) wait for the load to finish.
  *
  * Retention: 14 days or [MAX_EVENTS] entries; "no news" checks only 24 h and never with a
  * picture. Pictures of evicted entries are deleted.
@@ -46,6 +50,17 @@ object TrekoAlertLog {
 
     private var persistence: AlertPersistence? = null
     private var loaded = true
+    /** Non-null while a load runs outside [lock]; others needing the entries await it. */
+    private var loadLatch: CountDownLatch? = null
+    /** Set once [init] connected the log, so later calls (main thread) skip [lock]. */
+    @Volatile
+    private var initialized = false
+    /** Bumped on every change of the entries (guarded by [lock]). */
+    private var version = 0L
+    /** Serializes saves, so two writes never run at once nor land out of order. */
+    private val saveLock = Any()
+    /** Version of the last snapshot saved (guarded by [saveLock]). */
+    private var lastSavedVersion = -1L
     private var writeQueued = false
     private var lastId = 0L
     private var writer: (() -> Unit) -> Unit = backgroundWriter
@@ -73,23 +88,31 @@ object TrekoAlertLog {
      * loads in the background (an early read or write waits for it).
      */
     fun init(context: Context) {
+        if (initialized) return
         val appCtx = context.applicationContext
         synchronized(lock) {
-            if (persistence != null) return
+            if (persistence != null) {
+                initialized = true
+                return
+            }
             val dir = File(appCtx.filesDir, AlertSnapshotStore.DIR_NAME)
             val store = AlertSnapshotStore(File(dir, AlertSnapshotStore.SNAPSHOTS_DIR_NAME)) { evicted ->
                 forgetImages(evicted)
             }
             snapshots = store
             attachLocked(AlertLogFile(File(dir, LOG_FILE_NAME)), store::deleteFiles, backgroundWriter, loadNow = false)
+            initialized = true
         }
         ioScope.launch {
-            val referenced = synchronized(lock) {
-                ensureLoadedLocked()
-                _events.value.flatMap { it.imagePaths }.toSet()
-            }
+            awaitLoaded()
+            val referenced = synchronized(lock) { _events.value.flatMap { it.imagePaths }.toSet() }
             snapshots?.sweepOrphans(referenced)
         }
+    }
+
+    /** [block] on the log's own background thread (e.g. a receiver's work off the main thread). */
+    fun runInBackground(block: () -> Unit) {
+        ioScope.launch { block() }
     }
 
     /**
@@ -117,7 +140,10 @@ object TrekoAlertLog {
         this.imageDeleter = imageDeleter
         this.writer = writer
         loaded = false
-        if (loadNow) ensureLoadedLocked()
+        if (loadNow) {
+            loaded = true
+            mergeLoadedLocked(loadSafely(persistence))
+        }
     }
 
     /** Solo para tests: olvida persistencia y entradas. */
@@ -126,6 +152,10 @@ object TrekoAlertLog {
             persistence = null
             snapshots = null
             loaded = true
+            loadLatch?.countDown()
+            loadLatch = null
+            initialized = false
+            version = 0L
             writeQueued = false
             lastId = 0L
             writer = backgroundWriter
@@ -133,11 +163,12 @@ object TrekoAlertLog {
             clock = System::currentTimeMillis
             publishLocked(emptyList())
         }
+        synchronized(saveLock) { lastSavedVersion = -1L }
     }
 
     /** Adds [event] (its id is assigned here) and returns the new id. */
     fun record(event: AlertEvent): Long = synchronized(lock) {
-        ensureLoadedLocked()
+        // No wait for the saved log: the load merges this entry in (and saves it then).
         val id = maxOf(lastId + 1, clock())
         lastId = id
         val (clean, dropped) = normalize(event.copy(id = id))
@@ -149,9 +180,9 @@ object TrekoAlertLog {
         id
     }
 
-    fun get(id: Long): AlertEvent? = synchronized(lock) {
-        ensureLoadedLocked()
-        _events.value.firstOrNull { it.id == id }
+    fun get(id: Long): AlertEvent? {
+        awaitLoaded()
+        return synchronized(lock) { _events.value.firstOrNull { it.id == id } }
     }
 
     /**
@@ -159,8 +190,12 @@ object TrekoAlertLog {
      * The id and level rules still apply; pictures no longer referenced are deleted.
      * Returns the updated entry, or null if it is gone.
      */
-    fun update(id: Long, transform: (AlertEvent) -> AlertEvent): AlertEvent? = synchronized(lock) {
-        ensureLoadedLocked()
+    fun update(id: Long, transform: (AlertEvent) -> AlertEvent): AlertEvent? {
+        awaitLoaded()
+        return synchronized(lock) { updateLocked(id, transform) }
+    }
+
+    private fun updateLocked(id: Long, transform: (AlertEvent) -> AlertEvent): AlertEvent? {
         val current = _events.value
         val index = current.indexOfFirst { it.id == id }
         if (index < 0) return null
@@ -170,40 +205,48 @@ object TrekoAlertLog {
         if (next == old) return old
         publishLocked(current.toMutableList().also { it[index] = next })
         persistLocked()
-        next
+        return next
     }
 
     fun markRead(id: Long): Boolean = update(id) { it.copy(read = true) }?.read == true
 
-    fun markAllRead(): Int = synchronized(lock) {
-        ensureLoadedLocked()
+    fun markAllRead(): Int {
+        awaitLoaded()
+        return synchronized(lock) { markAllReadLocked() }
+    }
+
+    private fun markAllReadLocked(): Int {
         val current = _events.value
         val count = current.count { !it.read }
         if (count == 0) return 0
         publishLocked(current.map { if (it.read) it else it.copy(read = true) })
         persistLocked()
-        count
+        return count
     }
 
     fun setFeedback(id: Long, feedback: AlertFeedback): Boolean =
         update(id) { it.copy(feedback = feedback) }?.feedback == feedback
 
-    fun delete(id: Long): Boolean = synchronized(lock) {
-        ensureLoadedLocked()
+    fun delete(id: Long): Boolean {
+        awaitLoaded()
+        return synchronized(lock) { deleteLocked(id) }
+    }
+
+    private fun deleteLocked(id: Long): Boolean {
         val current = _events.value
         val victim = current.firstOrNull { it.id == id } ?: return false
         deleteImagesLocked(victim.imagePaths)
         publishLocked(current - victim)
         persistLocked()
-        true
+        return true
     }
 
     /** The picture files at [paths] were removed (storage cap): clear them from their entries. */
     fun forgetImages(paths: Collection<String>) {
         if (paths.isEmpty()) return
         val gone = paths.toSet()
+        awaitLoaded()
         synchronized(lock) {
-            ensureLoadedLocked()
             val current = _events.value
             if (current.none { e -> e.imagePaths.any { it in gone } }) return
             publishLocked(
@@ -223,14 +266,18 @@ object TrekoAlertLog {
     }
 
     /** Applies the retention rules now; returns how many entries were removed. */
-    fun prune(nowMs: Long = clock()): Int = synchronized(lock) {
-        ensureLoadedLocked()
+    fun prune(nowMs: Long = clock()): Int {
+        awaitLoaded()
+        return synchronized(lock) { pruneLocked(nowMs) }
+    }
+
+    private fun pruneLocked(nowMs: Long): Int {
         val (kept, removed) = retain(_events.value, nowMs)
         if (removed.isEmpty()) return 0
         deleteImagesLocked(removed.flatMap { it.imagePaths })
         publishLocked(kept)
         persistLocked()
-        removed.size
+        return removed.size
     }
 
     /**
@@ -253,25 +300,59 @@ object TrekoAlertLog {
 
     /** Writes any pending change now, on the calling thread (e.g. before a receiver returns). */
     fun flush() {
-        val (store, snapshot) = synchronized(lock) {
-            ensureLoadedLocked()
+        awaitLoaded()
+        val (store, snapshot, v) = synchronized(lock) {
             writeQueued = false
-            persistence to _events.value
+            Triple(persistence, _events.value, version)
         }
         store ?: return
-        saveSafely(store, snapshot)
+        saveVersioned(store, snapshot, v)
     }
 
-    private fun ensureLoadedLocked() {
-        if (loaded) return
-        loaded = true
-        val store = persistence ?: return
-        val stored = try {
-            store.load()
-        } catch (e: Exception) {
-            TrekoLogBuffer.w(TAG, "Cannot read the alerts log: ${e.message}")
-            emptyList()
+    /**
+     * Returns once the saved log is merged in. The file is read outside [lock] (by the first
+     * caller); other callers only wait for that load, never hold the lock during it.
+     */
+    private fun awaitLoaded() {
+        var running: CountDownLatch? = null
+        var store: AlertPersistence? = null
+        synchronized(lock) {
+            if (loaded) return
+            running = loadLatch
+            if (running == null) {
+                loadLatch = CountDownLatch(1)
+                store = persistence
+            }
         }
+        running?.let {
+            it.await()
+            return
+        }
+        val stored = store?.let { loadSafely(it) }
+        synchronized(lock) {
+            try {
+                // The store may have been swapped meanwhile (tests): then this load is stale.
+                if (!loaded && stored != null && persistence === store) {
+                    loaded = true
+                    mergeLoadedLocked(stored)
+                }
+            } finally {
+                loaded = true
+                loadLatch?.countDown()
+                loadLatch = null
+            }
+        }
+    }
+
+    private fun loadSafely(store: AlertPersistence): List<AlertEvent> = try {
+        store.load()
+    } catch (e: Exception) {
+        TrekoLogBuffer.w(TAG, "Cannot read the alerts log: ${e.message}")
+        emptyList()
+    }
+
+    /** Merges the saved entries [stored] into memory; [loaded] is already true. */
+    private fun mergeLoadedLocked(stored: List<AlertEvent>) {
         // Entries recorded before the load finished are kept too.
         val merged = (_events.value + stored).distinctBy { it.id }.map { normalize(it).first }
         lastId = maxOf(lastId, merged.maxOfOrNull { it.id } ?: 0L)
@@ -282,6 +363,7 @@ object TrekoAlertLog {
     }
 
     private fun publishLocked(list: List<AlertEvent>) {
+        version++
         val sorted = list.sortedWith(NEWEST_FIRST)
         _events.value = sorted
         _unreadCount.value = sorted.count { it.isUnread }
@@ -289,14 +371,25 @@ object TrekoAlertLog {
 
     private fun persistLocked() {
         val store = persistence ?: return
+        // Before the saved log is merged in, the merge itself saves (it would be a partial list).
+        if (!loaded) return
         if (writeQueued) return
         writeQueued = true
         writer {
             val snapshot = synchronized(lock) {
                 // Null when flush() already wrote it.
-                if (writeQueued) _events.value.also { writeQueued = false } else null
+                if (writeQueued) (_events.value to version).also { writeQueued = false } else null
             }
-            if (snapshot != null) saveSafely(store, snapshot)
+            if (snapshot != null) saveVersioned(store, snapshot.first, snapshot.second)
+        }
+    }
+
+    /** Saves [snapshot] (entries at [v]) unless a newer one was already saved; one save at a time. */
+    private fun saveVersioned(store: AlertPersistence, snapshot: List<AlertEvent>, v: Long) {
+        synchronized(saveLock) {
+            if (v <= lastSavedVersion) return
+            saveSafely(store, snapshot)
+            lastSavedVersion = v
         }
     }
 

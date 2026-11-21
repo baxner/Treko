@@ -108,4 +108,28 @@ class VisionVerdictTest {
         assertEquals("Agua: 3 de 8 vasos", SpokenText.stripEmoji("💧 Agua: 3 de 8 vasos ✅"))
         assertEquals("Sin emoji, ¿listo?", SpokenText.stripEmoji("Sin emoji, ¿listo?"))
     }
+
+    @Test
+    fun fallbackLineNeverReturnsRawText() {
+        val empty = parseVisionVerdict("""{"confirmado": false, "personas": 0, "donde": "", "actividad": "", "nivel": "ninguno", "motivo": "", "aviso": ""}""")!!
+        assertEquals("", empty.describe())
+        assertEquals("No se ve nada fuera de lo normal.", empty.fallbackLine())
+
+        val people = parseVisionVerdict("""{"personas": 2, "vehiculos": 1, "nivel": "info", "aviso": ""}""")!!
+        assertEquals("Hay 2 personas, hay un vehículo.", people.fallbackLine())
+
+        val unknown = parseVisionVerdict("""{"confirmado": true, "nivel": "urgente", "aviso": ""}""")!!
+        assertEquals("Hay algo que conviene revisar.", unknown.fallbackLine())
+
+        val described = parseVisionVerdict("""{"personas": 1, "donde": "en la banqueta", "actividad": "caminando", "nivel": "info", "aviso": ""}""")!!
+        assertEquals(described.describe(), described.fallbackLine())
+    }
+
+    @Test
+    fun answerCutOffBeforeAvisoStillParses() {
+        val cut = parseVisionVerdict("""{"confirmado": true, "personas": 1, "vehiculos": 0, "paquete": false, "nivel": "atencion", "motivo": "una persona en la entr""")!!
+        assertEquals(VisionLevel.ATTENTION, cut.level)
+        assertEquals("", cut.spokenAlert)
+        assertFalse(cut.fallbackLine().contains('{'))
+    }
 }

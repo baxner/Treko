@@ -16,7 +16,10 @@ class SentinelCooldownTest {
         assertEquals(SentinelCooldown.AFTER_ALERT_MS, SentinelCooldown.afterOutcome("suppressed", ran = true))
         assertEquals(SentinelCooldown.AFTER_ALERT_MS, SentinelCooldown.afterOutcome(SentinelCooldown.DECISION_WATCH_ALERTED, ran = true))
         // Errors or no verdict: a short rest, never ten minutes of blindness.
-        assertEquals(SentinelCooldown.AFTER_NO_NEWS_MS, SentinelCooldown.afterOutcome("error", ran = true))
+        assertEquals(SentinelCooldown.AFTER_NO_VERDICT_MS, SentinelCooldown.afterOutcome("error", ran = true))
+        // Vision gave no answer: a short retry rest, shorter than "nothing new".
+        assertEquals(SentinelCooldown.AFTER_NO_VERDICT_MS, SentinelCooldown.afterOutcome("no_verdict", ran = true))
+        assert(SentinelCooldown.AFTER_NO_VERDICT_MS < SentinelCooldown.AFTER_NO_NEWS_MS)
         assertEquals(SentinelCooldown.AFTER_NO_NEWS_MS, SentinelCooldown.afterOutcome(null, ran = true))
         // It did not run: no rest at all.
         assertNull(SentinelCooldown.afterOutcome("skipped", ran = false))

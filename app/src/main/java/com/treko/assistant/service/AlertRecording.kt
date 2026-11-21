@@ -92,7 +92,10 @@ internal object AlertRecording {
         val place = trace.area.ifBlank { looks.firstOrNull()?.cameraName.orEmpty() }
             .ifBlank { context.getString(R.string.alert_place_unknown) }
         // The readable line of a structured verdict, never its raw JSON.
-        val seen = looks.map { look -> look to (look.description?.takeIf { it.isNotBlank() } ?: look.verdict) }
+        // The raw answer only when the model gave no structured verdict (no level).
+        val seen = looks.map { look ->
+            look to (look.description?.takeIf { it.isNotBlank() } ?: look.verdict.takeIf { look.level == null }.orEmpty())
+        }
             .filter { it.second.isNotBlank() }
         val report = seen.joinToString(" | ") { (look, text) ->
             if (looks.size > 1) "${look.cameraName}: $text" else text

@@ -1,5 +1,7 @@
 package com.treko.assistant.service
 
+import com.treko.assistant.data.TrekoProactiveManager
+
 /**
  * How long a camera rests after a sentinel run, by outcome: a short pause after "nothing
  * new" (so the next real event a minute later is looked at), the long one after an alert
@@ -10,6 +12,11 @@ internal object SentinelCooldown {
     const val WHILE_RUNNING_MS = 3 * 60_000L
     const val AFTER_NO_NEWS_MS = 75_000L
     const val AFTER_ALERT_MS = 10 * 60_000L
+    /**
+     * After a run that could not look (vision gave no answer, or failed): only a short pause,
+     * so the next detection is looked at, without retrying a failing call on every event.
+     */
+    const val AFTER_NO_VERDICT_MS = 20_000L
 
     /** Decision recorded when a camera watch already alerts this very detection. */
     const val DECISION_WATCH_ALERTED = "watch_alerted"
@@ -22,6 +29,7 @@ internal object SentinelCooldown {
         !ran -> null
         decision == null -> AFTER_NO_NEWS_MS
         decision.startsWith("alert") || decision == "suppressed" || decision == DECISION_WATCH_ALERTED -> AFTER_ALERT_MS
+        decision == TrekoProactiveManager.DECISION_NO_VERDICT || decision == "error" -> AFTER_NO_VERDICT_MS
         else -> AFTER_NO_NEWS_MS
     }
 }

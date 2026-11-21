@@ -1,6 +1,7 @@
 package com.treko.assistant.ui.screens
 
 import com.treko.core.common.model.AlertEvent
+import com.treko.core.common.model.AlertLevel
 import com.treko.core.common.model.AlertSource
 import com.treko.core.common.model.TrekoSkills
 import java.time.Instant
@@ -14,7 +15,9 @@ enum class AlertDayKind { TODAY, YESTERDAY, EARLIER }
 data class AlertDayGroup(
     val day: LocalDate,
     val kind: AlertDayKind,
-    val events: List<AlertEvent>
+    val events: List<AlertEvent>,
+    /** "No news" sentinel checks of this day left out of [events], shown as one summary row. */
+    val collapsedNoNews: Int = 0
 )
 
 /** What the alerts list shows. Saved across recreation as [key]. */
@@ -93,15 +96,43 @@ object AlertsListModel {
             }
     }
 
-    /** Alerts recorded today (local day). */
+    /** Alerts recorded today (local day); "no news" checks are not alerts. */
     fun countToday(events: List<AlertEvent>, nowMs: Long, zone: ZoneId): Int {
         val today = dayOf(nowMs, zone)
-        return events.count { dayOf(it.timestampMs, zone) == today }
+        return events.count { it.level == AlertLevel.ALERT && dayOf(it.timestampMs, zone) == today }
     }
 
-    /** Notifications to clear when every alert is marked read. */
-    fun notificationsOfUnread(events: List<AlertEvent>): List<Int> =
-        events.filter { !it.read }.mapNotNull { it.notificationId }.distinct()
+    /**
+     * The list for [filter]: under All and Unread each day's "no news" checks collapse into a
+     * count ([AlertDayGroup.collapsedNoNews]) so real alerts are not buried; a source filter
+     * (e.g. Sentinel) lists every check.
+     */
+    fun listFor(events: List<AlertEvent>, filter: AlertFilter, nowMs: Long, zone: ZoneId): List<AlertDayGroup> {
+        val groups = groupByDay(filter(events, filter), nowMs, zone)
+        if (filter is AlertFilter.BySource) return groups
+        return groups.map { g ->
+            val (checks, rest) = g.events.partition { it.level == AlertLevel.NO_NEWS }
+            g.copy(events = rest, collapsedNoNews = checks.size)
+        }
+    }
+
+    /** Notifications to clear when every alert is marked read: (alert id, notification id). */
+    fun notificationsOfUnread(events: List<AlertEvent>): List<Pair<Long, Int>> =
+        events.filter { !it.read }.mapNotNull { e -> e.notificationId?.let { e.id to it } }.distinct()
+
+    /** Sources whose alerts come from a camera (or a printer camera) and may carry a picture. */
+    private val PICTURE_SOURCES = setOf(AlertSource.WATCH, AlertSource.SENTINEL, AlertSource.PRINTER)
+
+    /** The detail's picture box: when there is a picture, or the alert could have had one. */
+    fun showsPictureBox(event: AlertEvent, hasPicture: Boolean): Boolean = hasPicture || event.source in PICTURE_SOURCES
+
+    /** "False alarm / Useful" only for camera alerts (a timer or a briefing is no alarm). */
+    fun showsFeedback(event: AlertEvent): Boolean =
+        event.level == AlertLevel.ALERT && event.source in PICTURE_SOURCES
+
+    /** "What <assistant> said": a timer only rang, nothing was spoken. */
+    fun showsSpokenSummary(event: AlertEvent): Boolean =
+        event.source != AlertSource.TIMER && !event.spokenSummary.isNullOrBlank()
 
     private fun dayOf(ms: Long, zone: ZoneId): LocalDate = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate()
 }

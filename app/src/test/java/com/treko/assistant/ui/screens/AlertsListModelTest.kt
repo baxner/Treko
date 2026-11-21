@@ -107,6 +107,57 @@ class AlertsListModelTest {
             event(3, 0),
             event(4, 0, notificationId = 3001)
         )
-        assertEquals(listOf(3001), AlertsListModel.notificationsOfUnread(events))
+        // Each alert's own notification (the tag tells two alerts with the same id apart).
+        assertEquals(listOf(1L to 3001, 4L to 3001), AlertsListModel.notificationsOfUnread(events))
+    }
+
+    @Test
+    fun noNewsChecksAreNotCountedAsAlertsToday() {
+        val now = at(2026, 11, 20, 12)
+        val events = listOf(
+            event(1, at(2026, 11, 20, 9)),
+            event(2, at(2026, 11, 20, 10), source = AlertSource.SENTINEL, level = AlertLevel.NO_NEWS, read = true),
+            event(3, at(2026, 11, 20, 11), source = AlertSource.SENTINEL, level = AlertLevel.NO_NEWS, read = true)
+        )
+        assertEquals(1, AlertsListModel.countToday(events, now, zone))
+    }
+
+    @Test
+    fun noNewsChecksCollapseUnderAllButNotUnderTheSentinelChip() {
+        val now = at(2026, 11, 20, 12)
+        val events = listOf(
+            event(1, at(2026, 11, 20, 9), source = AlertSource.SENTINEL),
+            event(2, at(2026, 11, 20, 10), source = AlertSource.SENTINEL, level = AlertLevel.NO_NEWS, read = true),
+            event(3, at(2026, 11, 20, 11), source = AlertSource.SENTINEL, level = AlertLevel.NO_NEWS, read = true),
+            event(4, at(2026, 11, 19, 11), source = AlertSource.SENTINEL, level = AlertLevel.NO_NEWS, read = true)
+        )
+        val all = AlertsListModel.listFor(events, AlertFilter.All, now, zone)
+        assertEquals(listOf(listOf(1L), emptyList()), all.map { g -> g.events.map { it.id } })
+        assertEquals(listOf(2, 1), all.map { it.collapsedNoNews })
+
+        val sentinel = AlertsListModel.listFor(events, AlertFilter.BySource(AlertSource.SENTINEL), now, zone)
+        assertEquals(listOf(listOf(3L, 2L, 1L), listOf(4L)), sentinel.map { g -> g.events.map { it.id } })
+        assertEquals(listOf(0, 0), sentinel.map { it.collapsedNoNews })
+
+        // Checks are read: Unread never shows them.
+        val unread = AlertsListModel.listFor(events, AlertFilter.Unread, now, zone)
+        assertEquals(listOf(listOf(1L)), unread.map { g -> g.events.map { it.id } })
+    }
+
+    @Test
+    fun timersAndBriefingsGetNoPictureBoxNorFeedback() {
+        val timer = event(1, 0, source = AlertSource.TIMER, read = true).copy(spokenSummary = "Your timer finished")
+        val briefing = event(2, 0, source = AlertSource.PROACTIVE).copy(spokenSummary = "Tienes dos tareas.")
+        val sentinel = event(3, 0, source = AlertSource.SENTINEL)
+        assertEquals(false, AlertsListModel.showsPictureBox(timer, hasPicture = false))
+        assertEquals(false, AlertsListModel.showsPictureBox(briefing, hasPicture = false))
+        assertEquals(true, AlertsListModel.showsPictureBox(briefing, hasPicture = true))
+        assertEquals(true, AlertsListModel.showsPictureBox(sentinel, hasPicture = false))
+        assertEquals(false, AlertsListModel.showsFeedback(timer))
+        assertEquals(false, AlertsListModel.showsFeedback(briefing))
+        assertEquals(true, AlertsListModel.showsFeedback(sentinel))
+        assertEquals(false, AlertsListModel.showsFeedback(sentinel.copy(level = AlertLevel.NO_NEWS)))
+        assertEquals(false, AlertsListModel.showsSpokenSummary(timer))
+        assertEquals(true, AlertsListModel.showsSpokenSummary(briefing))
     }
 }

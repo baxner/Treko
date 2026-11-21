@@ -13,6 +13,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class TrekoAlertLogTest {
 
@@ -179,5 +183,53 @@ class TrekoAlertLogTest {
         queued.drop(1).forEach { it() }
         assertEquals(2, store.saves)
         assertEquals(3, store.stored.size)
+    }
+
+    @Test
+    fun flushWithNothingNewDoesNotWriteAgain() {
+        val store = MemoryPersistence()
+        TrekoAlertLog.attach(store, writer = { })
+        TrekoAlertLog.record(alert("a"))
+        TrekoAlertLog.flush()
+        TrekoAlertLog.flush()
+        assertEquals(1, store.saves)
+    }
+
+    @Test
+    fun aSlowBackgroundSaveNeverRunsAlongsideOrAfterANewerFlush() {
+        val firstSaveStarted = CountDownLatch(1)
+        val releaseFirstSave = CountDownLatch(1)
+        val inSave = AtomicInteger(0)
+        val overlapped = AtomicInteger(0)
+        val store = object : AlertPersistence {
+            @Volatile var stored: List<AlertEvent> = emptyList()
+            val saves = AtomicInteger(0)
+            override fun save(events: List<AlertEvent>) {
+                if (inSave.incrementAndGet() > 1) overlapped.incrementAndGet()
+                try {
+                    if (saves.getAndIncrement() == 0) {
+                        firstSaveStarted.countDown()
+                        releaseFirstSave.await(5, TimeUnit.SECONDS)
+                    }
+                    stored = events
+                } finally {
+                    inSave.decrementAndGet()
+                }
+            }
+            override fun load(): List<AlertEvent> = stored
+        }
+        val workers = Collections.synchronizedList(mutableListOf<Thread>())
+        TrekoAlertLog.attach(store, writer = { task -> Thread(task).also { workers += it; it.start() } })
+        // The background save of [a] starts and stalls on the disk.
+        TrekoAlertLog.record(alert("a"))
+        assertTrue(firstSaveStarted.await(5, TimeUnit.SECONDS))
+        // Meanwhile a new entry is recorded and flushed (a timer receiver).
+        TrekoAlertLog.record(alert("b"))
+        val flusher = Thread { TrekoAlertLog.flush() }.also { it.start() }
+        releaseFirstSave.countDown()
+        flusher.join(5_000)
+        synchronized(workers) { workers.toList() }.forEach { it.join(5_000) }
+        assertEquals(0, overlapped.get())
+        assertEquals(listOf("b", "a"), store.stored.map { it.title })
     }
 }

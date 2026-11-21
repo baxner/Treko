@@ -233,4 +233,91 @@ class ProactiveSpeechTest {
         // Once a day.
         assertNull(manager.evaluateNow(includeCameraScan = false, hourOfDay = 12))
     }
+
+    // --- a parsed verdict is never spoken or shown as raw JSON ---
+
+    private fun parsedAlertOn(camera: String, raw: String): CameraAnomalyCheckResult {
+        val v = parseVisionVerdict(raw)!!
+        return CameraAnomalyCheckResult(
+            cameraName = camera,
+            entityId = "camera.${camera.lowercase()}",
+            visionReport = raw,
+            hasAnomaly = v.raisesAlert(watchRequested = false),
+            cameraEntityId = "camera.${camera.lowercase()}",
+            verdict = v,
+            label = "person"
+        )
+    }
+
+    @Test
+    fun blankAvisoIsSpokenFromTheVerdictNeverAsJson() = runBlocking {
+        val raw = """{"confirmado": true, "personas": 1, "vehiculos": 0, "paquete": false, "donde": "", "actividad": "", "nivel": "atencion", "motivo": "", "aviso": ""}"""
+        val sources = Sources(cameras = listOf(parsedAlertOn("Patio", raw)))
+        val insight = TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)!!
+        for (text in listOf(insight.spokenSpeechText, insight.summaryText, insight.visionReport.orEmpty(), insight.spokenPrompt)) {
+            assertFalse(text, text.contains('{'))
+            assertFalse(text, text.contains("confirmado"))
+        }
+        assertEquals("En Patio: hay una persona.", insight.spokenSpeechText)
+        assertEquals("Hay una persona.", insight.visionReport)
+    }
+
+    @Test
+    fun blankAvisoUsesTheDescriptionWhenThereIsOne() = runBlocking {
+        val raw = """{"confirmado": true, "personas": 1, "donde": "frente a la puerta", "actividad": "parada", "nivel": "atencion", "motivo": "persona parada frente a la puerta", "aviso": null}"""
+        val sources = Sources(cameras = listOf(parsedAlertOn("Entrada", raw)))
+        val insight = TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)!!
+        assertEquals("En Entrada: parada frente a la puerta.", insight.spokenSpeechText)
+        assertFalse(insight.spokenSpeechText.contains('{'))
+    }
+
+    @Test
+    fun answerCutOffBeforeAvisoIsStillReadable() = runBlocking {
+        val raw = """{"confirmado": true, "personas": 0, "vehiculos": 0, "paquete": true, "donde": "", "actividad": "", "nivel": "atencion", "mot"""
+        val sources = Sources(cameras = listOf(parsedAlertOn("Cochera", raw)))
+        val insight = TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)!!
+        assertEquals("En Cochera: hay un paquete.", insight.spokenSpeechText)
+        assertFalse(insight.visionReport.orEmpty().contains('{'))
+    }
+
+    @Test
+    fun localizedTextsAreUsedForTheFallback() = runBlocking {
+        val english = CameraAlertTexts.SPANISH.copy(
+            followupPrompt = "[CAMERA ALERT] %1\$s %2\$s %3\$s",
+            fallbackSpeech = "At %1\$s: %2\$s",
+            noLevel = "no level",
+            people = { n -> if (n == 1) "there is a person" else "there are $n people" }
+        )
+        val raw = """{"personas": 1, "nivel": "urgente", "aviso": ""}"""
+        val sources = Sources(cameras = listOf(parsedAlertOn("Yard", raw)))
+        val insight = TrekoProactiveManager(sources, cameraTexts = { english })
+            .evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)!!
+        assertEquals("At Yard: there is a person.", insight.spokenSpeechText)
+        assertTrue(insight.spokenPrompt.startsWith("[CAMERA ALERT] Yard urgente"))
+    }
+
+    // --- the sentinel never reports "nothing new" for a look that did not happen ---
+
+    @Test
+    fun visionWithNoAnswerIsNotAnAllClear() = runBlocking {
+        val sources = Sources(cameras = emptyList())
+        val trace = SentinelRunTrace("binary_sensor.patio_person_occupancy", "camera.patio", "Patio", "person")
+        val insight = kotlinx.coroutines.withContext(trace) {
+            TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)
+        }
+        assertNull(insight)
+        assertEquals(TrekoProactiveManager.DECISION_NO_VERDICT, trace.decision)
+    }
+
+    @Test
+    fun aVerdictWithNothingToReportIsNormal() = runBlocking {
+        val raw = """{"confirmado": false, "personas": 0, "nivel": "ninguno", "aviso": ""}"""
+        val sources = Sources(cameras = listOf(parsedAlertOn("Patio", raw)))
+        val trace = SentinelRunTrace("binary_sensor.patio_person_occupancy", "camera.patio", "Patio", "person")
+        val insight = kotlinx.coroutines.withContext(trace) {
+            TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)
+        }
+        assertNull(insight)
+        assertEquals("normal", trace.decision)
+    }
 }

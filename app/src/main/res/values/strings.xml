@@ -582,4 +582,27 @@
     <string name="sensitive_disarm">disarm %1$s</string>
     <string name="sensitive_open">open %1$s</string>
     <string name="sensitive_all_targets">everything requested</string>
+    <!-- Words around a camera alert. followup: %1$s camera(s), %2$s level, %3$s visible facts (context for the voice model). fallback: %1$s camera, %2$s what was seen. -->
+    <string name="camera_alert_followup_prompt">[CAMERA ALERT] Camera: %1$s. Level: %2$s. Visible facts: %3$s. If the user asks to see it, use view_camera. Speak calmly, in one sentence and in English; do not call anyone an intruder or suspicious unless the level is urgente.</string>
+    <string name="camera_alert_fallback_speech">At %1$s: %2$s</string>
+    <string name="camera_alert_no_level">no level</string>
+    <plurals name="camera_alert_people">
+        <item quantity="one">there is a person</item>
+        <item quantity="other">there are %1$d people</item>
+    </plurals>
+    <plurals name="camera_alert_vehicles">
+        <item quantity="one">there is a vehicle</item>
+        <item quantity="other">there are %1$d vehicles</item>
+    </plurals>
+    <string name="camera_alert_one_package">there is a package</string>
+    <string name="camera_alert_something_to_check">there is something worth checking</string>
+    <string name="camera_alert_nothing_seen">nothing unusual is visible</string>
+    <plurals name="pending_alert_age_minutes">
+        <item quantity="one">%1$d minute ago:</item>
+        <item quantity="other">%1$d minutes ago:</item>
+    </plurals>
+    <plurals name="alerts_no_news_checks">
+        <item quantity="one">%1$d check, nothing new</item>
+        <item quantity="other">%1$d checks, nothing new</item>
+    </plurals>
 </resources>

@@ -14,14 +14,40 @@ class PendingInsightQueue(private val maxSize: Int = DEFAULT_MAX_SIZE) {
 
     val size: Int get() = items.size
 
-    fun offer(insight: ProactiveInsight) {
+    /**
+     * Queues [insight] and returns the insights that left the queue because of it (an older
+     * briefing of the same topic, or the least important one over [maxSize]).
+     */
+    fun offer(insight: ProactiveInsight): List<ProactiveInsight> {
+        val gone = ArrayList<ProactiveInsight>()
         items.removeAll { it.id == insight.id }
         if (insight.category != ProactiveCategory.CAMERA_ANOMALY) {
-            items.removeAll { it.category == insight.category }
+            items.filter { it.category == insight.category }.let { same ->
+                gone += same
+                items.removeAll(same.toSet())
+            }
         }
         items += insight
         items.sortWith(ORDER)
-        while (items.size > maxSize) items.removeAt(items.lastIndex)
+        while (items.size > maxSize) gone += items.removeAt(items.lastIndex)
+        return gone
+    }
+
+    /**
+     * Drops what is too old to be read as news (see [maxAgeMs]) and returns it. A camera alert
+     * held for hours would otherwise be read back as if it were happening now.
+     */
+    fun prune(nowMs: Long): List<ProactiveInsight> {
+        val old = items.filter { nowMs - it.createdAtMs > maxAgeMs(it.category) }
+        if (old.isNotEmpty()) items.removeAll(old.toSet())
+        return old
+    }
+
+    /** Removes the insights recorded as alerts-log entry [alertId] (the user already saw it). */
+    fun removeByAlertId(alertId: Long): List<ProactiveInsight> {
+        val seen = items.filter { it.alertId == alertId }
+        if (seen.isNotEmpty()) items.removeAll(seen.toSet())
+        return seen
     }
 
     fun peek(): ProactiveInsight? = items.firstOrNull()
@@ -41,6 +67,27 @@ class PendingInsightQueue(private val maxSize: Int = DEFAULT_MAX_SIZE) {
 
     companion object {
         const val DEFAULT_MAX_SIZE = 5
+
+        /** A held camera alert is stale after this long (the Alerts screen still has it). */
+        const val CAMERA_MAX_AGE_MS = 30 * 60_000L
+        /** Briefings, reminders and the rest. */
+        const val OTHER_MAX_AGE_MS = 3 * 60 * 60_000L
+        /** A camera alert read this long after it came up says how old it is. */
+        const val AGE_NOTE_AFTER_MS = 5 * 60_000L
+
+        fun maxAgeMs(category: ProactiveCategory): Long =
+            if (category == ProactiveCategory.CAMERA_ANOMALY) CAMERA_MAX_AGE_MS else OTHER_MAX_AGE_MS
+
+        /**
+         * Whole minutes since [insight] came up when it is a camera alert read late enough to
+         * say so ("Hace 12 minutos: …"); null otherwise.
+         */
+        fun heldAgeMinutes(insight: ProactiveInsight, nowMs: Long): Int? {
+            if (insight.category != ProactiveCategory.CAMERA_ANOMALY) return null
+            val age = nowMs - insight.createdAtMs
+            if (age < AGE_NOTE_AFTER_MS) return null
+            return (age / 60_000L).toInt()
+        }
 
         /** Lower is more important. */
         fun priorityOf(category: ProactiveCategory): Int = when (category) {

@@ -79,15 +79,31 @@ object TimerAlarms {
         )
     }
 
-    internal fun handleFired(context: Context, intent: Intent) {
-        if (intent.action != ACTION_FIRED) return
+    /**
+     * The alarm fired: rings (notification), updates the timers and records it in the alerts
+     * log. [onLogWritten] runs once the log is on disk (from a background thread); the
+     * receiver keeps its process alive until then (goAsync).
+     */
+    internal fun handleFired(context: Context, intent: Intent, onLogWritten: () -> Unit = {}) {
+        if (intent.action != ACTION_FIRED) return onLogWritten()
+        try {
+            handleFiredNow(context, intent, onLogWritten)
+        } catch (e: RuntimeException) {
+            onLogWritten()
+            throw e
+        }
+    }
+
+    private fun handleFiredNow(context: Context, intent: Intent, onLogWritten: () -> Unit) {
         install(context)
         val key = intent.getIntExtra(EXTRA_KEY, -1)
-        if (key < 0) return
+        if (key < 0) return onLogWritten()
         val label = intent.getStringExtra(EXTRA_LABEL).orEmpty().ifBlank { "Timer" }
         TrekoTimerManager.onAlarmFired(key)
         TrekoLogBuffer.i(TAG, "Timer finished: $label")
         TrekoAssistantService.addChatMessage(TrekoAssistantService.resolveAssistantName(context), "⏰ $label")
+        // init() and record() do no disk work on this (main) thread: the log loads and saves
+        // on its own background thread.
         TrekoAlertLog.init(context)
         val notificationId = NOTIFICATION_BASE_ID + key
         val alertId = TrekoAlertLog.record(
@@ -103,9 +119,15 @@ object TimerAlarms {
             )
         )
         val notified = postFinishedNotification(context, notificationId, label, alertId)
-        TrekoAlertLog.update(alertId) { it.copy(notified = notified) }
-        // A receiver's process may be gone soon after it returns: write the log now.
-        TrekoAlertLog.flush()
+        TrekoAlertLog.runInBackground {
+            try {
+                TrekoAlertLog.update(alertId) { it.copy(notified = notified) }
+                // A receiver's process may be gone soon after it finishes: write the log now.
+                TrekoAlertLog.flush()
+            } finally {
+                onLogWritten()
+            }
+        }
     }
 
     private fun postFinishedNotification(context: Context, notificationId: Int, label: String, alertId: Long): Boolean {
@@ -124,7 +146,7 @@ object TimerAlarms {
             .setContentIntent(openApp)
             .build()
         return try {
-            manager.notify(notificationId, notification)
+            manager.notify(AlertNotifications.tagFor(alertId), notificationId, notification)
             manager.areNotificationsEnabled()
         } catch (e: SecurityException) {
             TrekoLogBuffer.w(TAG, "Cannot post timer notification (permission missing): ${e.message}")
@@ -167,7 +189,10 @@ private class AlarmTimerScheduler(private val context: Context) : TimerScheduler
 /** Recibe la alarma de un temporizador terminado. */
 class TimerAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        TimerAlarms.handleFired(context, intent)
+        // The alerts log is read and written off the main thread; goAsync keeps the process
+        // alive until it is on disk.
+        val pending = goAsync()
+        TimerAlarms.handleFired(context, intent) { pending.finish() }
     }
 }
 

@@ -111,7 +111,9 @@ interface ProactiveDataSources {
  */
 class TrekoProactiveManager(
     private val sources: ProactiveDataSources,
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    /** Words around camera alerts, in the user's language (the service passes its string resources). */
+    private val cameraTexts: () -> CameraAlertTexts = { CameraAlertTexts.SPANISH }
 ) {
     private val recentFingerprints = LinkedHashMap<String, Long>()
     private val topicLastRemindedMs = HashMap<String, Long>()
@@ -156,19 +158,11 @@ class TrekoProactiveManager(
         private const val DEFAULT_COOLDOWN_MS = 45L * 60_000L
         private const val HABITS_TASK_REPEAT_COOLDOWN_MS = 120L * 60_000L
 
+        /** Sentinel decision when the vision model gave no answer (error, timeout, no picture). */
+        const val DECISION_NO_VERDICT = "no_verdict"
+
         /** Same camera alert (camera + label + level) is not repeated for this long; urgent ones always are. */
         private const val CAMERA_ALERT_REPEAT_COOLDOWN_MS = 20L * 60_000L
-
-        /**
-         * Follow-up context handed to the voice model with a camera alert (facts only; the
-         * alert itself is read as is). %1$s camera(s), %2$s level, %3$s visible facts.
-         */
-        const val CAMERA_ALERT_FOLLOWUP_PROMPT =
-            "[AVISO DE CÁMARA] Cámara: %1\$s. Nivel: %2\$s. Hechos visibles: %3\$s. " +
-                "Si pide verla usa view_camera. Habla con calma y en una frase; no lo llames intruso ni sospechoso salvo que el nivel sea urgente."
-
-        /** Spoken when the vision model gave no short sentence: %1$s camera, %2$s what it saw. */
-        const val CAMERA_ALERT_FALLBACK_SPEECH = "En %1\$s: %2\$s"
 
         /** Follow-up context for a briefing (facts only, never the spoken text again). */
         const val BRIEFING_FOLLOWUP_PROMPT =
@@ -624,7 +618,12 @@ class TrekoProactiveManager(
                 is CameraOutcome.Alert -> outcome.insight
                 CameraOutcome.Suppressed -> null
                 CameraOutcome.Nothing -> {
-                    trace?.decide("normal", if (results.isEmpty()) "no camera verdict" else "no anomaly in the verdict")
+                    // No answer from vision is not an all-clear: nobody looked at the detection.
+                    if (results.isEmpty()) {
+                        trace?.decide(DECISION_NO_VERDICT, "vision gave no answer")
+                    } else {
+                        trace?.decide("normal", "no anomaly in the verdict")
+                    }
                     null
                 }
             }
@@ -906,20 +905,21 @@ class TrekoProactiveManager(
         recordFingerprint(fp, now)
         trace?.decide("alert")
 
+        val texts = cameraTexts()
         val camNames = anomalous.joinToString(", ") { it.cameraName }
-        val speech = SpokenText.stripEmoji(anomalous.take(2).joinToString(" ") { spokenAlertOf(it) })
+        val speech = SpokenText.stripEmoji(anomalous.take(2).joinToString(" ") { spokenAlertOf(it, texts) })
         val report = anomalous.joinToString(" | ") { cam ->
-            val d = describeLook(cam)
+            val d = describeLook(cam, texts)
             if (anomalous.size > 1) "${cam.cameraName}: $d" else d
         }
-        val levels = anomalous.mapNotNull { it.verdict?.level?.key }.distinct().joinToString("/").ifBlank { "sin nivel" }
+        val levels = anomalous.mapNotNull { it.verdict?.level?.key }.distinct().joinToString("/").ifBlank { texts.noLevel }
         return CameraOutcome.Alert(
             ProactiveInsight(
                 id = UUID.randomUUID().toString(),
                 category = ProactiveCategory.CAMERA_ANOMALY,
                 title = "Centinela · $camNames",
                 summaryText = speech,
-                spokenPrompt = String.format(Locale.ROOT, CAMERA_ALERT_FOLLOWUP_PROMPT, camNames, levels, report),
+                spokenPrompt = String.format(Locale.ROOT, texts.followupPrompt, camNames, levels, report),
                 fingerprint = fp,
                 createdAtMs = now,
                 spokenSpeechText = speech,
@@ -931,16 +931,22 @@ class TrekoProactiveManager(
         )
     }
 
-    /** The model's short sentence, or "En <camera>: <first words of what it saw>." */
-    private fun spokenAlertOf(cam: CameraAnomalyCheckResult): String {
-        val aviso = cam.verdict?.spokenAlert?.trim().orEmpty()
+    /**
+     * The model's short sentence, or "En <camera>: <what it saw>." built from the verdict's
+     * fields. The raw answer is used only when the model gave no structured verdict (with one,
+     * the raw answer is JSON and is never spoken).
+     */
+    private fun spokenAlertOf(cam: CameraAnomalyCheckResult, texts: CameraAlertTexts): String {
+        val verdict = cam.verdict
+        val aviso = verdict?.spokenAlert?.trim().orEmpty()
         if (aviso.isNotEmpty()) return SpokenText.limitWords(aviso, VisionVerdict.MAX_SPOKEN_WORDS)
-        val seen = SpokenText.limitWords(firstSentence(cleanAnomalyPrefix(cam.visionReport)), 15)
-        return String.format(Locale.ROOT, CAMERA_ALERT_FALLBACK_SPEECH, cam.cameraName, seen.replaceFirstChar { it.lowercase(Locale.getDefault()) })
+        val seenText = if (verdict != null) verdict.fallbackLine(texts) else cleanAnomalyPrefix(cam.visionReport)
+        val seen = SpokenText.limitWords(firstSentence(seenText), 15)
+        return String.format(Locale.ROOT, texts.fallbackSpeech, cam.cameraName, seen.replaceFirstChar { it.lowercase(Locale.getDefault()) })
     }
 
-    private fun describeLook(cam: CameraAnomalyCheckResult): String =
-        cam.verdict?.describe()?.takeIf { it.isNotBlank() }
+    private fun describeLook(cam: CameraAnomalyCheckResult, texts: CameraAlertTexts): String =
+        cam.verdict?.fallbackLine(texts)
             ?: SpokenText.limitWords(cleanAnomalyPrefix(cam.visionReport), 40)
 
     private fun cleanAnomalyPrefix(report: String): String =

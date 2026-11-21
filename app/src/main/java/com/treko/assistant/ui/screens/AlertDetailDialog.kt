@@ -188,7 +188,8 @@ private fun AlertDetailBody(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         val file = alertImageFile(event, preferThumb = false)
-        Box(
+        // Timers and briefings never have a picture: no empty "No picture" box for them.
+        if (AlertsListModel.showsPictureBox(event, hasPicture = file != null)) Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(4f / 3f)
@@ -235,7 +236,7 @@ private fun AlertDetailBody(
         event.visionDescription?.takeIf { it.isNotBlank() }?.let { description ->
             DetailSection(stringResource(R.string.alert_detail_vision), description)
         }
-        event.spokenSummary?.takeIf { it.isNotBlank() && it.trim() != event.title.trim() }?.let { said ->
+        event.spokenSummary?.takeIf { AlertsListModel.showsSpokenSummary(event) && it.trim() != event.title.trim() }?.let { said ->
             DetailSection(stringResource(R.string.alert_detail_said, assistantName.ifBlank { "Treko" }), said)
         }
 
@@ -255,7 +256,7 @@ private fun AlertDetailBody(
             }
         }
 
-        if (event.level == AlertLevel.ALERT) {
+        if (AlertsListModel.showsFeedback(event)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = event.feedback == AlertFeedback.FALSE_ALARM,

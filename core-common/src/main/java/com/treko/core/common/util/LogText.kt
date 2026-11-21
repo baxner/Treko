@@ -26,6 +26,21 @@ object LogText {
         return oneLine.take(maxChars.coerceAtLeast(1)).trimEnd() + "…"
     }
 
+    /** Tools whose results are the user's personal notes: only their size goes to the log. */
+    val NO_PREVIEW_TOOLS: Set<String> = setOf("manage_vault_memory")
+
+    /**
+     * What the log says about [toolName]'s [result]: a masked [preview] of at most [maxChars],
+     * or only its length (or "error") for [NO_PREVIEW_TOOLS]; "<no result>" when empty.
+     */
+    fun toolResult(toolName: String, result: String?, maxChars: Int): String {
+        if (result.isNullOrEmpty()) return "<no result>"
+        if (toolName in NO_PREVIEW_TOOLS) {
+            return if (result.trimStart().startsWith("error", ignoreCase = true)) "error" else "${result.length} chars"
+        }
+        return preview(result, maxChars).ifEmpty { "<no result>" }
+    }
+
     fun redact(text: String): String =
         SECRET_PATTERNS.fold(text) { acc, pattern -> pattern.replace(acc) { m -> m.groupValues[1] + "***" } }
 }

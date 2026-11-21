@@ -95,8 +95,11 @@ class MainActivity : ComponentActivity() {
         // The alerts log loads in the background; the UI observes TrekoAlertLog.events.
         TrekoAlertLog.init(this)
         TrekoAssistantService.isUiAlive = true
-        // A recreated activity already handled its launch intent.
-        if (savedInstanceState == null) handleAlertIntent(intent)
+        // A recreated activity already handled its launch intent; a relaunch from Recents
+        // replays the original notification intent, which must not reopen that old alert.
+        if (savedInstanceState == null && (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            handleAlertIntent(intent)
+        }
 
         refreshPermissionState()
         checkAndRequestPermissions()

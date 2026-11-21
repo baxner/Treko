@@ -583,4 +583,31 @@
     <string name="sensitive_disarm">desarmar %1$s</string>
     <string name="sensitive_open">abrir %1$s</string>
     <string name="sensitive_all_targets">todo lo indicado</string>
+    <!-- Palabras alrededor de un aviso de cámara. followup: %1$s cámara(s), %2$s nivel, %3$s hechos visibles (contexto para el modelo de voz). fallback: %1$s cámara, %2$s lo que se vio. -->
+    <string name="camera_alert_followup_prompt">[AVISO DE CÁMARA] Cámara: %1$s. Nivel: %2$s. Hechos visibles: %3$s. Si pide verla usa view_camera. Habla con calma y en una frase; no lo llames intruso ni sospechoso salvo que el nivel sea urgente.</string>
+    <string name="camera_alert_fallback_speech">En %1$s: %2$s</string>
+    <string name="camera_alert_no_level">sin nivel</string>
+    <plurals name="camera_alert_people">
+        <item quantity="one">hay una persona</item>
+        <item quantity="many">hay %1$d personas</item>
+        <item quantity="other">hay %1$d personas</item>
+    </plurals>
+    <plurals name="camera_alert_vehicles">
+        <item quantity="one">hay un vehículo</item>
+        <item quantity="many">hay %1$d vehículos</item>
+        <item quantity="other">hay %1$d vehículos</item>
+    </plurals>
+    <string name="camera_alert_one_package">hay un paquete</string>
+    <string name="camera_alert_something_to_check">hay algo que conviene revisar</string>
+    <string name="camera_alert_nothing_seen">no se ve nada fuera de lo normal</string>
+    <plurals name="pending_alert_age_minutes">
+        <item quantity="one">Hace %1$d minuto:</item>
+        <item quantity="many">Hace %1$d minutos:</item>
+        <item quantity="other">Hace %1$d minutos:</item>
+    </plurals>
+    <plurals name="alerts_no_news_checks">
+        <item quantity="one">%1$d revisión sin novedad</item>
+        <item quantity="many">%1$d revisiones sin novedad</item>
+        <item quantity="other">%1$d revisiones sin novedad</item>
+    </plurals>
 </resources>

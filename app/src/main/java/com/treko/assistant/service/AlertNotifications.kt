@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import androidx.core.app.NotificationCompat
 import com.treko.assistant.MainActivity
 import com.treko.assistant.R
@@ -37,13 +38,23 @@ object AlertNotifications {
     fun nextWatchNotificationId(): Int = WATCH_NOTIFICATION_BASE_ID + (notificationSeq.getAndIncrement() % 100_000)
 
     /**
-     * Opens the app; with [alertId] the app can show that alert. [requestCode] must differ per
-     * notification, or a later one would replace this one's extras.
+     * Notification tag of alerts-log entry [alertId]. Every alert notification is posted and
+     * cancelled with it, so a reused notification id never cancels another alert's notification.
+     */
+    fun tagFor(alertId: Long?): String? = alertId?.let { "alert:$it" }
+
+    /**
+     * Opens the app; with [alertId] the app can show that alert. The intent's data names the
+     * alert, so two alerts never share a PendingIntent (nor overwrite each other's extras),
+     * whatever their [requestCode].
      */
     fun openAppIntent(context: Context, requestCode: Int, alertId: Long?, extraFlags: Int = 0): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or extraFlags
-            if (alertId != null) putExtra(EXTRA_ALERT_ID, alertId)
+            if (alertId != null) {
+                data = Uri.parse("treko://alert/$alertId")
+                putExtra(EXTRA_ALERT_ID, alertId)
+            }
         }
         return PendingIntent.getActivity(
             context,
@@ -110,7 +121,7 @@ object AlertNotifications {
             builder.setStyle(NotificationCompat.BigTextStyle().bigText(body))
         }
         return try {
-            manager.notify(id, builder.build())
+            manager.notify(tagFor(alertId), id, builder.build())
             // Without the permission (or with Treko's notifications off) Android drops it silently.
             manager.areNotificationsEnabled()
         } catch (e: SecurityException) {

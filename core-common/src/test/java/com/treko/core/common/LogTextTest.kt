@@ -35,4 +35,17 @@ class LogTextTest {
         val text = "Luz de la sala encendida. Temperatura 22 °C."
         assertEquals(text, LogText.preview(text, 300))
     }
+
+    @Test
+    fun personalToolResultsLogOnlyTheirSize() {
+        val notes = "comida_favorita: tacos; cumple_mama: 3 de mayo"
+        val logged = LogText.toolResult("manage_vault_memory", notes, 300)
+        assertEquals("${notes.length} chars", logged)
+        assertFalse(logged.contains("tacos"))
+        assertEquals("error", LogText.toolResult("manage_vault_memory", "Error: clave vacía", 300))
+        assertEquals("<no result>", LogText.toolResult("manage_vault_memory", null, 300))
+        // Other tools keep the masked preview.
+        assertEquals("Luz de la sala encendida.", LogText.toolResult("home_assistant_control", "Luz de la sala encendida.", 300))
+        assertEquals("<no result>", LogText.toolResult("home_assistant_control", "", 300))
+    }
 }

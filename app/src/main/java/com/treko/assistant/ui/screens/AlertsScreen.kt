@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -64,6 +65,7 @@ import androidx.core.app.NotificationManagerCompat
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.treko.assistant.R
+import com.treko.assistant.service.AlertNotifications
 import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.ui.theme.CardBorder
 import com.treko.assistant.ui.theme.DeepBackground
@@ -130,11 +132,14 @@ internal fun alertImageFile(event: AlertEvent, preferThumb: Boolean): File? {
     return path?.let { File(it) }
 }
 
-/** Clears the notifications of [ids] (the alert was read in the app). */
-internal fun cancelAlertNotifications(context: Context, ids: Collection<Int>) {
-    if (ids.isEmpty()) return
+/**
+ * Clears the notifications of [alerts] (alerts-log id to notification id; the alert was read
+ * in the app). The alert's tag makes sure only that alert's own notification goes.
+ */
+internal fun cancelAlertNotifications(context: Context, alerts: Collection<Pair<Long, Int>>) {
+    if (alerts.isEmpty()) return
     val manager = NotificationManagerCompat.from(context)
-    ids.forEach { manager.cancel(it) }
+    alerts.forEach { (alertId, notificationId) -> manager.cancel(AlertNotifications.tagFor(alertId), notificationId) }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -160,7 +165,7 @@ fun AlertsScreen(onOpenAlert: (Long) -> Unit) {
     val sources = remember(events, detectedSkills) { AlertsListModel.visibleSources(events, detectedSkills) }
     val filter = AlertsListModel.effectiveFilter(AlertFilter.fromKey(filterKey), sources)
     val groups = remember(events, filter, nowMs) {
-        AlertsListModel.groupByDay(AlertsListModel.filter(events, filter), nowMs, zone)
+        AlertsListModel.listFor(events, filter, nowMs, zone)
     }
     val todayCount = remember(events, nowMs) { AlertsListModel.countToday(events, nowMs, zone) }
     val canWatch = TrekoSkills.FRIGATE in detectedSkills || TrekoSkills.MOTION_SENSORS in detectedSkills
@@ -243,6 +248,14 @@ fun AlertsScreen(onOpenAlert: (Long) -> Unit) {
                         NoNewsRow(event, onClick = { onOpenAlert(event.id) })
                     } else {
                         AlertCard(event, onClick = { onOpenAlert(event.id) })
+                    }
+                }
+                if (group.collapsedNoNews > 0) {
+                    item(key = "no_news_${group.day}") {
+                        NoNewsSummaryRow(
+                            count = group.collapsedNoNews,
+                            onClick = { filterKey = AlertFilter.BySource(AlertSource.SENTINEL).key }
+                        )
                     }
                 }
             }
@@ -485,6 +498,30 @@ private fun NoNewsRow(event: AlertEvent, onClick: () -> Unit) {
     }
 }
 
+/** One row for a day's "no news" sentinel checks; tapping it lists them under the Sentinel chip. */
+@Composable
+private fun NoNewsSummaryRow(count: Int, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(Icons.Outlined.CheckCircle, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+        Text(
+            pluralStringResource(R.plurals.alerts_no_news_checks, count, count),
+            color = TextSecondary,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
 @Composable
 private fun AlertsEmptyState(hint: String) {
     Column(
@@ -504,7 +541,12 @@ private fun AlertsEmptyState(hint: String) {
 /** Marks [id] read (loading the log first if needed) and clears its notification. */
 internal suspend fun openAlertAndMarkRead(context: Context, id: Long): AlertEvent? = withContext(Dispatchers.IO) {
     val event = TrekoAlertLog.get(id) ?: return@withContext null
-    if (!event.read) TrekoAlertLog.markRead(id)
-    event.notificationId?.let { cancelAlertNotifications(context, listOf(it)) }
+    // Seen: it is no longer read back later as pending news.
+    TrekoAssistantService.onAlertSeen(context, id)
+    if (!event.read) {
+        TrekoAlertLog.markRead(id)
+        // An entry already read (a timer, an alert seen before) has no notification left to clear.
+        event.notificationId?.let { cancelAlertNotifications(context, listOf(id to it)) }
+    }
     TrekoAlertLog.get(id)
 }

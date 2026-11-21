@@ -124,6 +124,8 @@ fun SettingsScreen(
     var cameraSentinelEnabled by remember { mutableStateOf(prefs.cameraSentinelEnabled) }
     val frigateDetected = remember { TrekoSkills.FRIGATE in prefs.detectedSkills }
     val llmVisionDetected = remember { TrekoSkills.LLM_VISION in prefs.detectedSkills }
+    /** The periodic camera scan is offered until detection says LLM Vision is missing. */
+    val cameraScanAvailable = remember { llmVisionDetected || prefs.detectedSkills.isEmpty() }
     var proactiveQuietHoursEnabled by remember { mutableStateOf(prefs.proactiveQuietHoursEnabled) }
     var proactiveIntervalMinutes by remember { mutableIntStateOf(prefs.proactiveIntervalMinutes) }
     val isProactiveRunning by TrekoAssistantService.isProactiveCheckRunning.collectAsState()
@@ -592,9 +594,11 @@ fun SettingsScreen(
 
                 SettingsToggleRow(
                     title = stringResource(R.string.proactive_camera_title),
-                    subtitle = stringResource(R.string.proactive_camera_sub),
+                    subtitle = stringResource(
+                        if (cameraScanAvailable) R.string.proactive_camera_sub else R.string.proactive_sentinel_needs_llm_vision
+                    ),
                     checked = proactiveCameraAnomalyEnabled,
-                    enabled = proactiveEnabled,
+                    enabled = proactiveEnabled && cameraScanAvailable,
                     onCheckedChange = { checked ->
                         proactiveCameraAnomalyEnabled = checked
                         prefs.proactiveCameraAnomalyEnabled = checked

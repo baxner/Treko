@@ -83,6 +83,27 @@ data class VisionVerdict(
         return parts.joinToString(" ")
     }
 
+    /**
+     * A readable line that is never the model's raw answer: [describe], else a generic sentence
+     * from what was counted ("hay una persona"), else "nothing seen" / "something to check".
+     */
+    fun fallbackLine(texts: CameraAlertTexts = CameraAlertTexts.SPANISH): String =
+        describe().ifBlank { genericLine(texts) }
+
+    /** Generic sentence built only from the counted fields and the level. */
+    fun genericLine(texts: CameraAlertTexts = CameraAlertTexts.SPANISH): String {
+        val parts = ArrayList<String>()
+        if (people > 0) parts += texts.people(people)
+        if (vehicles > 0) parts += texts.vehicles(vehicles)
+        if (packageSeen) parts += texts.onePackage
+        val line = when {
+            parts.isNotEmpty() -> parts.joinToString(", ")
+            level == VisionLevel.ATTENTION || level == VisionLevel.URGENT -> texts.somethingToCheck
+            else -> texts.nothingSeen
+        }
+        return sentence(line)
+    }
+
     companion object {
         /** Longest spoken alert kept (the prompt asks for 15 words). */
         const val MAX_SPOKEN_WORDS = 18
@@ -96,6 +117,40 @@ data class VisionVerdict(
 
         private fun sameText(a: String, b: String): Boolean =
             TrekoProactiveManager.normalizeAscii(a).trimEnd('.') == TrekoProactiveManager.normalizeAscii(b).trimEnd('.')
+    }
+}
+
+/**
+ * The words Treko adds around a camera alert, in the user's language (the app passes them from
+ * its string resources; [SPANISH] is the default for code without a Context and for tests).
+ */
+data class CameraAlertTexts(
+    /** Follow-up context for the voice model: %1$s camera(s), %2$s level, %3$s visible facts. */
+    val followupPrompt: String,
+    /** Spoken when the model gave no short sentence: %1$s camera, %2$s what it saw. */
+    val fallbackSpeech: String,
+    /** Level label when the model gave none. */
+    val noLevel: String,
+    /** "hay una persona" / "hay 3 personas" for a count above zero. */
+    val people: (Int) -> String,
+    /** "hay un vehículo" / "hay 2 vehículos" for a count above zero. */
+    val vehicles: (Int) -> String,
+    val onePackage: String,
+    val somethingToCheck: String,
+    val nothingSeen: String
+) {
+    companion object {
+        val SPANISH = CameraAlertTexts(
+            followupPrompt = "[AVISO DE CÁMARA] Cámara: %1\$s. Nivel: %2\$s. Hechos visibles: %3\$s. " +
+                "Si pide verla usa view_camera. Habla con calma y en una frase; no lo llames intruso ni sospechoso salvo que el nivel sea urgente.",
+            fallbackSpeech = "En %1\$s: %2\$s",
+            noLevel = "sin nivel",
+            people = { n -> if (n == 1) "hay una persona" else "hay $n personas" },
+            vehicles = { n -> if (n == 1) "hay un vehículo" else "hay $n vehículos" },
+            onePackage = "hay un paquete",
+            somethingToCheck = "hay algo que conviene revisar",
+            nothingSeen = "no se ve nada fuera de lo normal"
+        )
     }
 }
 
