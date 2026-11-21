@@ -412,6 +412,9 @@
     <string name="proactive_speak_sub">Activado: %1$s inicia la conversación por voz al detectar un aviso. Desactivado: envía una notificación con el resumen.</string>
     <string name="proactive_camera_title">Escaneo de anomalías en cámaras con IA</string>
     <string name="proactive_camera_sub">Analiza periódicamente las cámaras principales con Home Assistant LLM Vision</string>
+    <string name="proactive_sentinel_title">Centinela de cámaras</string>
+    <string name="proactive_sentinel_sub">Cuando Frigate detecta a una persona o un vehículo, revisa esa cámara con IA de visión y te avisa si algo es inusual. Funciona aunque el chequeo proactivo esté apagado.</string>
+    <string name="proactive_sentinel_needs_frigate">Requiere la integración Frigate en Home Assistant (todavía no se detecta).</string>
     <string name="proactive_quiet_title">Horario nocturno silencioso (11 PM – 7 AM)</string>
     <string name="proactive_quiet_sub">Pausa las intervenciones por voz durante la noche y entrega los avisos solo por notificación</string>
     <string name="proactive_interval_label">Frecuencia de revisión:</string>

@@ -25,7 +25,11 @@ import java.util.concurrent.TimeUnit
 class HaEventStream(
     baseUrl: String,
     private val token: String,
-    private val onSensorOn: (entityId: String) -> Unit,
+    /**
+     * A watched sensor turned on. [replay] is true when it comes from the full state Home
+     * Assistant sends right after each (re)subscription, not from a change seen live.
+     */
+    private val onSensorOn: (entityId: String, replay: Boolean) -> Unit,
     /** Human-readable state of the live connection; [ok] false = alerts will not arrive. */
     private val onStatus: (message: String, ok: Boolean) -> Unit = { _, _ -> }
 ) {
@@ -137,7 +141,7 @@ class HaEventStream(
             } catch (_: Exception) {
                 return
             }
-            val fired = ArrayList<String>()
+            val fired = ArrayList<Pair<String, Boolean>>()
             var status: Pair<String, Boolean>? = null
             synchronized(lock) {
                 if (webSocket !== socket) return
@@ -165,12 +169,14 @@ class HaEventStream(
                     }
                     "event" -> if (msg.optInt("id") == subscriptionId) {
                         val event = msg.optJSONObject("event") ?: return
-                        fired += transitions.apply(parseCompressedStates(event))
+                        val initial = initialStateIds(event)
+                        fired += transitions.apply(parseCompressedStates(event)).map { it to (it in initial) }
                     }
                 }
             }
             status?.let { (text, ok) -> onStatus(text, ok) }
-            fired.filter { it in watchedSnapshot() }.forEach { onSensorOn(it) }
+            val stillWatched = watchedSnapshot()
+            fired.filter { it.first in stillWatched }.forEach { (id, replay) -> onSensorOn(id, replay) }
         }
 
         // Home Assistant closed first (restart, reload): answer and reconnect right away
@@ -218,6 +224,10 @@ class HaEventStream(
             }
             return "$ws/api/websocket"
         }
+
+        /** Entities whose state came as a full state (`a`): the replay after a (re)subscription. */
+        internal fun initialStateIds(event: JSONObject): Set<String> =
+            event.optJSONObject("a")?.keys()?.asSequence()?.toSet().orEmpty()
 
         /**
          * `subscribe_entities` events: `a` = full states (`{"s": state}`), `c` = changes

@@ -71,6 +71,7 @@ class TrekoPreferences(context: Context) {
         private const val KEY_PROACTIVE_SPEAK_OUT_LOUD = "proactive_speak_out_loud"
         private const val KEY_PROACTIVE_INTERVAL_MINUTES = "proactive_interval_minutes"
         private const val KEY_PROACTIVE_CAMERA_ANOMALY_ENABLED = "proactive_camera_anomaly_enabled"
+        private const val KEY_CAMERA_SENTINEL_ENABLED = "camera_sentinel_enabled"
         private const val KEY_PROACTIVE_QUIET_HOURS_ENABLED = "proactive_quiet_hours_enabled"
 
         const val DEFAULT_XIAOZHI_WS_URL = "wss://api.tenclass.net/xiaozhi/v1/"
@@ -95,6 +96,13 @@ class TrekoPreferences(context: Context) {
          * Generates a random locally-administered unicast MAC address (02:xx:xx:xx:xx:xx)
          * so each Treko installation has a unique Xiaozhi Device-Id.
          */
+        /**
+         * Before the sentinel had its own switch it ran when both the proactive check and the
+         * camera scan were on: existing users keep exactly that until they change it.
+         */
+        fun initialCameraSentinelEnabled(proactiveEnabled: Boolean, cameraScanEnabled: Boolean): Boolean =
+            proactiveEnabled && cameraScanEnabled
+
         fun generateRandomMacAddress(): String {
             val bytes = ByteArray(6)
             secureRandom.nextBytes(bytes)
@@ -296,6 +304,20 @@ class TrekoPreferences(context: Context) {
     var proactiveCameraAnomalyEnabled: Boolean
         get() = prefs.getBoolean(KEY_PROACTIVE_CAMERA_ANOMALY_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_PROACTIVE_CAMERA_ANOMALY_ENABLED, value).apply()
+
+    /**
+     * Camera sentinel: looks with the vision model when Frigate detects someone. Independent of
+     * the periodic proactive check, so turning briefings off keeps camera security on. The first
+     * read stores the value inherited from the old settings (see [initialCameraSentinelEnabled]).
+     */
+    var cameraSentinelEnabled: Boolean
+        get() {
+            if (prefs.contains(KEY_CAMERA_SENTINEL_ENABLED)) return prefs.getBoolean(KEY_CAMERA_SENTINEL_ENABLED, true)
+            val inherited = initialCameraSentinelEnabled(proactiveEnabled, proactiveCameraAnomalyEnabled)
+            prefs.edit().putBoolean(KEY_CAMERA_SENTINEL_ENABLED, inherited).apply()
+            return inherited
+        }
+        set(value) = prefs.edit().putBoolean(KEY_CAMERA_SENTINEL_ENABLED, value).apply()
 
     var proactiveQuietHoursEnabled: Boolean
         get() = prefs.getBoolean(KEY_PROACTIVE_QUIET_HOURS_ENABLED, true)

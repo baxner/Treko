@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ backup rules. Never backed up or transferred:
+    - treko_settings: holds the Home Assistant and Xiaozhi tokens (and the voice print).
+    - treko_vault_memory: personal notes the user asked Treko to remember.
+    - treko_watches: active camera watches (places of the home being watched).
+    - files/avisos: alert history and camera snapshots, which can show people.
+    Habits, tasks, timers and workflows are still backed up.
+    Keep in sync with full_backup_content.xml (Android 11 and older).
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="treko_settings.xml" />
+        <exclude domain="sharedpref" path="treko_vault_memory.xml" />
+        <exclude domain="sharedpref" path="treko_watches.xml" />
+        <exclude domain="file" path="avisos" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="treko_settings.xml" />
+        <exclude domain="sharedpref" path="treko_vault_memory.xml" />
+        <exclude domain="sharedpref" path="treko_watches.xml" />
+        <exclude domain="file" path="avisos" />
+    </device-transfer>
+</data-extraction-rules>

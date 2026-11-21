@@ -2,6 +2,7 @@ package com.treko.core.mcp
 
 import android.util.Log
 import com.treko.core.common.model.TrekoSkills
+import com.treko.core.common.util.TrekoLogBuffer
 import com.treko.core.mcp.watch.HaEventStream
 import com.treko.core.mcp.watch.HaStateLite
 import com.treko.core.mcp.watch.WatchCatalog
@@ -29,6 +30,26 @@ class HomeAssistantClient(
     companion object {
         private const val TAG = "HomeAssistantClient"
         private const val STATES_CACHE_TTL_MS = 3000L
+
+        /** Live-view suffixes some integrations give camera entities (English and Spanish names). */
+        private val LIVE_SUFFIX = Regex("_(live|live_view|liveview|vista_en_vivo)$")
+
+        /**
+         * The `_snapshot` sibling of a live-view camera entity (`camera.door_live` →
+         * `camera.door_snapshot`), tried first for vision because battery and live-view cameras
+         * often cannot hand out a still image. Only a trailing live suffix counts, so ids that
+         * merely contain "live" (`camera.delivery_door`) are left alone; null when not live.
+         */
+        fun snapshotSiblingOf(cameraEntityId: String): String? {
+            val id = cameraEntityId.trim()
+            val dot = id.indexOf('.')
+            if (dot <= 0 || dot == id.lastIndex) return null
+            val objectId = id.substring(dot + 1)
+            if (!LIVE_SUFFIX.containsMatchIn(objectId)) return null
+            val base = objectId.replace(LIVE_SUFFIX, "")
+            if (base.isEmpty()) return null
+            return id.substring(0, dot + 1) + base + "_snapshot"
+        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -305,7 +326,8 @@ class HomeAssistantClient(
                     val keys = attrs.keys()
                     while (keys.hasNext()) {
                         val key = keys.next()
-                        if (key in listOf("icon", "supported_features", "entity_picture")) continue
+                        // access_token (cameras) must never reach the model or the logs.
+                        if (key in listOf("icon", "supported_features", "entity_picture", "access_token")) continue
                         val value = attrs.opt(key)
                         if (value != null && value.toString().length < 100) {
                             summary.append("\n  - $key: $value")
@@ -1279,10 +1301,7 @@ class HomeAssistantClient(
 
             // Preparar entidades candidatas: priorizar la entidad de snapshot si es cámara de batería o live view
             val entitiesToTry = mutableListOf<String>()
-            if (cameraEntityId.contains("vista_en_vivo") || cameraEntityId.contains("live")) {
-                val snapshotEid = cameraEntityId.replace("vista_en_vivo", "snapshot").replace("live", "snapshot")
-                entitiesToTry.add(snapshotEid)
-            }
+            snapshotSiblingOf(cameraEntityId)?.let { entitiesToTry.add(it) }
             entitiesToTry.add(cameraEntityId)
 
             for (eid in entitiesToTry) {
@@ -1312,6 +1331,7 @@ class HomeAssistantClient(
                             if (!responseText.isNullOrBlank()) {
                                 return@withContext responseText.trim()
                             }
+                            TrekoLogBuffer.w(TAG, "llmvision answered HTTP ${resp.code} for $eid but response_text was empty.")
                         } else {
                             Log.w(TAG, "llmvision falló para $eid (HTTP ${resp.code})")
                         }
@@ -1545,7 +1565,13 @@ class HomeAssistantClient(
             .build()
         try {
             client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.bytes()?.takeIf { it.isNotEmpty() } else null
+                if (resp.isSuccessful) {
+                    resp.body?.bytes()?.takeIf { it.isNotEmpty() }
+                        ?: null.also { TrekoLogBuffer.w(TAG, "Image fetch for $entityId returned an empty body.") }
+                } else {
+                    TrekoLogBuffer.w(TAG, "Image fetch for $entityId failed with HTTP ${resp.code}.")
+                    null
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Image fetch for $entityId failed: ${e.message}")
@@ -1554,7 +1580,10 @@ class HomeAssistantClient(
     }
 
     /** Live event stream bound to this client's Home Assistant. */
-    fun openEventStream(onSensorOn: (String) -> Unit, onStatus: (message: String, ok: Boolean) -> Unit): HaEventStream =
+    fun openEventStream(
+        onSensorOn: (entityId: String, replay: Boolean) -> Unit,
+        onStatus: (message: String, ok: Boolean) -> Unit
+    ): HaEventStream =
         HaEventStream(getBaseUrl(), haToken, onSensorOn, onStatus)
 
     /** Renders a Jinja template in Home Assistant; null if the call fails. */

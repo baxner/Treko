@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Backup rules for Android 11 and older; same exclusions as data_extraction_rules.xml:
+    tokens (treko_settings), vault memories, camera watches and the alert history/snapshots.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="treko_settings.xml" />
+    <exclude domain="sharedpref" path="treko_vault_memory.xml" />
+    <exclude domain="sharedpref" path="treko_watches.xml" />
+    <exclude domain="file" path="avisos" />
+</full-backup-content>

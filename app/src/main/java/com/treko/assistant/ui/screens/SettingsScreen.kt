@@ -76,6 +76,7 @@ import com.treko.assistant.ui.theme.TextPrimary
 import com.treko.assistant.ui.theme.TextSecondary
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.model.FullDuplexMode
+import com.treko.core.common.model.TrekoSkills
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -120,6 +121,8 @@ fun SettingsScreen(
     var proactiveEnabled by remember { mutableStateOf(prefs.proactiveEnabled) }
     var proactiveSpeakOutLoud by remember { mutableStateOf(prefs.proactiveSpeakOutLoud) }
     var proactiveCameraAnomalyEnabled by remember { mutableStateOf(prefs.proactiveCameraAnomalyEnabled) }
+    var cameraSentinelEnabled by remember { mutableStateOf(prefs.cameraSentinelEnabled) }
+    val frigateDetected = remember { TrekoSkills.FRIGATE in prefs.detectedSkills }
     var proactiveQuietHoursEnabled by remember { mutableStateOf(prefs.proactiveQuietHoursEnabled) }
     var proactiveIntervalMinutes by remember { mutableIntStateOf(prefs.proactiveIntervalMinutes) }
     val isProactiveRunning by TrekoAssistantService.isProactiveCheckRunning.collectAsState()
@@ -597,6 +600,20 @@ fun SettingsScreen(
                     }
                 )
 
+                // Not tied to the proactive check above: it has its own switch.
+                SettingsToggleRow(
+                    title = stringResource(R.string.proactive_sentinel_title),
+                    subtitle = stringResource(
+                        if (frigateDetected) R.string.proactive_sentinel_sub else R.string.proactive_sentinel_needs_frigate
+                    ),
+                    checked = cameraSentinelEnabled,
+                    enabled = frigateDetected,
+                    onCheckedChange = { checked ->
+                        cameraSentinelEnabled = checked
+                        prefs.cameraSentinelEnabled = checked
+                    }
+                )
+
                 SettingsToggleRow(
                     title = stringResource(R.string.proactive_quiet_title),
                     subtitle = stringResource(R.string.proactive_quiet_sub),
@@ -948,6 +965,7 @@ fun SettingsScreen(
                 prefs.proactiveEnabled = proactiveEnabled
                 prefs.proactiveSpeakOutLoud = proactiveSpeakOutLoud
                 prefs.proactiveCameraAnomalyEnabled = proactiveCameraAnomalyEnabled
+                prefs.cameraSentinelEnabled = cameraSentinelEnabled
                 prefs.proactiveQuietHoursEnabled = proactiveQuietHoursEnabled
                 prefs.proactiveIntervalMinutes = proactiveIntervalMinutes
 

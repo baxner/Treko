@@ -44,7 +44,10 @@ class XiaozhiWebSocketClient(
     private val client = OkHttpClient.Builder()
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
-        .pingInterval(20, TimeUnit.SECONDS) // Keepalive cada 20s para evitar timeout de inactividad de 60s en el gateway
+        // WebSocket pings every 20 s only detect a dead link sooner. They do NOT keep an idle
+        // session open: the Xiaozhi server closes it (code 1005) about 60 s after the last voice
+        // activity, whatever the pings do, and the client then reconnects (see onClosing).
+        .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -84,6 +87,10 @@ class XiaozhiWebSocketClient(
     @Volatile
     private var reconnectScheduledForSocket: WebSocket? = null
 
+    /** When the current socket opened; 0 when none is open. */
+    @Volatile
+    private var openedAtMs: Long = 0L
+
     private var reconnectJob: Job? = null
 
     var onSessionStarted: ((String) -> Unit)? = null
@@ -97,8 +104,19 @@ class XiaozhiWebSocketClient(
     var onMcpToolCall: (suspend (name: String, args: JSONObject) -> String)? = null
     /** Antes de ejecutar una herramienta MCP; devuelve un token que se pasa a [onToolCallFinished]. */
     var onToolCallStarted: ((name: String) -> Any?)? = null
-    /** Al terminar una herramienta MCP (con éxito o error), antes de enviar la respuesta. */
-    var onToolCallFinished: ((name: String, token: Any?, durationMs: Long) -> Unit)? = null
+    /**
+     * Al terminar una herramienta MCP (con éxito o error), antes de enviar la respuesta.
+     * [result] es el texto devuelto al modelo, o el mensaje de error; null si no hubo ninguno.
+     */
+    var onToolCallFinished: ((name: String, token: Any?, durationMs: Long, result: String?) -> Unit)? = null
+
+    /**
+     * Attempt counter to use for the next reconnect delay: back to 0 after a session that lived
+     * at least [STABLE_SESSION_MS], otherwise unchanged (so the backoff keeps growing).
+     * [sessionLivedMs] null = the socket never opened.
+     */
+    internal fun nextReconnectAttempt(current: Int, sessionLivedMs: Long?): Int =
+        if (sessionLivedMs != null && sessionLivedMs >= STABLE_SESSION_MS) 0 else current
 
     internal fun computeReconnectDelayMs(attempt: Int): Long {
         val exp = 1L shl attempt.coerceIn(0, 4) // 1, 2, 4, 8, 16 -> 2s..32s
@@ -113,6 +131,14 @@ class XiaozhiWebSocketClient(
             if (reconnectScheduledForSocket === closedSocket) return
             reconnectScheduledForSocket = closedSocket
         }
+        // Back off again from scratch only after a session that really worked; a server that
+        // closes right after opening (quota, auth) must not be retried every 2 s forever.
+        val opened = openedAtMs
+        openedAtMs = 0L
+        reconnectAttempt = nextReconnectAttempt(
+            reconnectAttempt,
+            sessionLivedMs = if (opened > 0L) System.currentTimeMillis() - opened else null
+        )
         reconnectJob?.cancel()
         val delayMs = computeReconnectDelayMs(reconnectAttempt)
         reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(10)
@@ -164,7 +190,7 @@ class XiaozhiWebSocketClient(
                     TrekoLogBuffer.i(TAG, "Conexión WebSocket establecida con Xiaozhi.")
                     isConnecting = false
                     isConnected = true
-                    reconnectAttempt = 0
+                    openedAtMs = System.currentTimeMillis()
                     reconnectScheduledForSocket = null
                     sendHello()
                 }
@@ -182,6 +208,11 @@ class XiaozhiWebSocketClient(
                 override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                     if (ws !== webSocket) return
                     TrekoLogBuffer.i(TAG, "WebSocket cerrándose: $code / $reason")
+                    // Answer the server's close frame so the socket is released at once.
+                    try {
+                        ws.close(1000, null)
+                    } catch (_: Exception) {
+                    }
                     isConnecting = false
                     isConnected = false
                     sessionId = null
@@ -262,13 +293,14 @@ class XiaozhiWebSocketClient(
                     Log.i(TAG, "Negociación completada con éxito. Session ID: $sessionId")
                     _connectionState.value = TrekoState.IDLE
                     onConnectionStateChanged?.invoke(TrekoState.IDLE)
-                    sessionId?.let { onSessionStarted?.invoke(it) }
-
-                    if (pendingListenStart) {
+                    // A turn that started while connecting: open listening first, so the audio
+                    // buffered meanwhile (flushed by onSessionStarted) follows listen:start.
+                    if (pendingListenStart && sessionId != null) {
                         pendingListenStart = false
                         Log.i(TAG, "Iniciando escucha diferida tras negociación exitosa...")
                         startListening(pendingListenMode)
                     }
+                    sessionId?.let { onSessionStarted?.invoke(it) }
                 }
                 "mcp" -> {
                     handleMcpMessage(json)
@@ -878,9 +910,11 @@ class XiaozhiWebSocketClient(
                     } catch (e: Exception) {
                         null
                     }
+                    var loggedResult: String? = null
                     val callResp = try {
                         val resultText = onMcpToolCall?.invoke(toolName, arguments)
                             ?: "Herramienta $toolName ejecutada correctamente."
+                        loggedResult = resultText
                         JSONObject().apply {
                             put("session_id", sessionId ?: "")
                             put("type", "mcp")
@@ -899,6 +933,7 @@ class XiaozhiWebSocketClient(
                         }
                     } catch (e: Exception) {
                         TrekoLogBuffer.e(TAG, "Error ejecutando herramienta MCP '$toolName'", e)
+                        loggedResult = "error: ${e.message}"
                         JSONObject().apply {
                             put("session_id", sessionId ?: "")
                             put("type", "mcp")
@@ -913,7 +948,7 @@ class XiaozhiWebSocketClient(
                         }
                     } finally {
                         try {
-                            onToolCallFinished?.invoke(toolName, toolToken, System.currentTimeMillis() - startedAt)
+                            onToolCallFinished?.invoke(toolName, toolToken, System.currentTimeMillis() - startedAt, loggedResult)
                         } catch (_: Exception) {
                         }
                     }
@@ -964,7 +999,8 @@ class XiaozhiWebSocketClient(
         Log.i(TAG, "Detenida sesión de escucha en Xiaozhi (esperando respuesta).")
     }
 
-    fun abortSpeaking(reason: String = "wake_word_detected") {
+    /** Stops the server's current reply; [reason] says why (logged by the server). */
+    fun abortSpeaking(reason: String) {
         val sId = sessionId
         if (!isConnected || sId.isNullOrBlank()) return
         val abort = JSONObject().apply {
@@ -1061,5 +1097,10 @@ class XiaozhiWebSocketClient(
         disconnect()
         scope.cancel()
         client.connectionPool.evictAll()
+    }
+
+    companion object {
+        /** A session that lived this long counts as working: the reconnect backoff restarts. */
+        internal const val STABLE_SESSION_MS = 10_000L
     }
 }

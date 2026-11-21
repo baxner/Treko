@@ -412,6 +412,9 @@
     <string name="proactive_speak_sub">Enabled: %1$s starts a voice conversation when an insight is ready. Disabled: sends a notification with the summary.</string>
     <string name="proactive_camera_title">AI camera anomaly scan</string>
     <string name="proactive_camera_sub">Periodically analyzes priority cameras using Home Assistant LLM Vision</string>
+    <string name="proactive_sentinel_title">Camera sentinel</string>
+    <string name="proactive_sentinel_sub">When Frigate detects a person or a vehicle, looks at that camera with LLM Vision and warns you if something is unusual. Works even with the proactive check off.</string>
+    <string name="proactive_sentinel_needs_frigate">Needs the Frigate integration in Home Assistant (not detected yet).</string>
     <string name="proactive_quiet_title">Quiet night hours (11 PM – 7 AM)</string>
     <string name="proactive_quiet_sub">Pauses voice interventions overnight and delivers insights as notifications only</string>
     <string name="proactive_interval_label">Check interval:</string>

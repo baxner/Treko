@@ -1,6 +1,7 @@
 package com.treko.assistant.data
 
 import java.util.Calendar
+import kotlin.coroutines.coroutineContext
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -477,12 +478,22 @@ class TrekoProactiveManager(
     ): ProactiveInsight? {
         val now = clockMs()
         val cleanAssistantName = assistantName.trim().ifBlank { "Treko" }
+        // Present only in a camera-sentinel run: collects what happened for its log line.
+        val trace = coroutineContext[SentinelRunTrace]
 
+        val homeStartMs = System.currentTimeMillis()
         val homeSummary = runCatching { sources.getHomeStatusSummary() }.getOrDefault("")
-        val cameraResults = if (includeCameraScan && (!isTopicSnoozed("cameras", now) || force)) {
+        trace?.stage("home", System.currentTimeMillis() - homeStartMs)
+        val camerasSnoozed = isTopicSnoozed("cameras", now) && !force
+        val cameraResults = if (includeCameraScan && !camerasSnoozed) {
             cameraRotationOffset = (cameraRotationOffset + 1) % 12
-            runCatching { sources.scanPriorityCamerasForAnomalies(homeSummary) }.getOrDefault(emptyList())
+            val scanStartMs = System.currentTimeMillis()
+            runCatching { sources.scanPriorityCamerasForAnomalies(homeSummary) }
+                .onFailure { trace?.decide("error", "camera scan failed: ${it.message}") }
+                .getOrDefault(emptyList())
+                .also { trace?.stage("scan", System.currentTimeMillis() - scanStartMs) }
         } else {
+            trace?.decide("skipped", if (!includeCameraScan) "camera scan is off" else "cameras topic snoozed")
             emptyList()
         }
 
@@ -514,8 +525,12 @@ class TrekoProactiveManager(
             }
             val primaryCam = anomalousCameras.first()
             val fp = "cam_anomaly:${primaryCam.entityId}:${combinedReport.take(60).lowercase()}"
-            if (!force && isInCooldown(fp, now)) return null
+            if (!force && isInCooldown(fp, now)) {
+                trace?.decide("suppressed", "same alert already given (fingerprint cooldown)")
+                return null
+            }
             recordFingerprint(fp, now)
+            trace?.decide("alert")
 
             val summary = "Alerta visual en $camNames: $combinedReport"
             val spokenSpeech = buildString {
@@ -546,7 +561,10 @@ class TrekoProactiveManager(
             ).also { recordDeliveredInsight(it) }
         }
 
-        if (camerasOnly) return null
+        if (camerasOnly) {
+            trace?.decide("normal", if (cameraResults.isEmpty()) "no camera verdict" else "no anomaly in the verdict")
+            return null
+        }
 
         // Evaluación inteligente de Casa (Home Assistant), Hábitos, Hidratación y Tareas
         val highlights = mutableListOf<String>()

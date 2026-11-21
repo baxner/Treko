@@ -129,4 +129,12 @@ class TrekoCommonTest {
         assertEquals(a, b)
         assertNotEquals(a, c)
     }
+
+    @Test
+    fun cameraSentinelInheritsTheOldCoupledSettingOnce() {
+        // Before it had its own switch, the sentinel needed both the proactive check and the scan.
+        assertTrue(TrekoPreferences.initialCameraSentinelEnabled(proactiveEnabled = true, cameraScanEnabled = true))
+        assertFalse(TrekoPreferences.initialCameraSentinelEnabled(proactiveEnabled = false, cameraScanEnabled = true))
+        assertFalse(TrekoPreferences.initialCameraSentinelEnabled(proactiveEnabled = true, cameraScanEnabled = false))
+    }
 }

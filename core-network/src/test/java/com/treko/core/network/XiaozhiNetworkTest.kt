@@ -44,4 +44,20 @@ class XiaozhiNetworkTest {
         assertTrue(d10 in 30_000L..30_500L)
         client.release()
     }
+
+    @Test
+    fun testBackoffRestartsOnlyAfterAStableSession() {
+        val client = XiaozhiWebSocketClient(
+            serverUrl = "wss://example.invalid/xiaozhi/v1/",
+            macAddress = "02:aa:bb:cc:dd:ee",
+            clientId = "test-client"
+        )
+        // Idle session closed by the server after about a minute: start over.
+        assertEquals(0, client.nextReconnectAttempt(3, sessionLivedMs = 61_000L))
+        assertEquals(0, client.nextReconnectAttempt(0, sessionLivedMs = XiaozhiWebSocketClient.STABLE_SESSION_MS))
+        // Closed right after opening, or never opened: keep backing off.
+        assertEquals(3, client.nextReconnectAttempt(3, sessionLivedMs = 1_500L))
+        assertEquals(2, client.nextReconnectAttempt(2, sessionLivedMs = null))
+        client.release()
+    }
 }

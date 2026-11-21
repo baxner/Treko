@@ -32,6 +32,7 @@ import com.treko.assistant.data.CameraAnomalyCheckResult
 import com.treko.assistant.data.ProactiveCameraCandidate
 import com.treko.assistant.data.ProactiveDataSources
 import com.treko.assistant.data.ProactiveInsight
+import com.treko.assistant.data.SentinelRunTrace
 import com.treko.assistant.data.TrekoProactiveManager
 import com.treko.assistant.data.TrekoWorkflowManager
 import com.treko.assistant.data.WorkflowActions
@@ -52,6 +53,7 @@ import com.treko.core.common.model.MultiCameraGridState
 import com.treko.core.common.model.TimerMode
 import com.treko.core.common.model.TrekoEmotion
 import com.treko.core.common.model.TrekoState
+import com.treko.core.common.util.LogText
 import com.treko.core.common.util.TargetLookup
 import com.treko.core.common.util.TrekoLogBuffer
 import com.treko.core.common.util.failureMessage
@@ -93,6 +95,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 
 enum class WsConnectionStatus {
@@ -114,7 +117,12 @@ class TrekoAssistantService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    /** Null until the model has loaded in the background (see initWakeWordDetector). */
+    @Volatile
     private var wakeWordDetector: TrekoWakeWordDetector? = null
+    private val wakeWordLock = Any()
+    /** Set in onDestroy; a detector that finishes loading afterwards is released, not kept. */
+    private var wakeWordReleased = false
     private var speechDenoiser: NeuralSpeechDenoiser? = null
     private var speakerBiometricEngine: SpeakerBiometricEngine? = null
     private var opusCodec: OpusAudioCodec? = null
@@ -240,6 +248,10 @@ class TrekoAssistantService : Service() {
 
         private const val PROACTIVE_CHANNEL_ID = "treko_proactive_channel"
         private const val PROACTIVE_NOTIFICATION_ID = 2200
+        /** How much of each MCP tool result goes into the log (one line, secrets masked). */
+        private const val TOOL_RESULT_LOG_CHARS = 300
+        /** Wait for a Xiaozhi session before falling back to the phone's voice (reconnects take 2–4 s). */
+        private const val PROACTIVE_SESSION_WAIT_MS = 4_000L
 
         private val _serviceState = MutableStateFlow(TrekoState.IDLE)
         val serviceState: StateFlow<TrekoState> = _serviceState.asStateFlow()
@@ -389,19 +401,27 @@ class TrekoAssistantService : Service() {
                         override suspend fun scanPriorityCamerasForAnomalies(
                             homeStatusSummary: String
                         ): List<CameraAnomalyCheckResult> {
+                            // Callers decide whether cameras are scanned (includeCameraScan): the
+                            // periodic check follows the camera-scan setting, the sentinel its own.
                             val p = TrekoPreferences(appCtx)
-                            if (!p.proactiveCameraAnomalyEnabled) return emptyList()
+                            val trace = coroutineContext[SentinelRunTrace]
                             val haUrl = p.haUrl.trim()
                             val haToken = p.haToken.trim()
-                            if (haUrl.isBlank() || haToken.isBlank()) return emptyList()
+                            if (haUrl.isBlank() || haToken.isBlank()) {
+                                trace?.decide("skipped", "Home Assistant not configured")
+                                return emptyList()
+                            }
                             val client = HomeAssistantClient(haUrl, haToken)
+                            val camerasStartMs = System.currentTimeMillis()
                             val groups = client.getDeduplicatedCameras()
+                            trace?.stage("cameras", System.currentTimeMillis() - camerasStartMs)
                             // Frigate cameras are only looked at while Frigate detects something in
                             // them (no blind vision calls on empty scenes). Cameras outside Frigate
                             // keep the regular scan. If Home Assistant can't say, scan as before.
                             var frigateCameras: Set<String> = emptySet()
                             var frigateBusy: Set<String> = emptySet()
                             if (TrekoSkills.FRIGATE in p.detectedSkills) {
+                                val catalogStartMs = System.currentTimeMillis()
                                 val sensors = client.getWatchCatalog().orEmpty()
                                     .filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.cameraEntityId != null }
                                 val states = client.getStates(sensors.map { it.entityId }.toSet())
@@ -409,6 +429,8 @@ class TrekoAssistantService : Service() {
                                     frigateCameras = sensors.mapNotNull { it.cameraEntityId }.toSet()
                                     frigateBusy = sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
                                 }
+                                trace?.stage("catalog", System.currentTimeMillis() - catalogStartMs)
+                                trace?.note("frigate_busy=${frigateBusy.sorted().ifEmpty { listOf("none") }.joinToString(",")}")
                             }
                             fun idsOf(g: HomeAssistantClient.HaCameraGroup) = setOf(g.primaryEntityId, g.snapshotEntityId)
                             fun candidateOf(g: HomeAssistantClient.HaCameraGroup) = ProactiveCameraCandidate(
@@ -427,16 +449,20 @@ class TrekoAssistantService : Service() {
                                 maxCameras = 3 - busyPicked.size,
                                 rotationOffset = proactiveCameraCycle.getAndIncrement()
                             ).takeIf { busyPicked.size < 3 }.orEmpty()
-                            if (selected.isEmpty()) return emptyList()
+                            if (selected.isEmpty()) {
+                                trace?.decide("skipped", "no camera selected (${groups.size} cameras, none busy or eligible)")
+                                return emptyList()
+                            }
 
                             return coroutineScope {
                                 selected.map { cam ->
                                     async {
+                                        val visionStartMs = System.currentTimeMillis()
                                         val report = client.analyzeCameraWithLlmVision(
                                             cam.entityId,
                                             TrekoProactiveManager.SENTINEL_VISION_PROMPT
                                         )?.trim().orEmpty()
-                                        if (report.isBlank()) {
+                                        val result = if (report.isBlank()) {
                                             null
                                         } else {
                                             CameraAnomalyCheckResult(
@@ -446,6 +472,14 @@ class TrekoAssistantService : Service() {
                                                 hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report)
                                             )
                                         }
+                                        trace?.look(
+                                            cameraName = cam.friendlyName,
+                                            imageEntityId = cam.entityId,
+                                            durationMs = System.currentTimeMillis() - visionStartMs,
+                                            verdict = report,
+                                            anomaly = result?.hasAnomaly
+                                        )
+                                        result
                                     }
                                 }.awaitAll().filterNotNull()
                             }
@@ -1043,7 +1077,7 @@ class TrekoAssistantService : Service() {
                 clearPendingOpusPackets()
                 opusCodec?.resetEncoder()
                 if (shouldNotifyWs) {
-                    wsClient?.abortSpeaking()
+                    wsClient?.abortSpeaking(reason = "user_muted")
                 }
                 transitionState(TrekoState.IDLE, TrekoEmotion.SLEEPY)
                 _subtitleText.value = ""
@@ -1207,7 +1241,7 @@ class TrekoAssistantService : Service() {
                     cancelThinkingWatchdog()
                     serviceScope.launch {
                         client.stopListening()
-                        client.abortSpeaking()
+                        client.abortSpeaking(reason = "sleep_intent")
                         val goodbye = getString(R.string.status_goodbye)
                         val name = _assistantName.value
                         transitionState(TrekoState.THINKING, TrekoEmotion.SLEEPY)
@@ -1251,7 +1285,7 @@ class TrekoAssistantService : Service() {
                     if ((cur == TrekoState.IDLE || cur == TrekoState.ERROR) && !isLateReply) {
                         suppressIdleTts = true
                         TrekoLogBuffer.i(TAG, "Ignoring unsolicited server TTS in state=$cur.")
-                        wsClient?.abortSpeaking()
+                        wsClient?.abortSpeaking(reason = "unsolicited_tts_while_idle")
                     } else {
                         suppressIdleTts = false
                         proactiveTtsFallbackJob?.cancel()
@@ -1360,8 +1394,11 @@ class TrekoAssistantService : Service() {
             token
         }
 
-        client.onToolCallFinished = { toolName, token, durationMs ->
-            TrekoLogBuffer.d(TAG, "MCP tool '$toolName' finished in ${durationMs}ms.")
+        client.onToolCallFinished = { toolName, token, durationMs, result ->
+            TrekoLogBuffer.d(
+                TAG,
+                "MCP tool '$toolName' finished in ${durationMs}ms: ${LogText.preview(result, TOOL_RESULT_LOG_CHARS).ifEmpty { "<no result>" }}"
+            )
             (token as? Long)?.let { conversationWatchdog.onToolFinished(it, System.currentTimeMillis()) }
             if (_serviceState.value == TrekoState.THINKING) scheduleThinkingWatchdog()
         }
@@ -1431,22 +1468,35 @@ class TrekoAssistantService : Service() {
             speak = { text -> speakWatchAlert(text) },
             addChat = { text -> addChatMessage(_assistantName.value, text) },
             sentinelEnabled = {
+                // Its own setting: turning off the periodic briefings keeps camera security on.
                 val p = TrekoPreferences(this)
-                p.proactiveEnabled && p.proactiveCameraAnomalyEnabled && TrekoSkills.FRIGATE in p.detectedSkills
+                p.cameraSentinelEnabled && TrekoSkills.FRIGATE in p.detectedSkills
             },
-            onSentinelDetection = { cameraName ->
-                TrekoLogBuffer.i(TAG, "Frigate saw something at $cameraName; running the camera sentinel now.")
+            onSentinelDetection = { sensor, trace ->
+                TrekoLogBuffer.i(
+                    TAG,
+                    "Frigate saw ${sensor.objectType} at ${sensor.areaName}; running the camera sentinel now."
+                )
+                // Have a Xiaozhi session ready by the time a verdict may need to be spoken: the
+                // handshake overlaps the vision call instead of delaying the alert.
+                wsClient?.let { client ->
+                    if (!client.isConnected) {
+                        _connectionStatus.value = WsConnectionStatus.CONNECTING
+                        client.connect()
+                    }
+                }
                 // Another check in progress: wait for it rather than drop this detection.
                 var waitedMs = 0L
                 while (_isProactiveCheckRunning.value && waitedMs < 90_000L) {
                     delay(1_000L)
                     waitedMs += 1_000L
                 }
+                if (waitedMs > 0L) trace.stage("wait", waitedMs)
                 if (_isProactiveCheckRunning.value) {
+                    trace.decide("skipped", "another proactive check was still running after ${waitedMs / 1000}s")
                     false
                 } else {
                     runProactiveCheck(force = false, camerasOnly = true)
-                    true
                 }
             }
         )
@@ -1576,18 +1626,57 @@ class TrekoAssistantService : Service() {
         }
     }
 
+    /**
+     * Loads the wake-word model off the main thread (it takes about a second). Until it is
+     * ready [wakeWordDetector] stays null, which every user already handles (no detection yet).
+     * If the service is destroyed meanwhile, the half-built detector is released, not published.
+     */
     private fun initWakeWordDetector(prefs: TrekoPreferences) {
-        val detector = TrekoWakeWordDetector(this)
-        val effectiveBoost = prefs.wakeWordBoost.coerceIn(1.0f, 5.0f)
-        val effectiveThreshold = prefs.wakeWordSensitivity.coerceIn(0.01f, 0.20f)
-        detector.initialize(
-            initialKeyword = prefs.customWakeWord,
-            boost = effectiveBoost,
-            threshold = effectiveThreshold
-        )
-        detector.loadFromPreferences(prefs)
-        wakeWordDetector = detector
+        serviceScope.launch(Dispatchers.IO) {
+            val startedMs = System.currentTimeMillis()
+            val detector = TrekoWakeWordDetector(this@TrekoAssistantService)
+            var published = false
+            try {
+                detector.initialize(
+                    initialKeyword = prefs.customWakeWord,
+                    boost = prefs.wakeWordBoost.coerceIn(1.0f, 5.0f),
+                    threshold = prefs.wakeWordSensitivity.coerceIn(0.01f, 0.20f)
+                )
+                // Settings saved while the model was loading.
+                val latest = TrekoPreferences(this@TrekoAssistantService)
+                detector.loadFromPreferences(latest)
+                if (latest.customWakeWord != prefs.customWakeWord ||
+                    latest.wakeWordBoost != prefs.wakeWordBoost ||
+                    latest.wakeWordSensitivity != prefs.wakeWordSensitivity
+                ) {
+                    detector.updateKeywords(
+                        newKeyword = latest.customWakeWord,
+                        boost = latest.wakeWordBoost.coerceIn(1.0f, 5.0f),
+                        threshold = latest.wakeWordSensitivity.coerceIn(0.01f, 0.20f)
+                    )
+                }
+                synchronized(wakeWordLock) {
+                    if (!wakeWordReleased) {
+                        wakeWordDetector = detector
+                        published = true
+                    }
+                }
+            } finally {
+                if (!published) {
+                    try {
+                        detector.release()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            if (published) {
+                TrekoLogBuffer.i(TAG, "Wake word model ready in ${System.currentTimeMillis() - startedMs}ms.")
+                collectWakeWordDetections(detector)
+            }
+        }
+    }
 
+    private fun collectWakeWordDetections(detector: TrekoWakeWordDetector) {
         serviceScope.launch {
             detector.detectionDetails.collect { event ->
                 val snrLabel = String.format(Locale.US, "%.1f", event.snrDb)
@@ -2410,7 +2499,9 @@ class TrekoAssistantService : Service() {
             nearFieldGate.reset()
             biometricTurnGate.startTurn(enabled = effectiveBiometricGateEnabled)
         }
-        wsClient?.abortSpeaking()
+        // A new turn (wake word or a tap) interrupts any reply still playing: the same
+        // abort the Xiaozhi firmware sends when its wake word fires.
+        wsClient?.abortSpeaking(reason = "wake_word_detected")
 
         hasTurnEmotion = false
         speechDetected = false
@@ -3215,8 +3306,10 @@ class TrekoAssistantService : Service() {
                                 cancelProactiveNotification(this@TrekoAssistantService)
                                 "Di esto al usuario en voz alta ahora mismo con naturalidad: \"${chosen.spokenSpeechText}\"\nContexto detallado para preguntas de seguimiento: ${chosen.spokenPrompt}"
                             } else {
+                                // "What were you going to tell me?": a quick look at the other
+                                // topics, never a slow camera scan.
                                 val fresh = proactiveManager.evaluateNow(
-                                    includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
+                                    includeCameraScan = false,
                                     force = true,
                                     assistantName = resolveAssistantName(this@TrekoAssistantService)
                                 )
@@ -3616,7 +3709,7 @@ class TrekoAssistantService : Service() {
             NativeAudioEngine.resetSoftwareAec()
         }
         if (shouldAbortRemote) {
-            wsClient?.abortSpeaking()
+            wsClient?.abortSpeaking(reason = "user_cancelled")
         }
         transitionState(
             TrekoState.IDLE,
@@ -3727,8 +3820,11 @@ class TrekoAssistantService : Service() {
         NativeAudioEngine.onPcmData = null
         NativeAudioEngine.stopRecording()
 
-        wakeWordDetector?.release()
-        wakeWordDetector = null
+        synchronized(wakeWordLock) {
+            wakeWordReleased = true
+            wakeWordDetector?.release()
+            wakeWordDetector = null
+        }
 
         speechDenoiser?.release()
         speechDenoiser = null
@@ -3796,29 +3892,47 @@ class TrekoAssistantService : Service() {
         }
     }
 
+    /**
+     * Runs one proactive check ([camerasOnly] = the camera sentinel). Returns false when the
+     * check did not run (another one in progress, turned off, or it failed), true otherwise,
+     * whether or not it found something to say.
+     */
     private suspend fun runProactiveCheck(
         force: Boolean,
         overrideSpeak: Boolean? = null,
         camerasOnly: Boolean = false
-    ) {
-        if (_isProactiveCheckRunning.value) return
+    ): Boolean {
+        val trace = coroutineContext[SentinelRunTrace]
+        if (_isProactiveCheckRunning.value) {
+            trace?.decide("skipped", "another proactive check is running")
+            return false
+        }
         _isProactiveCheckRunning.value = true
         // A detector-triggered camera check does not reset the regular schedule.
         if (!camerasOnly) lastProactiveCheckMs = System.currentTimeMillis()
         try {
             val prefs = TrekoPreferences(this)
-            if (!force && !prefs.proactiveEnabled) return
+            val enabled = if (camerasOnly) prefs.cameraSentinelEnabled else prefs.proactiveEnabled
+            if (!force && !enabled) {
+                trace?.decide("skipped", "camera sentinel is turned off")
+                return false
+            }
             val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
             val inQuietHours = TrekoProactiveManager.isWithinQuietHours(hour, prefs.proactiveQuietHoursEnabled)
 
             val manager = getOrCreateProactiveManager(this)
             val insight = manager.evaluateNow(
-                includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
+                // The sentinel is already gated by its own setting; the periodic check by the scan one.
+                includeCameraScan = camerasOnly || prefs.proactiveCameraAnomalyEnabled,
                 force = force,
                 hourOfDay = hour,
                 assistantName = resolveAssistantName(this),
                 camerasOnly = camerasOnly
-            ) ?: return
+            )
+            if (insight == null) {
+                if (!camerasOnly) TrekoLogBuffer.d(TAG, "Proactive check: nothing to say right now.")
+                return true
+            }
 
             val speakOutLoud = overrideSpeak ?: prefs.proactiveSpeakOutLoud
             val canSpeakAutomatically = speakOutLoud &&
@@ -3833,13 +3947,28 @@ class TrekoAssistantService : Service() {
             )
 
             if (canSpeakAutomatically) {
+                trace?.decide("alert_spoken", override = true)
                 deliverProactiveInsightByVoice(insight, fromUserTap = false)
             } else {
+                trace?.decide(
+                    "alert_notified",
+                    reason = when {
+                        !speakOutLoud -> "speaking proactively is off"
+                        inQuietHours && !force -> "quiet hours"
+                        _isMuted.value -> "microphone muted"
+                        _isCinemaMode.value -> "cinema mode"
+                        else -> "assistant busy (${_serviceState.value})"
+                    },
+                    override = true
+                )
                 _pendingProactiveInsight.value = insight
                 postProactiveNotification(this, insight)
             }
+            return true
         } catch (e: Exception) {
             TrekoLogBuffer.w(TAG, "Error running proactive check: ${e.message}")
+            trace?.decide("error", e.message ?: e.javaClass.simpleName, override = true)
+            return false
         } finally {
             _isProactiveCheckRunning.value = false
         }
@@ -3887,7 +4016,7 @@ class TrekoAssistantService : Service() {
                 _connectionStatus.value = WsConnectionStatus.CONNECTING
                 client.connect()
                 var waitedMs = 0L
-                while (waitedMs < 2500L && (!client.isConnected || _activeSessionId.value.isNullOrBlank())) {
+                while (waitedMs < PROACTIVE_SESSION_WAIT_MS && (!client.isConnected || _activeSessionId.value.isNullOrBlank())) {
                     delay(100L)
                     waitedMs += 100L
                 }
