@@ -126,4 +126,40 @@ class ReviewFixesTest {
         assertFalse(PrinterStatus.hasDefaultNamedPrinter(listOf("sensor.octoprint_cpu_temperature", "switch.octoprint_plug")))
         assertTrue(PrinterStatus.hasDefaultNamedPrinter(listOf("sensor.octoprint_job_percentage")))
     }
+
+    @Test
+    fun `new frigate labels map to their alert group`() {
+        assertEquals("car", WatchCatalog.groupOfLabel("truck"))
+        assertEquals("animal", WatchCatalog.groupOfLabel("squirrel"))
+        assertEquals("package", WatchCatalog.groupOfLabel("fedex"))
+        assertEquals(null, WatchCatalog.groupOfLabel("all"))
+    }
+
+    @Test
+    fun `everywhere includes non-frigate cameras with a motion sensor`() {
+        val catalog = listOf(
+            WatchSensor("b.patio_person_occupancy", "Patio", "patio", "person", WatchSensor.Source.FRIGATE_CAMERA, "camera.patio", null),
+            WatchSensor("b.cochera_motion", "Cochera", "cochera", null, WatchSensor.Source.GENERIC, "camera.cochera", null),
+            WatchSensor("b.recamara_motion", "Recámara", "recamara", null, WatchSensor.Source.GENERIC, null, null)
+        )
+        assertEquals(
+            setOf("b.patio_person_occupancy", "b.cochera_motion"),
+            WatchCatalog.resolve(catalog, listOf("toda la casa"), "person").sensors.map { it.entityId }.toSet()
+        )
+    }
+
+    @Test
+    fun `hit tells when a one-shot watch was used up behind a persistent one`() {
+        val storage = object : WatchPersistence {
+            var v: String? = null
+            override fun save(encoded: String) { v = encoded }
+            override fun load(): String? = v
+        }
+        val book = CameraWatchBook(storage)
+        book.add(listOf("s.1"), listOf("Patio"), "person", 3_600_000, false, 0)
+        book.add(listOf("s.1"), listOf("Patio"), "person", 3_600_000, true, 0)
+        val hit = book.onSensorActivated("s.1", 10)!!
+        assertFalse(hit.watch.once)
+        assertTrue(hit.consumedOneShot)
+    }
 }

@@ -180,6 +180,10 @@ object WatchCatalog {
         return if (area.isBlank()) null else area to obj
     }
 
+    /** Request group ("person", "car", "animal", "package") a Frigate label belongs to. */
+    fun groupOfLabel(label: String?): String? =
+        label?.let { l -> OBJECT_GROUPS.entries.firstOrNull { it.key != "any" && l in it.value }?.key }
+
     /** "toda la casa", "todo", "everywhere"… */
     fun isEverywhere(query: String): Boolean {
         val words = stripArticles(query).split(' ').filter { it.isNotEmpty() }
@@ -214,7 +218,12 @@ object WatchCatalog {
         val targetAreas: List<List<String>> = if (everywhere) {
             // "Everywhere" = every camera (not the zones inside them, nor indoor motion
             // sensors). A home without Frigate cameras only has its motion sensors.
-            val cameras = areas.filterValues { list -> list.any { it.source == WatchSensor.Source.FRIGATE_CAMERA } }.keys
+            val cameras = areas.filterValues { list ->
+                list.any {
+                    it.source == WatchSensor.Source.FRIGATE_CAMERA ||
+                        (it.source == WatchSensor.Source.GENERIC && it.cameraEntityId != null)
+                }
+            }.keys
             listOf(cameras.ifEmpty { areas.filterValues { list -> list.any { it.source == WatchSensor.Source.GENERIC } }.keys }.toList())
         } else {
             cleanQueries.map { q ->
