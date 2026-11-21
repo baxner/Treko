@@ -880,6 +880,7 @@ class TrekoAssistantService : Service() {
         super.onCreate()
         instance = this
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        NativeAudioEngine.headsetDeviceFilter = BluetoothHeadsetFilter(this)::allows
         NativeAudioEngine.attachAudioManager(audioManager)
         createNotificationChannel()
 

@@ -125,6 +125,13 @@ object NativeAudioEngine {
     val preferredOutputDevice: AudioDeviceInfo?
         get() = headsetRouter.currentRoute.outputDevice
 
+    /** Which connected devices may be used as a headset (see [HeadsetAudioRouter.deviceFilter]). */
+    var headsetDeviceFilter: (AudioDeviceInfo) -> Boolean
+        get() = headsetRouter.deviceFilter
+        set(value) {
+            headsetRouter.deviceFilter = value
+        }
+
     fun attachAudioManager(manager: AudioManager?) {
         headsetRouter.attachAudioManager(manager)
     }

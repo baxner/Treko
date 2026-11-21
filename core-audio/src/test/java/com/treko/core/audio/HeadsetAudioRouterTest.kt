@@ -3,6 +3,8 @@ package com.treko.core.audio
 import android.media.AudioDeviceInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class HeadsetAudioRouterTest {
@@ -48,5 +50,17 @@ class HeadsetAudioRouterTest {
             commTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_EARPIECE, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
         )
         assertEquals(AudioDeviceInfo.TYPE_BLUETOOTH_SCO, chosen)
+    }
+
+    @Test
+    fun `watches and bands are not taken as headsets by name`() {
+        assertTrue(HeadsetAudioRouter.looksLikeWearable("HUAWEI WATCH Ultimate-1B2"))
+        assertTrue(HeadsetAudioRouter.looksLikeWearable("Galaxy Watch6 (A1B2)"))
+        assertTrue(HeadsetAudioRouter.looksLikeWearable("Xiaomi Smart Band 8"))
+        assertTrue(HeadsetAudioRouter.looksLikeWearable("Amazfit GTR 4"))
+        assertFalse(HeadsetAudioRouter.looksLikeWearable("RB Meta 01D4"))
+        assertFalse(HeadsetAudioRouter.looksLikeWearable("Galaxy Buds2 Pro"))
+        assertFalse(HeadsetAudioRouter.looksLikeWearable("JBL Tune 510BT"))
+        assertFalse(HeadsetAudioRouter.looksLikeWearable(null))
     }
 }
