@@ -433,4 +433,9 @@
     <string name="watch_chip">Vigilando: %1$s</string>
     <string name="watch_stop_cd">Dejar de vigilar</string>
     <string name="notification_watching">Vigilando: %1$s</string>
+    <!-- Registro de avisos -->
+    <string name="alert_sentinel_no_news_title">Sin novedad en %1$s</string>
+    <string name="alert_sentinel_repeat_title">Mismo aviso otra vez en %1$s</string>
+    <string name="alert_place_unknown">la cámara</string>
+    <string name="alert_timer_default_title">Temporizador</string>
 </resources>

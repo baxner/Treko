@@ -31,6 +31,8 @@ import com.treko.assistant.R
 import com.treko.assistant.data.CameraAnomalyCheckResult
 import com.treko.assistant.data.ProactiveCameraCandidate
 import com.treko.assistant.data.ProactiveDataSources
+import com.treko.assistant.data.PendingInsightQueue
+import com.treko.assistant.data.ProactiveCategory
 import com.treko.assistant.data.ProactiveInsight
 import com.treko.assistant.data.SentinelRunTrace
 import com.treko.assistant.data.TrekoProactiveManager
@@ -40,6 +42,7 @@ import com.treko.core.audio.FullDuplexComplementaryQueue
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.audio.NearFieldListeningGate
 import com.treko.core.audio.OpusAudioCodec
+import com.treko.core.common.data.TrekoAlertLog
 import com.treko.core.common.data.TrekoHabitManager
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.data.TrekoTaskManager
@@ -298,8 +301,40 @@ class TrekoAssistantService : Service() {
         private val _conversationHistory = MutableStateFlow<List<ChatMessage>>(emptyList())
         val conversationHistory: StateFlow<List<ChatMessage>> = _conversationHistory.asStateFlow()
 
+        /**
+         * Insights that could not be spoken yet, most important first: a camera alert is never
+         * replaced by a later, less important briefing.
+         */
+        private val pendingQueue = PendingInsightQueue()
         private val _pendingProactiveInsight = MutableStateFlow<ProactiveInsight?>(null)
+        /** The most important pending insight (head of the queue), for the UI banner. */
         val pendingProactiveInsight: StateFlow<ProactiveInsight?> = _pendingProactiveInsight.asStateFlow()
+        private val _pendingProactiveInsights = MutableStateFlow<List<ProactiveInsight>>(emptyList())
+        val pendingProactiveInsights: StateFlow<List<ProactiveInsight>> = _pendingProactiveInsights.asStateFlow()
+
+        private fun publishPendingLocked() {
+            _pendingProactiveInsights.value = pendingQueue.snapshot()
+            _pendingProactiveInsight.value = pendingQueue.peek()
+        }
+
+        private fun enqueuePendingInsight(insight: ProactiveInsight) = synchronized(pendingQueue) {
+            pendingQueue.offer(insight)
+            publishPendingLocked()
+        }
+
+        /** Takes insight [id] out of the queue, or the most important one when [id] is null or gone. */
+        private fun takePendingInsight(id: String? = null): ProactiveInsight? = synchronized(pendingQueue) {
+            val taken = id?.let { pendingQueue.remove(it) } ?: pendingQueue.poll()
+            publishPendingLocked()
+            taken
+        }
+
+        private fun removePendingInsight(id: String) = synchronized(pendingQueue) {
+            if (pendingQueue.remove(id) != null) publishPendingLocked()
+        }
+
+        /** String extra: the insight a proactive notification's actions refer to. */
+        private const val EXTRA_INSIGHT_ID = "com.treko.assistant.extra.INSIGHT_ID"
 
         private val _isProactiveCheckRunning = MutableStateFlow(false)
         val isProactiveCheckRunning: StateFlow<Boolean> = _isProactiveCheckRunning.asStateFlow()
@@ -432,7 +467,11 @@ class TrekoAssistantService : Service() {
                                 trace?.stage("catalog", System.currentTimeMillis() - catalogStartMs)
                                 trace?.note("frigate_busy=${frigateBusy.sorted().ifEmpty { listOf("none") }.joinToString(",")}")
                             }
-                            fun idsOf(g: HomeAssistantClient.HaCameraGroup) = setOf(g.primaryEntityId, g.snapshotEntityId)
+                            // The camera whose detector fired is always looked at, even if its
+                            // sensor already turned off by now.
+                            trace?.cameraEntityId?.let { frigateBusy = frigateBusy + it }
+                            fun idsOf(g: HomeAssistantClient.HaCameraGroup) =
+                                setOfNotNull(g.primaryEntityId, g.snapshotEntityId, g.liveEntityId)
                             fun candidateOf(g: HomeAssistantClient.HaCameraGroup) = ProactiveCameraCandidate(
                                 friendlyName = g.friendlyName,
                                 entityId = g.snapshotEntityId.ifBlank { g.primaryEntityId },
@@ -441,7 +480,11 @@ class TrekoAssistantService : Service() {
                             // Cameras where Frigate sees something now go first, so a detection
                             // is always looked at; the remaining slots rotate as before.
                             val busy = groups.filter { g -> idsOf(g).any { it in frigateBusy } }.map(::candidateOf)
-                            val others = groups.filter { g -> idsOf(g).none { it in frigateCameras } }.map(::candidateOf)
+                            val others = groups.filter { g -> idsOf(g).none { it in frigateCameras || it in frigateBusy } }.map(::candidateOf)
+                            // The camera each look is about: the trigger's own entity when it is in that group.
+                            val mainEntityOf = groups.associate { g ->
+                                candidateOf(g).entityId to (trace?.cameraEntityId?.takeIf { it in idsOf(g) } ?: g.primaryEntityId)
+                            }
                             val busyPicked = busy.take(3)
                             val selected = busyPicked + TrekoProactiveManager.selectImportantCamerasForScan(
                                 candidates = others,
@@ -469,7 +512,8 @@ class TrekoAssistantService : Service() {
                                                 cameraName = cam.friendlyName,
                                                 entityId = cam.entityId,
                                                 visionReport = report,
-                                                hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report)
+                                                hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report),
+                                                cameraEntityId = mainEntityOf[cam.entityId]
                                             )
                                         }
                                         trace?.look(
@@ -527,18 +571,17 @@ class TrekoAssistantService : Service() {
             ensureProactiveNotificationChannel(appCtx)
             val manager = appCtx.getSystemService(NotificationManager::class.java) ?: return
 
-            val openIntent = Intent(appCtx, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            val contentPendingIntent = PendingIntent.getActivity(
+            val contentPendingIntent = AlertNotifications.openAppIntent(
                 appCtx,
                 PROACTIVE_NOTIFICATION_ID,
-                openIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                insight.alertId,
+                extraFlags = Intent.FLAG_ACTIVITY_CLEAR_TOP
             )
 
+            // The actions act on the insight shown, not on whatever is first in the queue.
             val speakIntent = Intent(appCtx, TrekoAssistantService::class.java).apply {
                 action = ACTION_CONSUME_PROACTIVE_INSIGHT
+                putExtra(EXTRA_INSIGHT_ID, insight.id)
             }
             val speakPendingIntent = PendingIntent.getService(
                 appCtx,
@@ -549,6 +592,7 @@ class TrekoAssistantService : Service() {
 
             val dismissIntent = Intent(appCtx, TrekoAssistantService::class.java).apply {
                 action = ACTION_DISMISS_PROACTIVE_INSIGHT
+                putExtra(EXTRA_INSIGHT_ID, insight.id)
             }
             val dismissPendingIntent = PendingIntent.getService(
                 appCtx,
@@ -580,9 +624,19 @@ class TrekoAssistantService : Service() {
 
             try {
                 manager.notify(PROACTIVE_NOTIFICATION_ID, notification)
+                AlertRecording.markDelivered(insight, notified = manager.areNotificationsEnabled())
             } catch (e: SecurityException) {
                 TrekoLogBuffer.w("TrekoService", "Notification permission missing for proactive alert: ${e.message}")
             }
+        }
+
+        /**
+         * An insight that could not be spoken now: queued for later. A camera alert has its own
+         * high-importance notification with the picture; anything else gets the proactive one.
+         */
+        private fun holdInsightForLater(context: Context, insight: ProactiveInsight) {
+            enqueuePendingInsight(insight)
+            if (insight.category != ProactiveCategory.CAMERA_ANOMALY) postProactiveNotification(context, insight)
         }
 
         private fun cancelProactiveNotification(context: Context) {
@@ -605,18 +659,25 @@ class TrekoAssistantService : Service() {
                 try {
                     val prefs = TrekoPreferences(appCtx)
                     val manager = getOrCreateProactiveManager(appCtx)
-                    val insight = manager.evaluateNow(
+                    val found = manager.evaluateNow(
                         includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
                         force = true,
                         assistantName = resolveAssistantName(appCtx)
                     ) ?: return@launch
+                    TrekoAlertLog.init(appCtx)
+                    val insight = AlertRecording.recordInsight(found, trace = null)
+                    if (insight.category == ProactiveCategory.CAMERA_ANOMALY) {
+                        val haUrl = prefs.haUrl.trim()
+                        val haToken = prefs.haToken.trim()
+                        val client = if (haUrl.isBlank() || haToken.isBlank()) null else HomeAssistantClient(haUrl, haToken)
+                        AlertRecording.announceCameraAlert(appCtx, insight, proactiveFallbackScope, client, trace = null)
+                    }
                     val shouldSpeak = (forceSpeak ?: prefs.proactiveSpeakOutLoud) && hasMicPermission(appCtx)
                     if (shouldSpeak) {
                         pendingProactiveDelivery = insight
                         startService(appCtx)
                     } else {
-                        _pendingProactiveInsight.value = insight
-                        postProactiveNotification(appCtx, insight)
+                        holdInsightForLater(appCtx, insight)
                     }
                 } finally {
                     _isProactiveCheckRunning.value = false
@@ -624,11 +685,11 @@ class TrekoAssistantService : Service() {
             }
         }
 
-        fun consumePendingProactiveInsight(context: Context) {
+        /** Speaks pending insight [insightId], or the most important one. */
+        fun consumePendingProactiveInsight(context: Context, insightId: String? = null) {
             val appCtx = context.applicationContext
             cancelProactiveNotification(appCtx)
-            val insight = _pendingProactiveInsight.value ?: return
-            _pendingProactiveInsight.value = null
+            val insight = takePendingInsight(insightId) ?: return
             val active = instance
             if (active != null) {
                 active.serviceScope.launch {
@@ -645,8 +706,9 @@ class TrekoAssistantService : Service() {
             }
         }
 
-        fun dismissPendingProactiveInsight(context: Context) {
-            _pendingProactiveInsight.value = null
+        /** Drops pending insight [insightId] (or the most important one); others stay queued. */
+        fun dismissPendingProactiveInsight(context: Context, insightId: String? = null) {
+            takePendingInsight(insightId)
             cancelProactiveNotification(context.applicationContext)
         }
 
@@ -952,6 +1014,7 @@ class TrekoAssistantService : Service() {
         _isMuted.value = prefs.isMicMuted
 
         TimerAlarms.install(this)
+        TrekoAlertLog.init(this)
         _isCinemaMode.value = prefs.cinemaModeEnabled
         syncPolicyPreferences(prefs)
 
@@ -1527,13 +1590,16 @@ class TrekoAssistantService : Service() {
         if (tts.language != chosen) tts.language = chosen
     }
 
-    /** Short spoken alert with the phone's own voice, only when Treko is not mid-conversation. */
-    private suspend fun speakWatchAlert(text: String) {
-        if (_serviceState.value != TrekoState.IDLE || isTrainingMode) return
-        val tts = ensureLocalTtsReady() ?: return
+    /**
+     * Short spoken alert with the phone's own voice, only when Treko is not mid-conversation.
+     * Returns true only when the text was handed to the phone's voice.
+     */
+    private suspend fun speakWatchAlert(text: String): Boolean {
+        if (_serviceState.value != TrekoState.IDLE || isTrainingMode) return false
+        val tts = ensureLocalTtsReady() ?: return false
         // Watch alerts come from localized resources: speak them in the phone's language.
         setLocalTtsLanguage(tts, preferPhoneLanguage = true)
-        tts.speak(text, TextToSpeech.QUEUE_ADD, null, "watch_${System.currentTimeMillis()}")
+        return tts.speak(text, TextToSpeech.QUEUE_ADD, null, "watch_${System.currentTimeMillis()}") == TextToSpeech.SUCCESS
     }
 
     private val skillRefreshIntervalMs = 15 * 60_000L
@@ -3295,6 +3361,7 @@ class TrekoAssistantService : Service() {
                     when (action) {
                         "deliver_pending", "read_pending_alert", "get_pending", "pending", "leer", "read", "briefing" -> {
                             val activeVoice = activeVoiceProactiveInsight
+                            // Most important first (a camera alert before any briefing).
                             val pending = _pendingProactiveInsight.value
                             val recent = proactiveManager.lastDeliveredInsight?.takeIf {
                                 (System.currentTimeMillis() - it.createdAtMs) < 180_000L
@@ -3302,7 +3369,8 @@ class TrekoAssistantService : Service() {
                             val chosen = activeVoice ?: pending ?: recent
                             if (chosen != null) {
                                 activeVoiceProactiveInsight = null
-                                _pendingProactiveInsight.value = null
+                                removePendingInsight(chosen.id)
+                                if (chosen === pending) AlertRecording.markDelivered(chosen, spoken = true)
                                 cancelProactiveNotification(this@TrekoAssistantService)
                                 "Di esto al usuario en voz alta ahora mismo con naturalidad: \"${chosen.spokenSpeechText}\"\nContexto detallado para preguntas de seguimiento: ${chosen.spokenPrompt}"
                             } else {
@@ -3312,8 +3380,9 @@ class TrekoAssistantService : Service() {
                                     includeCameraScan = false,
                                     force = true,
                                     assistantName = resolveAssistantName(this@TrekoAssistantService)
-                                )
+                                )?.let { AlertRecording.recordInsight(it, trace = null) }
                                 if (fresh != null) {
+                                    AlertRecording.markDelivered(fresh, spoken = true)
                                     "Di esto al usuario en voz alta ahora mismo: \"${fresh.spokenSpeechText}\"\nContexto adicional: ${fresh.spokenPrompt}"
                                 } else {
                                     "No hay avisos pendientes ni anomalías en este momento."
@@ -3325,8 +3394,10 @@ class TrekoAssistantService : Service() {
                                 includeCameraScan = prefs.proactiveCameraAnomalyEnabled,
                                 force = true,
                                 assistantName = resolveAssistantName(this@TrekoAssistantService)
-                            )
+                            )?.let { AlertRecording.recordInsight(it, trace = null) }
                             if (fresh != null) {
+                                // The model reads it to the user as the answer.
+                                AlertRecording.markDelivered(fresh, spoken = true)
                                 "Resultado del chequeo proactivo (${fresh.title}): ${fresh.spokenSpeechText}"
                             } else {
                                 "Chequeo completado: todo en calma."
@@ -3742,8 +3813,7 @@ class TrekoAssistantService : Service() {
             ACTION_RELOAD_CONFIG -> applyLatestPreferences()
             ACTION_CONSUME_PROACTIVE_INSIGHT -> {
                 cancelProactiveNotification(this)
-                val insight = _pendingProactiveInsight.value
-                _pendingProactiveInsight.value = null
+                val insight = takePendingInsight(intent?.getStringExtra(EXTRA_INSIGHT_ID))
                 if (insight != null) {
                     serviceScope.launch {
                         deliverProactiveInsightByVoice(insight, fromUserTap = true)
@@ -3753,7 +3823,7 @@ class TrekoAssistantService : Service() {
                 }
             }
             ACTION_DISMISS_PROACTIVE_INSIGHT -> {
-                dismissPendingProactiveInsight(this)
+                dismissPendingProactiveInsight(this, intent?.getStringExtra(EXTRA_INSIGHT_ID))
             }
             ACTION_TRIGGER_PROACTIVE_CHECK -> {
                 serviceScope.launch {
@@ -3931,7 +4001,14 @@ class TrekoAssistantService : Service() {
             )
             if (insight == null) {
                 if (!camerasOnly) TrekoLogBuffer.d(TAG, "Proactive check: nothing to say right now.")
+                // Every sentinel run that looked is in the alerts log, "no news" included.
+                trace?.let { AlertRecording.recordSentinelCheck(this, it) }
                 return true
+            }
+            val recorded = AlertRecording.recordInsight(insight, trace)
+            if (recorded.category == ProactiveCategory.CAMERA_ANOMALY) {
+                // Always a high-importance notification with the picture, spoken or not.
+                AlertRecording.announceCameraAlert(this, recorded, serviceScope, currentWatchHaClient(), trace)
             }
 
             val speakOutLoud = overrideSpeak ?: prefs.proactiveSpeakOutLoud
@@ -3948,7 +4025,7 @@ class TrekoAssistantService : Service() {
 
             if (canSpeakAutomatically) {
                 trace?.decide("alert_spoken", override = true)
-                deliverProactiveInsightByVoice(insight, fromUserTap = false)
+                deliverProactiveInsightByVoice(recorded, fromUserTap = false)
             } else {
                 trace?.decide(
                     "alert_notified",
@@ -3961,8 +4038,7 @@ class TrekoAssistantService : Service() {
                     },
                     override = true
                 )
-                _pendingProactiveInsight.value = insight
-                postProactiveNotification(this, insight)
+                holdInsightForLater(this, recorded)
             }
             return true
         } catch (e: Exception) {
@@ -3976,7 +4052,8 @@ class TrekoAssistantService : Service() {
 
     private suspend fun deliverProactiveInsightByVoice(insight: ProactiveInsight, fromUserTap: Boolean) {
         cancelProactiveNotification(this)
-        _pendingProactiveInsight.value = null
+        removePendingInsight(insight.id)
+        AlertRecording.markDelivered(insight, spoken = true)
 
         if (fromUserTap && _isMuted.value) {
             TrekoPreferences(this).isMicMuted = false

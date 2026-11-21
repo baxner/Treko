@@ -1,18 +1,13 @@
 package com.treko.assistant.service
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.graphics.BitmapFactory
-import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.RingtoneManager
-import androidx.core.app.NotificationCompat
-import com.treko.assistant.MainActivity
 import com.treko.assistant.R
 import com.treko.assistant.data.SentinelRunTrace
+import com.treko.core.common.data.TrekoAlertLog
+import com.treko.core.common.model.AlertEvent
+import com.treko.core.common.model.AlertSource
 import com.treko.core.common.util.TrekoLogBuffer
 import com.treko.core.mcp.HomeAssistantClient
 import com.treko.core.mcp.watch.CameraWatchBook
@@ -24,6 +19,7 @@ import com.treko.core.mcp.watch.WatchSensor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -35,7 +31,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * "Tell me when you see someone in …": keeps the watches, listens to Home Assistant in real
@@ -46,8 +41,11 @@ class CameraWatchCoordinator(
     private val context: Context,
     private val scope: CoroutineScope,
     private val haClientProvider: () -> HomeAssistantClient?,
-    /** Speaks a short alert with the phone's voice; the service decides if it may talk now. */
-    private val speak: suspend (String) -> Unit,
+    /**
+     * Speaks a short alert with the phone's voice; the service decides if it may talk now.
+     * Returns true only when it was actually handed to the voice.
+     */
+    private val speak: suspend (String) -> Boolean,
     private val addChat: (String) -> Unit,
     /** True when the camera sentinel should follow Frigate detections. */
     private val sentinelEnabled: () -> Boolean = { false },
@@ -62,8 +60,6 @@ class CameraWatchCoordinator(
     private var streamClient: HomeAssistantClient? = null
     private var catalog: List<WatchSensor> = emptyList()
     private var expiryJob: Job? = null
-    /** Seeded from the clock so ids do not repeat across restarts while alerts are on screen. */
-    private val notificationSeq = AtomicInteger(((System.currentTimeMillis() / 1000) % 100_000).toInt())
     @Volatile private var released = false
     /** Last problem of the live connection; null while alerts can arrive. */
     @Volatile private var liveProblem: String? = null
@@ -78,7 +74,7 @@ class CameraWatchCoordinator(
 
     /** Restores saved watches and reconnects; call on service start and on config change. */
     fun start() {
-        ensureChannel()
+        AlertNotifications.ensureWatchChannel(context)
         scope.launch(Dispatchers.IO) {
             refreshCatalog()
             // Rebuilt if the Home Assistant URL/token changed (see syncStream) or the live
@@ -260,7 +256,8 @@ class CameraWatchCoordinator(
             sensorId = entityId,
             cameraEntityId = sensor?.cameraEntityId,
             area = sensor?.areaName.orEmpty(),
-            label = sensor?.objectType
+            label = sensor?.objectType,
+            snapshotEntityId = sensor?.snapshotEntityId
         )
         val camera = sensor?.cameraEntityId
         if (sensor == null || camera == null) {
@@ -283,6 +280,11 @@ class CameraWatchCoordinator(
             TrekoLogBuffer.i(TAG, trace.format())
             return
         }
+        // The detector's own picture, fetched while the vision model looks: if there is an
+        // alert, its notification and the alerts log get the frame the detector saw.
+        trace.detectionImage = sensor.snapshotEntityId?.let { imageEntity ->
+            scope.async(Dispatchers.IO) { haClientProvider()?.fetchEntityImage(imageEntity) }
+        }
         val ran = try {
             withContext(trace) { onSentinelDetection(sensor, trace) }
         } catch (e: Exception) {
@@ -295,6 +297,8 @@ class CameraWatchCoordinator(
             synchronized(lastSentinelRunByCamera) { lastSentinelRunByCamera.remove(camera) }
             trace.decide("not_run", "sentinel check did not run")
         }
+        // Only an alert uses the picture.
+        if (trace.decision?.startsWith("alert") != true) trace.detectionImage?.cancel()
         TrekoLogBuffer.i(TAG, trace.format())
     }
 
@@ -303,29 +307,50 @@ class CameraWatchCoordinator(
         val area = sensor?.areaName ?: hit.watch.areaNames.firstOrNull().orEmpty()
         val text = alertText(sensor, hit.watch.objectGroup, area)
         TrekoLogBuffer.i(TAG, "Watch alert: $text (${hit.sensorId})")
-        val notificationId = NOTIFICATION_BASE_ID + (notificationSeq.getAndIncrement() % 100_000)
+        val notificationId = AlertNotifications.nextWatchNotificationId()
+        val alertId = TrekoAlertLog.record(
+            AlertEvent(
+                timestampMs = now(),
+                source = AlertSource.WATCH,
+                title = text,
+                place = area,
+                cameraEntityId = sensor?.cameraEntityId,
+                objectLabel = when {
+                    sensor?.source == WatchSensor.Source.GENERIC -> "motion"
+                    else -> sensor?.objectType ?: hit.watch.objectGroup
+                },
+                spokenSummary = text,
+                notificationId = notificationId,
+                extra = mapOf("sensor" to hit.sensorId, "watch" to hit.watch.id.toString())
+            )
+        )
 
         // 1. Right away: notification and voice. Nothing slow before this.
-        post(notificationId, text, null, null)
+        val notified = post(notificationId, text, null, null, alertId)
         addChat("👁 $text")
         val ringer = context.getSystemService(AudioManager::class.java)?.ringerMode
-        if (ringer == null || ringer == AudioManager.RINGER_MODE_NORMAL) {
-            speak(text)
-        }
+        val spoken = if (ringer == null || ringer == AudioManager.RINGER_MODE_NORMAL) speak(text) else false
+        TrekoAlertLog.update(alertId) { it.copy(notified = notified, spoken = spoken) }
 
         // 2. Then the picture, and a short description when a vision model is available.
         val client = haClientProvider() ?: return
         val (imageEntity, cameraEntity) = pictureSources(client, sensor)
+        if (cameraEntity != null && sensor?.cameraEntityId == null) {
+            TrekoAlertLog.update(alertId) { it.copy(cameraEntityId = cameraEntity) }
+        }
         val image = imageEntity?.let { client.fetchEntityImage(it) }
         val bitmap = image?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
-        if (bitmap != null) post(notificationId, text, null, bitmap)
+        if (bitmap != null) post(notificationId, text, null, bitmap, alertId)
+        // Kept for the alerts screen; encoding must not delay the description.
+        if (image != null) scope.launch { TrekoAlertLog.attachSnapshot(alertId, image) }
         val camera = cameraEntity ?: return
         val description = runCatching {
             client.analyzeCameraWithLlmVision(camera, context.getString(R.string.watch_vision_question))
         }.getOrNull()?.trim()
         if (!description.isNullOrBlank() && !description.startsWith("Error", ignoreCase = true)) {
-            post(notificationId, text, description, bitmap)
+            post(notificationId, text, description, bitmap, alertId)
             addChat("👁 $area: $description")
+            TrekoAlertLog.update(alertId) { it.copy(visionDescription = description) }
         }
     }
 
@@ -364,61 +389,8 @@ class CameraWatchCoordinator(
         else -> "personas"
     }
 
-    private fun post(id: Int, title: String, body: String?, picture: android.graphics.Bitmap?) {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val open = PendingIntent.getActivity(
-            context,
-            id,
-            Intent(context, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_treko_notif)
-            .setContentTitle("👁 $title")
-            .setContentText(body ?: context.getString(R.string.watch_alert_body))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_EVENT)
-            .setAutoCancel(true)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(open)
-        if (picture != null) {
-            builder.setLargeIcon(picture)
-            builder.setStyle(
-                NotificationCompat.BigPictureStyle()
-                    .bigPicture(picture)
-                    .bigLargeIcon(null as android.graphics.Bitmap?)
-                    .setSummaryText(body)
-            )
-        } else if (body != null) {
-            builder.setStyle(NotificationCompat.BigTextStyle().bigText(body))
-        }
-        try {
-            manager.notify(id, builder.build())
-        } catch (e: SecurityException) {
-            TrekoLogBuffer.w(TAG, "Cannot post watch alert (notification permission): ${e.message}")
-        }
-    }
-
-    private fun ensureChannel() {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            context.getString(R.string.watch_channel_name),
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = context.getString(R.string.watch_channel_desc)
-            enableVibration(true)
-            setSound(
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-        }
-        manager.createNotificationChannel(channel)
-    }
+    private fun post(id: Int, title: String, body: String?, picture: android.graphics.Bitmap?, alertId: Long): Boolean =
+        AlertNotifications.postCameraAlert(context, id, title, body, picture, alertId)
 
     private fun readList(args: JSONObject, key: String): List<String> {
         val raw = args.opt(key)
@@ -441,8 +413,7 @@ class CameraWatchCoordinator(
 
     companion object {
         private const val TAG = "CameraWatch"
-        const val CHANNEL_ID = "treko_watch_alerts"
-        private const val NOTIFICATION_BASE_ID = 3000
+        const val CHANNEL_ID = AlertNotifications.WATCH_CHANNEL_ID
         private val SENTINEL_OBJECTS = setOf("person", "car")
         private const val SENTINEL_COOLDOWN_MS = 10 * 60_000L
     }

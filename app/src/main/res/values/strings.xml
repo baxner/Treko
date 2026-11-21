@@ -433,4 +433,9 @@
     <string name="watch_chip">Watching: %1$s</string>
     <string name="watch_stop_cd">Stop watching</string>
     <string name="notification_watching">Watching: %1$s</string>
+    <!-- Alerts log (Avisos) -->
+    <string name="alert_sentinel_no_news_title">Nothing new at %1$s</string>
+    <string name="alert_sentinel_repeat_title">Same alert again at %1$s</string>
+    <string name="alert_place_unknown">the camera</string>
+    <string name="alert_timer_default_title">Timer</string>
 </resources>

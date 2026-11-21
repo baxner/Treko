@@ -1,6 +1,7 @@
 package com.treko.assistant.data
 
 import com.treko.core.common.util.LogText
+import kotlinx.coroutines.Deferred
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
@@ -19,8 +20,17 @@ class SentinelRunTrace(
     val area: String,
     /** Detector label (Frigate object: person, car…), when known. */
     val label: String?,
-    private val clockMs: () -> Long = { System.currentTimeMillis() }
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    /** The detector's own picture of the detection (Frigate image entity), when there is one. */
+    val snapshotEntityId: String? = null
 ) : AbstractCoroutineContextElement(Key) {
+
+    /**
+     * The detector's picture, fetched as soon as the run starts (in parallel with the vision
+     * call) for the alert's notification and the alerts log. Null when there is none.
+     */
+    @Volatile
+    var detectionImage: Deferred<ByteArray?>? = null
 
     companion object Key : CoroutineContext.Key<SentinelRunTrace> {
         const val VERDICT_PREVIEW_CHARS = 160
@@ -40,8 +50,8 @@ class SentinelRunTrace(
     private val stages = LinkedHashMap<String, Long>()
     private val looks = ArrayList<Look>()
     private val notes = ArrayList<String>()
-    private var decision: String? = null
-    private var reason: String? = null
+    private var decisionValue: String? = null
+    private var reasonValue: String? = null
 
     fun stage(name: String, durationMs: Long) {
         synchronized(lock) { stages[name] = (stages[name] ?: 0L) + durationMs.coerceAtLeast(0L) }
@@ -74,13 +84,21 @@ class SentinelRunTrace(
      */
     fun decide(decision: String, reason: String? = null, override: Boolean = false) {
         synchronized(lock) {
-            if (this.decision != null && !override) return
-            this.decision = decision
-            this.reason = reason
+            if (decisionValue != null && !override) return
+            decisionValue = decision
+            reasonValue = reason
         }
     }
 
-    val hasDecision: Boolean get() = synchronized(lock) { decision != null }
+    val hasDecision: Boolean get() = synchronized(lock) { decisionValue != null }
+
+    /** Outcome so far ("alert", "normal", "suppressed", "skipped"…), null if none yet. */
+    val decision: String? get() = synchronized(lock) { decisionValue }
+
+    val reason: String? get() = synchronized(lock) { reasonValue }
+
+    /** The cameras looked at so far, in order. */
+    fun looks(): List<Look> = synchronized(lock) { looks.toList() }
 
     /** The single log line for this run. */
     fun format(nowMs: Long = clockMs()): String = synchronized(lock) {
@@ -105,8 +123,8 @@ class SentinelRunTrace(
             append(" | stages:")
             stages.forEach { (name, ms) -> append(' ').append(name).append('=').append(ms).append("ms") }
             append(" total=").append((nowMs - startedAtMs).coerceAtLeast(0L)).append("ms")
-            append(" | decision=").append(decision ?: "unknown")
-            reason?.let { append(" reason=\"").append(it).append('"') }
+            append(" | decision=").append(decisionValue ?: "unknown")
+            reasonValue?.let { append(" reason=\"").append(it).append('"') }
         }
     }
 }

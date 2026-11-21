@@ -32,9 +32,12 @@ data class ProactiveCameraCandidate(
  */
 data class CameraAnomalyCheckResult(
     val cameraName: String,
+    /** Entity the vision model looked at (the camera or its snapshot sibling). */
     val entityId: String,
     val visionReport: String,
-    val hasAnomaly: Boolean
+    val hasAnomaly: Boolean,
+    /** The camera itself (Home Assistant camera group's main entity), when known. */
+    val cameraEntityId: String? = null
 )
 
 /**
@@ -64,7 +67,15 @@ data class ProactiveInsight(
     val spokenPrompt: String,
     val fingerprint: String,
     val createdAtMs: Long = System.currentTimeMillis(),
-    val spokenSpeechText: String = summaryText
+    val spokenSpeechText: String = summaryText,
+    /** Camera alerts: the cameras where something was seen (main camera entity), first = primary. */
+    val cameraEntityIds: List<String> = emptyList(),
+    /** Camera alerts: their names, in the same order. */
+    val cameraNames: List<String> = emptyList(),
+    /** Camera alerts: what the vision model reported. */
+    val visionReport: String? = null,
+    /** Entry of the alerts log for this insight, once it was recorded. */
+    val alertId: Long? = null
 )
 
 /**
@@ -557,7 +568,10 @@ class TrekoProactiveManager(
                 spokenPrompt = spokenPrompt,
                 fingerprint = fp,
                 createdAtMs = now,
-                spokenSpeechText = spokenSpeech
+                spokenSpeechText = spokenSpeech,
+                cameraEntityIds = anomalousCameras.map { it.cameraEntityId ?: it.entityId },
+                cameraNames = anomalousCameras.map { it.cameraName },
+                visionReport = combinedReport
             ).also { recordDeliveredInsight(it) }
         }
 

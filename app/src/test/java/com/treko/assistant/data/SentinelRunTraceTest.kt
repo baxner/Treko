@@ -104,4 +104,45 @@ class SentinelRunTraceTest {
         withContext(off) { manager.evaluateNow(includeCameraScan = false, hourOfDay = 15, camerasOnly = true) }
         assertTrue(off.format().contains("decision=skipped reason=\"camera scan is off\""))
     }
+
+    @Test
+    fun exposesOutcomeAndLooksForTheAlertsLog() {
+        val t = trace()
+        assertNull(t.decision)
+        t.look("Patio", "camera.patio_snapshot", 10, "Todo tranquilo", anomaly = false)
+        t.decide("normal", "no anomaly in the verdict")
+        t.decide("alert") // the first decision sticks
+        assertEquals("normal", t.decision)
+        assertEquals("no anomaly in the verdict", t.reason)
+        assertEquals(listOf("Todo tranquilo"), t.looks().map { it.verdict })
+        t.decide("alert_spoken", override = true)
+        assertEquals("alert_spoken", t.decision)
+        assertNull(t.reason)
+    }
+
+    @Test
+    fun cameraAlertInsightCarriesTheCamerasAndReport() = runBlocking {
+        val sources = object : ProactiveDataSources {
+            override suspend fun getHomeStatusSummary(): String = ""
+            override suspend fun scanPriorityCamerasForAnomalies(homeStatusSummary: String) = listOf(
+                CameraAnomalyCheckResult(
+                    cameraName = "Patio",
+                    entityId = "camera.patio_snapshot",
+                    visionReport = "[ANOMALIA] Una persona trepa la barda",
+                    hasAnomaly = true,
+                    cameraEntityId = "camera.patio"
+                )
+            )
+            override suspend fun getHabitsSummary(): String = ""
+            override suspend fun getTasksSummary(): String = ""
+            override suspend fun getVaultMemories(): List<Pair<String, String>> = emptyList()
+            override fun getActiveTimersCount(): Int = 0
+        }
+        val insight = TrekoProactiveManager(sources).evaluateNow(includeCameraScan = true, hourOfDay = 15, camerasOnly = true)
+        assertNotNull(insight)
+        assertEquals(listOf("camera.patio"), insight!!.cameraEntityIds)
+        assertEquals(listOf("Patio"), insight.cameraNames)
+        assertTrue(insight.visionReport!!.contains("trepa la barda"))
+        assertNull(insight.alertId)
+    }
 }

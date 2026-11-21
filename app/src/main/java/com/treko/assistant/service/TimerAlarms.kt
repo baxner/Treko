@@ -14,6 +14,9 @@ import androidx.core.app.NotificationCompat
 import com.treko.assistant.MainActivity
 import com.treko.assistant.R
 import com.treko.core.common.data.TimerPersistence
+import com.treko.core.common.data.TrekoAlertLog
+import com.treko.core.common.model.AlertEvent
+import com.treko.core.common.model.AlertSource
 import com.treko.core.common.data.TimerScheduler
 import com.treko.core.common.data.TrekoTimerManager
 import com.treko.core.common.util.TrekoLogBuffer
@@ -85,17 +88,29 @@ object TimerAlarms {
         TrekoTimerManager.onAlarmFired(key)
         TrekoLogBuffer.i(TAG, "Timer finished: $label")
         TrekoAssistantService.addChatMessage(TrekoAssistantService.resolveAssistantName(context), "⏰ $label")
-        postFinishedNotification(context, key, label)
+        TrekoAlertLog.init(context)
+        val notificationId = NOTIFICATION_BASE_ID + key
+        val alertId = TrekoAlertLog.record(
+            AlertEvent(
+                timestampMs = System.currentTimeMillis(),
+                source = AlertSource.TIMER,
+                title = label.ifBlank { context.getString(R.string.alert_timer_default_title) },
+                objectLabel = if (key == TrekoTimerManager.MAIN_TIMER_KEY) "main_timer" else "timer",
+                spokenSummary = context.getString(R.string.timer_finished_notification_body),
+                notificationId = notificationId,
+                // It already rang loudly: kept in the history, not added to the unread badge.
+                read = true
+            )
+        )
+        val notified = postFinishedNotification(context, notificationId, label, alertId)
+        TrekoAlertLog.update(alertId) { it.copy(notified = notified) }
+        // A receiver's process may be gone soon after it returns: write the log now.
+        TrekoAlertLog.flush()
     }
 
-    private fun postFinishedNotification(context: Context, key: Int, label: String) {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val openApp = PendingIntent.getActivity(
-            context,
-            NOTIFICATION_BASE_ID + key,
-            Intent(context, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+    private fun postFinishedNotification(context: Context, notificationId: Int, label: String, alertId: Long): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        val openApp = AlertNotifications.openAppIntent(context, notificationId, alertId)
         val alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
@@ -108,10 +123,12 @@ object TimerAlarms {
             .setAutoCancel(true)
             .setContentIntent(openApp)
             .build()
-        try {
-            manager.notify(NOTIFICATION_BASE_ID + key, notification)
+        return try {
+            manager.notify(notificationId, notification)
+            manager.areNotificationsEnabled()
         } catch (e: SecurityException) {
             TrekoLogBuffer.w(TAG, "Cannot post timer notification (permission missing): ${e.message}")
+            false
         }
     }
 }

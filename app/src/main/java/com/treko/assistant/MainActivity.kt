@@ -55,6 +55,7 @@ import com.treko.assistant.ui.theme.SurfaceDark
 import com.treko.assistant.ui.theme.TextPrimary
 import com.treko.assistant.ui.theme.TrekoTheme
 import com.treko.core.audio.NativeAudioEngine
+import com.treko.core.common.data.TrekoAlertLog
 import com.treko.core.common.data.TrekoPreferences
 import com.treko.core.common.model.TrekoState
 
@@ -76,6 +77,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         TimerAlarms.install(this)
+        // The alerts log loads in the background; the UI observes TrekoAlertLog.events.
+        TrekoAlertLog.init(this)
         TrekoAssistantService.isUiAlive = true
 
         refreshPermissionState()
