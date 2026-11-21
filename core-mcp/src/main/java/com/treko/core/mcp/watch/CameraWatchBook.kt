@@ -17,7 +17,12 @@ data class CameraWatch(
 )
 
 /** A sensor fired for an active watch and the alert is due. */
-data class WatchHit(val watch: CameraWatch, val sensorId: String)
+data class WatchHit(
+    val watch: CameraWatch,
+    val sensorId: String,
+    /** At least one one-shot watch was used up: the watched set changed. */
+    val consumedOneShot: Boolean = false
+)
 
 interface WatchPersistence {
     fun save(encoded: String)
@@ -108,7 +113,7 @@ class CameraWatchBook(
             watches.removeAll(oneShots.toSet())
             persistLocked()
         }
-        WatchHit(covering.first(), sensorId)
+        WatchHit(covering.first(), sensorId, consumedOneShot = oneShots.isNotEmpty())
     }
 
     private fun pruneLocked(nowMs: Long) {

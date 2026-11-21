@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         TimerAlarms.install(this)
+        TrekoAssistantService.isUiAlive = true
 
         refreshPermissionState()
         checkAndRequestPermissions()
@@ -158,6 +159,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (!isChangingConfigurations) TrekoAssistantService.isUiAlive = false
         val prefs = TrekoPreferences(applicationContext)
         // Keep the service while the user has camera watches running.
         if (!isChangingConfigurations && !prefs.isAlwaysListeningInBackground &&

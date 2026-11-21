@@ -275,6 +275,10 @@ class TrekoAssistantService : Service() {
         /** Places Treko is watching for the user (camera watches), for the UI. */
         val activeWatchAreas: StateFlow<List<String>> = _activeWatchAreas.asStateFlow()
 
+        /** The main activity is open (set by MainActivity). */
+        @Volatile
+        var isUiAlive: Boolean = false
+
         fun stopAllWatches() {
             instance?.cameraWatch?.stopAll()
         }
@@ -406,24 +410,23 @@ class TrekoAssistantService : Service() {
                                     frigateBusy = sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
                                 }
                             }
-                            val candidates = groups
-                                .filter { group ->
-                                    val ids = setOf(group.primaryEntityId, group.snapshotEntityId)
-                                    ids.none { it in frigateCameras } || ids.any { it in frigateBusy }
-                                }
-                                .map { group ->
-                                    ProactiveCameraCandidate(
-                                        friendlyName = group.friendlyName,
-                                        entityId = group.snapshotEntityId.ifBlank { group.primaryEntityId },
-                                        state = group.state
-                                    )
-                                }
-                            val selected = TrekoProactiveManager.selectImportantCamerasForScan(
-                                candidates = candidates,
-                                homeStatusSummary = homeStatusSummary,
-                                maxCameras = 3,
-                                rotationOffset = proactiveCameraCycle.getAndIncrement()
+                            fun idsOf(g: HomeAssistantClient.HaCameraGroup) = setOf(g.primaryEntityId, g.snapshotEntityId)
+                            fun candidateOf(g: HomeAssistantClient.HaCameraGroup) = ProactiveCameraCandidate(
+                                friendlyName = g.friendlyName,
+                                entityId = g.snapshotEntityId.ifBlank { g.primaryEntityId },
+                                state = g.state
                             )
+                            // Cameras where Frigate sees something now go first, so a detection
+                            // is always looked at; the remaining slots rotate as before.
+                            val busy = groups.filter { g -> idsOf(g).any { it in frigateBusy } }.map(::candidateOf)
+                            val others = groups.filter { g -> idsOf(g).none { it in frigateCameras } }.map(::candidateOf)
+                            val busyPicked = busy.take(3)
+                            val selected = busyPicked + TrekoProactiveManager.selectImportantCamerasForScan(
+                                candidates = others,
+                                homeStatusSummary = homeStatusSummary,
+                                maxCameras = 3 - busyPicked.size,
+                                rotationOffset = proactiveCameraCycle.getAndIncrement()
+                            ).takeIf { busyPicked.size < 3 }.orEmpty()
                             if (selected.isEmpty()) return emptyList()
 
                             return coroutineScope {
@@ -1448,18 +1451,37 @@ class TrekoAssistantService : Service() {
         )
         cameraWatch = coordinator
         serviceScope.launch {
+            var hadWatches = false
             coordinator.activeAreas.collect { areas ->
                 _activeWatchAreas.value = areas
                 updateNotification(_serviceState.value)
+                // Kept alive only for the watches: once they end, leave as the user set it.
+                if (hadWatches && areas.isEmpty() && !isUiAlive &&
+                    !TrekoPreferences(this@TrekoAssistantService).isAlwaysListeningInBackground
+                ) {
+                    TrekoLogBuffer.i(TAG, "Last camera watch ended with the app closed; stopping service.")
+                    stopSelf()
+                }
+                hadWatches = areas.isNotEmpty()
             }
         }
         coordinator.start()
+    }
+
+    /** Spanish (es-MX, es) by default; the phone's language first for localized texts. */
+    private fun setLocalTtsLanguage(tts: TextToSpeech, preferPhoneLanguage: Boolean) {
+        val spanish = listOf(Locale("es", "MX"), Locale("es"))
+        val order = if (preferPhoneLanguage) listOf(Locale.getDefault()) + spanish else spanish
+        val chosen = order.firstOrNull { tts.isLanguageAvailable(it) >= TextToSpeech.LANG_AVAILABLE } ?: Locale("es")
+        if (tts.language != chosen) tts.language = chosen
     }
 
     /** Short spoken alert with the phone's own voice, only when Treko is not mid-conversation. */
     private suspend fun speakWatchAlert(text: String) {
         if (_serviceState.value != TrekoState.IDLE || isTrainingMode) return
         val tts = ensureLocalTtsReady() ?: return
+        // Watch alerts come from localized resources: speak them in the phone's language.
+        setLocalTtsLanguage(tts, preferPhoneLanguage = true)
         tts.speak(text, TextToSpeech.QUEUE_ADD, null, "watch_${System.currentTimeMillis()}")
     }
 
@@ -1480,29 +1502,29 @@ class TrekoAssistantService : Service() {
             return
         }
         skillRefreshJob = serviceScope.launch(Dispatchers.IO) {
-            val prefs = TrekoPreferences(this@TrekoAssistantService)
-            val haUrl = prefs.haUrl.trim()
-            val haToken = prefs.haToken.trim()
-            val found = if (haUrl.isBlank() || haToken.isBlank()) {
-                emptySet()
-            } else {
-                // Unreachable Home Assistant: keep the last known skills, retry next time.
-                HomeAssistantClient(haUrl, haToken).detectSkills()
-            }
-            if (found != null) {
-                lastSkillRefreshMs = System.currentTimeMillis()
-                val previous = prefs.detectedSkills
-                wsClient?.availableSkills = found
-                if (found != previous) {
-                    prefs.detectedSkills = found
-                    TrekoLogBuffer.i(TAG, "Home Assistant skills changed: $previous -> $found")
-                    announceToolsChanged()
-                }
-            }
-            if (skillRefreshPending) {
+            do {
                 skillRefreshPending = false
-                withContext(Dispatchers.Main) { refreshHomeAssistantSkills(force = true) }
-            }
+                val prefs = TrekoPreferences(this@TrekoAssistantService)
+                val haUrl = prefs.haUrl.trim()
+                val haToken = prefs.haToken.trim()
+                val found = if (haUrl.isBlank() || haToken.isBlank()) {
+                    emptySet()
+                } else {
+                    // Unreachable Home Assistant: null keeps the last known skills.
+                    HomeAssistantClient(haUrl, haToken).detectSkills()
+                }
+                if (found != null) {
+                    lastSkillRefreshMs = System.currentTimeMillis()
+                    val previous = prefs.detectedSkills
+                    wsClient?.availableSkills = found
+                    if (found != previous) {
+                        prefs.detectedSkills = found
+                        TrekoLogBuffer.i(TAG, "Home Assistant skills changed: $previous -> $found")
+                        withContext(Dispatchers.Main) { announceToolsChanged() }
+                    }
+                }
+                // Settings changed while detecting: detect again with the new ones.
+            } while (skillRefreshPending)
         }
     }
 
@@ -3906,10 +3928,7 @@ class TrekoAssistantService : Service() {
                             val ready = (status == TextToSpeech.SUCCESS)
                             isLocalTtsReady.set(ready)
                             if (ready) {
-                                // The phone's language (alert texts follow it too); Spanish as fallback.
-                                created?.language = listOf(Locale.getDefault(), Locale("es", "MX"), Locale("es")).firstOrNull {
-                                    (created?.isLanguageAvailable(it) ?: -1) >= TextToSpeech.LANG_AVAILABLE
-                                } ?: Locale("es")
+                                created?.let { setLocalTtsLanguage(it, preferPhoneLanguage = false) }
                                 created?.setAudioAttributes(
                                     AudioAttributes.Builder()
                                         .setUsage(AudioAttributes.USAGE_ASSISTANT)
@@ -3968,6 +3987,8 @@ class TrekoAssistantService : Service() {
                         if (id == utteranceId && cont.isActive) cont.resume(Unit)
                     }
                 })
+                // Proactive texts are written in Spanish.
+                setLocalTtsLanguage(tts, preferPhoneLanguage = false)
                 val res = tts.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
                 if (res != TextToSpeech.SUCCESS && cont.isActive) {
                     cont.resume(Unit)

@@ -77,8 +77,9 @@ class CameraWatchCoordinator(
         ensureChannel()
         scope.launch(Dispatchers.IO) {
             refreshCatalog()
-            // Rebuilt only if the Home Assistant URL/token changed (see syncStream).
-            syncStream(rebuild = false)
+            // Rebuilt if the Home Assistant URL/token changed (see syncStream) or the live
+            // connection is failing (e.g. a rejected token), so a settings reload recovers it.
+            syncStream(rebuild = liveProblem != null)
         }
         if (expiryJob?.isActive != true) {
             expiryJob = scope.launch {
@@ -99,6 +100,7 @@ class CameraWatchCoordinator(
         expiryJob?.cancel()
         stream?.release()
         stream = null
+        liveProblem = null
         _activeAreas.value = emptyList()
     }
 
@@ -151,6 +153,13 @@ class CameraWatchCoordinator(
             nowMs = now()
         )
         syncStream(rebuild = false)
+        // Someone may already be there: the shared stream only reports changes it has not
+        // seen, so check the current state for this new watch (the cooldown avoids doubles).
+        val watchedIds = resolution.sensors.map { it.entityId }.toSet()
+        scope.launch(Dispatchers.IO) {
+            val states = haClientProvider()?.getStates(watchedIds).orEmpty()
+            watchedIds.filter { states[it] == "on" }.forEach { onSensorOn(it) }
+        }
         val until = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(watch.expiresAtMs))
         val withPicture = resolution.sensors.any { it.snapshotEntityId != null || it.cameraEntityId != null }
         val generic = resolution.sensors.filter { it.source == WatchSensor.Source.GENERIC }.map { it.areaName }.distinct()
@@ -197,18 +206,22 @@ class CameraWatchCoordinator(
             stream?.release()
             stream = null
             streamClient = client
+            liveProblem = null
         }
         if (ids.isEmpty()) {
             stream?.setWatched(emptySet())
+            liveProblem = null
             return
         }
+        var created: HaEventStream? = null
         val current = stream ?: client?.openEventStream(
             onSensorOn = { entityId -> scope.launch { onSensorOn(entityId) } },
             onStatus = { message, ok ->
                 TrekoLogBuffer.i(TAG, message)
-                liveProblem = if (ok) null else message
+                // Ignore late news from a stream that was already replaced.
+                if (stream === created) liveProblem = if (ok) null else message
             }
-        )?.also { stream = it }
+        )?.also { created = it; stream = it }
         current?.setWatched(ids)
     }
 
@@ -222,7 +235,7 @@ class CameraWatchCoordinator(
         // The sentinel can take a while (vision model): never let it delay the alert.
         if (entityId in sentinelSensors) scope.launch { maybeRunSentinel(entityId) }
         val hit = book.onSensorActivated(entityId, now()) ?: return
-        if (hit.watch.once) syncStream(rebuild = false)
+        if (hit.consumedOneShot) syncStream(rebuild = false)
         deliver(hit)
     }
 
@@ -288,10 +301,10 @@ class CameraWatchCoordinator(
     private fun alertText(sensor: WatchSensor?, objectGroup: String, area: String): String {
         val res = when {
             sensor?.source == WatchSensor.Source.GENERIC -> R.string.watch_alert_motion
-            else -> when (sensor?.objectType ?: objectGroup) {
+            else -> when (WatchCatalog.groupOfLabel(sensor?.objectType) ?: objectGroup) {
                 "person" -> R.string.watch_alert_person
-                "car", "motorcycle", "bicycle" -> R.string.watch_alert_vehicle
-                "dog", "cat", "bird", "horse", "bear", "deer", "animal" -> R.string.watch_alert_animal
+                "car" -> R.string.watch_alert_vehicle
+                "animal" -> R.string.watch_alert_animal
                 "package" -> R.string.watch_alert_package
                 else -> R.string.watch_alert_any
             }
