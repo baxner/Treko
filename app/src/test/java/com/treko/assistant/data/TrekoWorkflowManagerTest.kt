@@ -82,6 +82,23 @@ class TrekoWorkflowManagerTest {
             calls.add("habits_summary")
             return "5/8 water glasses"
         }
+
+        override suspend fun startMeditation(type: String, minutes: Int): String {
+            calls.add("meditation:$type:$minutes")
+            return "Ask: which space?"
+        }
+    }
+
+    @Test
+    fun meditationModeRunsTheMeditationTool() = runBlocking {
+        val manager = TrekoWorkflowManager(InMemoryWorkflowStorage())
+        assertEquals("meditacion", manager.findWorkflow("modo meditación")?.id)
+        assertEquals("meditacion", manager.findWorkflow("medita conmigo")?.id)
+        val actions = FakeWorkflowActions()
+        val out = manager.runWorkflow("modo meditacion", actions)
+        assertEquals(listOf("meditation::10"), actions.calls)
+        // The tool's answer (it may ask where the user is) reaches the model.
+        assertTrue(out, out.contains("Ask: which space?"))
     }
 
     @Test
@@ -90,8 +107,8 @@ class TrekoWorkflowManagerTest {
         val workflows = manager.listWorkflows()
         val ids = workflows.map { it.id }
 
-        assertEquals(5, workflows.size)
-        assertTrue(ids.containsAll(listOf("buenos_dias", "buenas_noches", "modo_cine", "vigilancia_total", "concentracion")))
+        assertEquals(6, workflows.size)
+        assertTrue(ids.containsAll(listOf("buenos_dias", "buenas_noches", "modo_cine", "vigilancia_total", "concentracion", "meditacion")))
         assertTrue(workflows.all { it.isBuiltIn && it.steps.isNotEmpty() })
 
         val summary = manager.listWorkflowsSummary()
@@ -178,7 +195,7 @@ class TrekoWorkflowManagerTest {
             stepsJson = stepsJson
         )
         assertTrue(createMsg.contains("creada"))
-        assertEquals(6, manager1.listWorkflows().size)
+        assertEquals(7, manager1.listWorkflows().size)
 
         // Reload in a brand-new manager backed by same storage to verify JSON serialization/deserialization
         val manager2 = TrekoWorkflowManager(storage)
@@ -216,7 +233,7 @@ class TrekoWorkflowManagerTest {
         val deleteMsg = manager2.deleteWorkflow("modo fiesta")
         assertTrue(deleteMsg.contains("eliminada"))
         val manager3 = TrekoWorkflowManager(storage)
-        assertEquals(5, manager3.listWorkflows().size)
+        assertEquals(6, manager3.listWorkflows().size)
         assertNull(manager3.findWorkflow("modo fiesta"))
     }
 

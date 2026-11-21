@@ -84,7 +84,10 @@ import androidx.compose.ui.unit.sp
 import com.treko.assistant.R
 import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.service.WsConnectionStatus
+import com.treko.assistant.ui.components.MeditationBreathingHalo
+import com.treko.assistant.ui.components.MeditationPanel
 import com.treko.assistant.ui.components.ReactiveEqualizer
+import com.treko.assistant.ui.components.rememberMeditationClock
 import com.treko.assistant.ui.components.TrekoFace
 import com.treko.assistant.ui.theme.CardBorder
 import com.treko.assistant.ui.theme.NeonCyan
@@ -125,6 +128,7 @@ fun FaceScreen(
     val fullDuplexIndicator by TrekoAssistantService.fullDuplexIndicator.collectAsState()
     val pendingInsight by TrekoAssistantService.pendingProactiveInsight.collectAsState()
     val watchAreas by TrekoAssistantService.activeWatchAreas.collectAsState()
+    val meditation by TrekoAssistantService.meditationSnapshot.collectAsState()
     val listState = rememberLazyListState()
 
     LaunchedEffect(history.size, showHistory) {
@@ -378,6 +382,19 @@ fun FaceScreen(
                     }
                 }
             }
+        }
+    }
+
+    // Ticks every frame only while a meditation is on screen.
+    val meditationNow: @Composable () -> Long = { rememberMeditationClock().value }
+    val meditationPanel: @Composable () -> Unit = {
+        if (meditation.isActive) {
+            MeditationPanel(
+                snapshot = meditation,
+                nowMs = meditationNow(),
+                onTogglePause = { TrekoAssistantService.toggleMeditationPause() },
+                onStop = { TrekoAssistantService.stopMeditation() }
+            )
         }
     }
 
@@ -785,6 +802,7 @@ fun FaceScreen(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.clickable(enabled = hasMicPermission) { onToggleListen() }
                     ) {
+                        if (meditation.isActive) MeditationBreathingHalo(meditation, meditationNow())
                         TrekoFace(
                             emotion = dynamicEmotion,
                             size = faceSize,
@@ -831,6 +849,7 @@ fun FaceScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        meditationPanel()
                         proactiveInsightBanner()
                         if (showHistory) {
                             statusTextBlock()
@@ -863,6 +882,7 @@ fun FaceScreen(
                             .clickable(enabled = hasMicPermission) { onToggleListen() }
                             .padding(vertical = if (showHistory) 4.dp else 12.dp)
                     ) {
+                        if (meditation.isActive) MeditationBreathingHalo(meditation, meditationNow())
                         TrekoFace(
                             emotion = dynamicEmotion,
                             size = if (showHistory) 108.dp else 248.dp,
@@ -893,6 +913,7 @@ fun FaceScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    meditationPanel()
                     proactiveInsightBanner()
                     ReactiveEqualizer(
                         audioLevelState = activeAudioLevelState,

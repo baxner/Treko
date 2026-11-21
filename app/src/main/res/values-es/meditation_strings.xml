@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="Typos">
+    <!-- Meditación guiada. Los resultados de herramienta los lee el modelo; lo demás se dice en voz alta. -->
+    <string name="meditation_tool_ask">Antes de empezar pregunta al usuario «¿En qué espacio estás?» y nombra: %1$s, o aquí (solo el teléfono). No empieces hasta que conteste; luego llama otra vez meditation start con place.</string>
+    <string name="meditation_tool_ask_suggest">Sugiere %1$s, que usó la última vez.</string>
+    <string name="meditation_tool_ask_unmatched">Ningún espacio coincide con «%1$s».</string>
+    <string name="meditation_tool_say">Di EXACTAMENTE esto, despacio y en voz suave, sin añadir ni preguntar nada: «%1$s»</string>
+    <string name="meditation_tool_cue">Di EXACTAMENTE esta indicación de meditación, despacio y en voz suave, sin añadir nada (ni saludo ni pregunta): «%1$s»</string>
+    <string name="meditation_tool_already">Ya hay una sesión de %1$s en curso, quedan %2$d min. Pregunta si quiere terminarla.</string>
+    <string name="meditation_tool_none">No hay ninguna meditación en curso.</string>
+    <string name="meditation_tool_paused">Meditación en pausa. Díselo en pocas palabras; puede decir «sigue» para continuar.</string>
+    <string name="meditation_tool_resumed">Meditación reanudada. Di solo «Seguimos» y nada más.</string>
+    <string name="meditation_tool_status">%1$s en curso, quedan %2$d min.</string>
+    <string name="meditation_tool_status_paused">%1$s en pausa, quedan %2$d min.</string>
+
+    <string name="meditation_open">Vamos a hacer %1$d minutos de %2$s. Ponte cómodo y, si quieres, cierra los ojos.</string>
+    <string name="meditation_open_place">Vamos a hacer %1$d minutos de %2$s en %3$s. Ponte cómodo y, si quieres, cierra los ojos.</string>
+    <string name="meditation_open_phone">Vamos a hacer %1$d minutos de %2$s aquí, solo con el teléfono. Ponte cómodo y, si quieres, cierra los ojos.</string>
+    <string name="meditation_close">Hemos terminado. Mueve despacio los dedos, respira hondo y abre los ojos cuando quieras.</string>
+    <string name="meditation_close_sleep">Hemos terminado. Quédate así, descansando. Que duermas bien.</string>
+    <string name="meditation_close_early">Muy bien, terminamos aquí. Tómate un momento antes de levantarte.</string>
+    <string name="meditation_music_failed">No pude poner la música; seguimos sin ella.</string>
+    <string name="meditation_music_query">música para meditar</string>
+    <string name="meditation_music_query_sleep">sonidos de lluvia</string>
+
+    <string name="meditation_type_478">respiración 4-7-8</string>
+    <string name="meditation_type_box">respiración en caja</string>
+    <string name="meditation_type_scan">escaneo corporal</string>
+    <string name="meditation_type_sleep">relajación para dormir</string>
+    <string name="meditation_type_mindful">atención plena</string>
+
+    <string name="meditation_phase_inhale">Inhala</string>
+    <string name="meditation_phase_hold">Sostén</string>
+    <string name="meditation_phase_exhale">Exhala</string>
+    <string name="meditation_phase_rest">Espera</string>
+    <string name="meditation_preparing">Preparando…</string>
+    <string name="meditation_paused">En pausa</string>
+    <string name="meditation_ending">Terminando…</string>
+    <string name="meditation_remaining">Quedan %1$s</string>
+    <string name="meditation_stop_cd">Terminar meditación</string>
+    <string name="meditation_pause_cd">Pausar meditación</string>
+    <string name="meditation_resume_cd">Seguir con la meditación</string>
+    <string name="meditation_phone_voice_chip">Voz del teléfono</string>
+
+    <string name="meditation_settings_title">Meditación</string>
+    <string name="meditation_settings_desc">Sesiones guiadas y respiración: «%1$s, medita conmigo 10 minutos».</string>
+    <string name="meditation_voice_label">Voz de la meditación</string>
+    <string name="meditation_voice_treko">%1$s</string>
+    <string name="meditation_voice_phone">Teléfono</string>
+    <string name="meditation_voice_desc">%1$s abre y cierra; las indicaciones de en medio usan esta voz. Si %1$s no está conectado, sigue el teléfono.</string>
+    <string name="meditation_lights_title">Ajustar luces</string>
+    <string name="meditation_lights_sub">Baja a luz cálida las luces encendidas de tu espacio y las deja exactamente como estaban.</string>
+    <string name="meditation_music_title">Música</string>
+    <string name="meditation_music_sub">Música tranquila en la bocina de tu espacio, o en el teléfono.</string>
+
+    <string-array name="meditation_478_intro">
+        <item>Siéntate o recuéstate cómodo. Suelta los hombros y deja que tu respiración se calme.</item>
+        <item>Vamos a respirar en cuatro, siete, ocho. Inhala por la nariz contando cuatro, sostén el aire contando siete y exhala despacio por la boca contando ocho.</item>
+    </string-array>
+    <string-array name="meditation_478_body">
+        <item>Inhala, dos, tres, cuatro. Sostén… y suelta el aire despacio, hasta ocho.</item>
+        <item>Sigue el círculo de la pantalla si te ayuda: crece al inhalar, se detiene al sostener y se encoge al exhalar.</item>
+        <item>Nota cómo cada exhalación es un poco más larga y más suave.</item>
+        <item>Si te mareas un poco, respira normal un momento y vuelve cuando quieras.</item>
+        <item>Deja que el cuerpo se haga pesado con cada exhalación.</item>
+        <item>Unas respiraciones más a tu ritmo: cuatro, siete, ocho.</item>
+    </string-array>
+    <string-array name="meditation_478_reminders">
+        <item>Inhala contando cuatro, sostén siete, exhala ocho.</item>
+        <item>Si tu mente se distrae, solo vuelve a contar.</item>
+        <item>Hombros sueltos, mandíbula relajada.</item>
+        <item>Exhala despacio, sin prisa.</item>
+    </string-array>
+
+    <string-array name="meditation_box_intro">
+        <item>Busca una postura cómoda, con la espalda recta y los hombros sueltos.</item>
+        <item>Vamos a respirar en caja: inhala cuatro, sostén cuatro, exhala cuatro y espera cuatro con los pulmones vacíos.</item>
+    </string-array>
+    <string-array name="meditation_box_body">
+        <item>Inhala, dos, tres, cuatro. Sostén, dos, tres, cuatro. Exhala, dos, tres, cuatro. Espera, dos, tres, cuatro.</item>
+        <item>Imagina que dibujas un cuadrado: un lado por cada tiempo.</item>
+        <item>Mantén el mismo ritmo en los cuatro lados, tranquilo y parejo.</item>
+        <item>Si te falta aire, haz la caja un poco más pequeña, de tres tiempos.</item>
+        <item>Nota la calma que deja cada vuelta del cuadrado.</item>
+    </string-array>
+    <string-array name="meditation_box_reminders">
+        <item>Inhala cuatro, sostén cuatro, exhala cuatro, espera cuatro.</item>
+        <item>Si te distraes, vuelve al primer lado del cuadrado.</item>
+        <item>Respira parejo, sin forzar.</item>
+    </string-array>
+
+    <string-array name="meditation_scan_intro">
+        <item>Recuéstate o siéntate cómodo y cierra los ojos si quieres.</item>
+        <item>Haz tres respiraciones lentas y deja que el cuerpo se apoye por completo.</item>
+    </string-array>
+    <string-array name="meditation_scan_body">
+        <item>Lleva la atención a los pies. Nota su peso y su temperatura, sin cambiar nada.</item>
+        <item>Sube a los tobillos y las pantorrillas. Si hay tensión, deja que se afloje al exhalar.</item>
+        <item>Ahora las rodillas y los muslos. Suéltalos un poco más.</item>
+        <item>Nota la cadera y la parte baja de la espalda apoyadas.</item>
+        <item>Lleva la atención al abdomen. Siente cómo sube y baja con la respiración.</item>
+        <item>Sube al pecho y a la espalda alta. Deja que se abran con cada inhalación.</item>
+        <item>Ahora las manos, los brazos y los hombros. Suéltalos hacia abajo.</item>
+        <item>Nota el cuello y la mandíbula. Separa un poco los dientes y relaja la lengua.</item>
+        <item>Relaja la cara: los ojos, la frente y el cuero cabelludo.</item>
+        <item>Ahora siente todo el cuerpo a la vez, respirando tranquilo.</item>
+    </string-array>
+    <string-array name="meditation_scan_reminders">
+        <item>Si tu mente se va, vuelve con calma a la parte del cuerpo en la que estabas.</item>
+        <item>Respira lento y deja que cada exhalación suelte un poco más.</item>
+        <item>No hay nada que hacer bien o mal, solo notar.</item>
+    </string-array>
+
+    <string-array name="meditation_sleep_intro">
+        <item>Acuéstate en la posición en la que sueles dormir y deja que la cama te sostenga.</item>
+        <item>Respira despacio: inhala por la nariz y suelta el aire más lento de lo que entró.</item>
+    </string-array>
+    <string-array name="meditation_sleep_body">
+        <item>Con cada exhalación, deja que el cuerpo se hunda un poco más.</item>
+        <item>Suelta la frente, los ojos y la mandíbula.</item>
+        <item>Deja caer los hombros y relaja los brazos y las manos.</item>
+        <item>Siente cómo el pecho y el abdomen se mueven solos, sin esfuerzo.</item>
+        <item>Relaja las piernas y los pies. Todo el cuerpo está pesado y tibio.</item>
+        <item>Si aparece un pensamiento, déjalo pasar como una nube y vuelve a la respiración.</item>
+        <item>No tienes que hacer nada más. Solo descansar.</item>
+    </string-array>
+    <string-array name="meditation_sleep_reminders">
+        <item>Inhala suave… y suelta el aire despacio.</item>
+        <item>Cada respiración te lleva un poco más al descanso.</item>
+        <item>Todo está bien. Puedes soltar el día.</item>
+    </string-array>
+
+    <string-array name="meditation_mindful_intro">
+        <item>Siéntate cómodo, con la espalda recta pero sin rigidez, y cierra los ojos si quieres.</item>
+        <item>Haz una respiración profunda y suéltala despacio.</item>
+    </string-array>
+    <string-array name="meditation_mindful_body">
+        <item>Lleva la atención a tu respiración, al aire que entra y sale por la nariz.</item>
+        <item>No intentes cambiarla. Solo obsérvala como es.</item>
+        <item>Nota los sonidos a tu alrededor, sin juzgarlos, y vuelve a la respiración.</item>
+        <item>Nota las sensaciones del cuerpo: el apoyo, la temperatura, el contacto con la ropa.</item>
+        <item>Si llegan pensamientos, nómbralos en silencio, pensando, y regresa al aire.</item>
+        <item>Descansa en este momento, respiración tras respiración.</item>
+    </string-array>
+    <string-array name="meditation_mindful_reminders">
+        <item>Si te distrajiste, está bien. Vuelve con amabilidad a la respiración.</item>
+        <item>Inhala, sabiendo que inhalas. Exhala, sabiendo que exhalas.</item>
+        <item>Solo este momento, solo esta respiración.</item>
+        <item>Suelta los hombros y respira.</item>
+    </string-array>
+</resources>

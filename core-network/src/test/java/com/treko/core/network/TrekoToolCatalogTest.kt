@@ -106,6 +106,17 @@ class TrekoToolCatalogTest {
     }
 
     @Test
+    fun `meditation tool is always offered and takes a place`() {
+        val tool = tools(emptySet()).first { it["name"] == "meditation" }
+        val props = properties(tool)
+        assertEquals(listOf("start", "stop", "pause", "resume", "status"), props["action"]!!["enum"])
+        assertTrue("dormir" in (props["type"]!!["enum"] as List<*>))
+        assertTrue("478" in (props["type"]!!["enum"] as List<*>))
+        assertEquals("string", props["place"]!!["type"])
+        assertTrue((tool["description"] as String).contains("place"))
+    }
+
+    @Test
     fun `initialize instructions are short`() {
         val text = TrekoToolCatalog.INITIALIZE_INSTRUCTIONS
         println("initialize instructions: ${text.length} chars")

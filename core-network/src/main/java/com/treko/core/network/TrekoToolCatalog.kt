@@ -61,7 +61,7 @@ object TrekoToolCatalog {
                 "manage_vault_memory",
                 "Memoria permanente del usuario (gustos, fechas, notas).",
                 listOf(
-                    str("action", "set guarda, get consulta, list muestra todo, delete olvida", listOf("set", "get", "list", "delete")),
+                    str("action", "", listOf("set", "get", "list", "delete")),
                     str("key", "Clave corta, ej. 'comida_favorita'"),
                     str("value", "Solo set")
                 ),
@@ -160,6 +160,17 @@ object TrekoToolCatalog {
                     str("label", "Motivo, ej. 'pasta'"),
                     int("timer_id", "ID a cancelar"),
                     str("mode", "Solo Pomodoro: 25, 5 o 15 min", listOf("pomodoro", "short_break", "long_break"))
+                ),
+                listOf("action")
+            ),
+            Tool(
+                "meditation",
+                "Meditación guiada o respiración. Si la respuesta lo pide, pregunta el espacio y repite con place.",
+                listOf(
+                    str("action", "", listOf("start", "stop", "pause", "resume", "status")),
+                    str("type", "", listOf("libre", "478", "caja", "escaneo", "dormir")),
+                    int("minutes", "3-30"),
+                    str("place", "Espacio, o 'aquí' = solo teléfono")
                 ),
                 listOf("action")
             ),

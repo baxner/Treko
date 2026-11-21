@@ -26,6 +26,10 @@ import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.treko.assistant.meditation.MeditationController
+import com.treko.assistant.meditation.MeditationSnapshot
+import com.treko.assistant.meditation.MeditationTimelineBuilder
+import com.treko.assistant.meditation.XiaozhiMeditationVoice
 import com.treko.assistant.MainActivity
 import com.treko.assistant.R
 import com.treko.assistant.data.CameraAnomalyCheckResult
@@ -76,6 +80,7 @@ import com.treko.core.mcp.watch.WatchSensor
 import com.treko.core.common.model.TrekoSkills
 import com.treko.core.mcp.RadioBrowserClient
 import com.treko.core.network.XiaozhiWebSocketClient
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -247,6 +252,23 @@ class TrekoAssistantService : Service() {
     private val proactiveUtteranceSeq = AtomicInteger(0)
 
     private val radioBrowserClient by lazy { RadioBrowserClient() }
+
+    /** Guided meditation (the `meditation` tool); null until onCreate. */
+    private var meditation: MeditationController? = null
+
+    /** A meditation cue Xiaozhi is reading (see [deliverMeditationCue]). */
+    private class MeditationCueRequest(val text: String) {
+        val done = CompletableDeferred<Boolean>()
+        @Volatile var consumed = false
+        @Volatile var started = false
+    }
+
+    @Volatile
+    private var activeMeditationCue: MeditationCueRequest? = null
+
+    /** Xiaozhi could not be reached for the last cue: the session switches to the phone's voice. */
+    @Volatile
+    private var meditationXiaozhiUnreachable = false
     private val workflowManager by lazy { TrekoWorkflowManager(this) }
 
     companion object {
@@ -265,6 +287,8 @@ class TrekoAssistantService : Service() {
         private const val TOOL_RESULT_LOG_CHARS = 300
         /** Wait for a Xiaozhi session before falling back to the phone's voice (reconnects take 2–4 s). */
         private const val PROACTIVE_SESSION_WAIT_MS = 4_000L
+        private const val MEDITATION_SESSION_WAIT_MS = 8_000L
+        private const val MEDITATION_CUE_START_TIMEOUT_MS = 14_000L
 
         private val _serviceState = MutableStateFlow(TrekoState.IDLE)
         val serviceState: StateFlow<TrekoState> = _serviceState.asStateFlow()
@@ -307,6 +331,17 @@ class TrekoAssistantService : Service() {
         private val _activeWatches = MutableStateFlow<List<CameraWatch>>(emptyList())
         /** The camera watches running right now, for the alerts screen. */
         val activeWatches: StateFlow<List<CameraWatch>> = _activeWatches.asStateFlow()
+
+        /** The running meditation for the face screen (state IDLE when none). */
+        val meditationSnapshot: StateFlow<MeditationSnapshot> get() = MeditationController.snapshot
+
+        fun stopMeditation() {
+            instance?.meditation?.stopFromUi()
+        }
+
+        fun toggleMeditationPause() {
+            instance?.meditation?.togglePauseFromUi()
+        }
 
         fun stopAllWatches() {
             instance?.cameraWatch?.stopAll()
@@ -1204,6 +1239,10 @@ class TrekoAssistantService : Service() {
         isServiceRunning = true
         TrekoLogBuffer.i(TAG, "TrekoAssistantService started in foreground.")
         startCameraWatches()
+        meditation = MeditationController(this, serviceScope, meditationHost).also {
+            // A session the app could not finish (killed mid-way) left lights or volume changed.
+            it.restorePendingOnStart()
+        }
 
         val prefs = TrekoPreferences(this)
         _isMuted.value = prefs.isMicMuted
@@ -1469,6 +1508,7 @@ class TrekoAssistantService : Service() {
 
         client.onServerAlert = { status, alertMsg ->
             TrekoLogBuffer.w(TAG, "Xiaozhi server alert ($status): $alertMsg")
+            activeMeditationCue?.let { endMeditationCue(it, abort = false) }
             val pendingVoice = activeVoiceProactiveInsight
             if (pendingVoice != null && _serviceState.value == TrekoState.THINKING) {
                 activeVoiceProactiveInsight = null
@@ -1546,6 +1586,7 @@ class TrekoAssistantService : Service() {
                         wsClient?.abortSpeaking(reason = "unsolicited_tts_while_idle")
                     } else {
                         suppressIdleTts = false
+                        activeMeditationCue?.started = true
                         proactiveTtsFallbackJob?.cancel()
                         cancelThinkingWatchdog()
                         ttsDrainingJob?.cancel()
@@ -1576,6 +1617,7 @@ class TrekoAssistantService : Service() {
                     if (!suppressIdleTts && _serviceState.value != TrekoState.IDLE && _serviceState.value != TrekoState.ERROR) {
                         proactiveTtsFallbackJob?.cancel()
                         if (_serviceState.value == TrekoState.THINKING) {
+                            activeMeditationCue?.started = true
                             cancelThinkingWatchdog()
                             speakingStartTimestamp = System.currentTimeMillis()
                             val emotionToUse = if (hasTurnEmotion) null else TrekoEmotion.FELIZ_ABIERTO
@@ -1600,7 +1642,16 @@ class TrekoAssistantService : Service() {
                                 // Let the voice check on a queued remark finish before deciding.
                                 withTimeoutOrNull(900L) { complementaryBioJob?.join() }
                             }
-                            if (_serviceState.value == TrekoState.SPEAKING) {
+                            val cue = activeMeditationCue
+                            if (cue != null && _serviceState.value == TrekoState.SPEAKING) {
+                                // A meditation cue ends in silence: no follow-up listening, wake word armed.
+                                activeMeditationCue = null
+                                complementaryQueue.onPlaybackFinished()
+                                _fullDuplexIndicator.value = FullDuplexIndicator.INACTIVE
+                                transitionState(TrekoState.IDLE, TrekoEmotion.RELAX)
+                                _subtitleText.value = ""
+                                cue.done.complete(cue.consumed)
+                            } else if (_serviceState.value == TrekoState.SPEAKING) {
                                 val flushPlan = complementaryQueue.onPlaybackFinished()
                                 val client = wsClient
                                 when {
@@ -1616,7 +1667,8 @@ class TrekoAssistantService : Service() {
                                         client?.isConnected == true -> {
                                         startLiveHandoffListening(flushPlan.pcmFrames)
                                     }
-                                    !_isMuted.value && effectiveAutoFollowUpEnabled && client?.isConnected == true -> {
+                                    !_isMuted.value && effectiveAutoFollowUpEnabled && client?.isConnected == true &&
+                                        meditation?.holdsMicClosed() != true -> {
                                         _fullDuplexIndicator.value = FullDuplexIndicator.INACTIVE
                                         startActiveListening(prompt = getString(R.string.status_follow_up))
                                     }
@@ -1792,6 +1844,11 @@ class TrekoAssistantService : Service() {
      * Returns true only when the text was handed to the phone's voice.
      */
     private suspend fun speakWatchAlert(text: String): Boolean {
+        // An urgent watch alert gets through a meditation: pause it, speak, it resumes by itself.
+        if (meditation?.pauseForAlert() == true) {
+            cancelMeditationCue()
+            withTimeoutOrNull(3_000L) { while (_serviceState.value != TrekoState.IDLE) delay(100L) }
+        }
         if (_serviceState.value != TrekoState.IDLE || isTrainingMode) return false
         val tts = ensureLocalTtsReady() ?: return false
         // Watch alerts come from localized resources: speak them in the phone's language.
@@ -2718,6 +2775,9 @@ class TrekoAssistantService : Service() {
     }
 
     fun beginConversation(keyword: String = "Treko") {
+        // The wake word (or a tap) during a meditation pauses it; "sigue" resumes it.
+        meditation?.onConversationStarted()
+        cancelMeditationCue()
         if (_isMuted.value) {
             TrekoPreferences(this).isMicMuted = false
             applyMuteState(muted = false)
@@ -3581,11 +3641,17 @@ class TrekoAssistantService : Service() {
                         else -> workflowManager.listWorkflowsSummary()
                     }
                 }
+                "meditation" -> meditation?.handleTool(args) ?: getString(R.string.meditation_tool_none)
                 "manage_proactive_assistant" -> {
                     val action = normalizeAsciiLower(args.optString("action", "status"))
                     val proactiveManager = getOrCreateProactiveManager(this@TrekoAssistantService)
                     when (action) {
                         "deliver_pending", "read_pending_alert", "get_pending", "pending", "leer", "read", "briefing" -> {
+                            // A meditation cue rides the same trigger ("lee tu aviso pendiente").
+                            activeMeditationCue?.let { cue ->
+                                cue.consumed = true
+                                return@withContext getString(R.string.meditation_tool_cue, cue.text)
+                            }
                             val activeVoice = activeVoiceProactiveInsight
                             // Stale ones (an alert held for hours) are not read as news.
                             prunePendingInsights(this@TrekoAssistantService)
@@ -3992,6 +4058,13 @@ class TrekoAssistantService : Service() {
 
             override suspend fun getHabitsSummary(): String =
                 TrekoHabitManager(this@TrekoAssistantService).listHabitsSummary()
+
+            override suspend fun startMeditation(type: String, minutes: Int): String {
+                val args = JSONObject().put("action", "start")
+                if (type.isNotBlank()) args.put("type", type)
+                if (minutes > 0) args.put("minutes", minutes)
+                return meditation?.handleTool(args) ?: getString(R.string.meditation_tool_none)
+            }
         }
     }
 
@@ -4012,6 +4085,10 @@ class TrekoAssistantService : Service() {
     }
 
     fun abortConversation() {
+        if (activeMeditationCue != null) {
+            meditation?.onConversationStarted()
+            cancelMeditationCue()
+        }
         listeningTurnGeneration++
         biometricCheckJob?.cancel()
         complementaryBioJob?.cancel()
@@ -4146,6 +4223,10 @@ class TrekoAssistantService : Service() {
         foreignVoiceResetJob?.cancel()
         proactiveLoopJob?.cancel()
         proactiveTtsFallbackJob?.cancel()
+        // Ends the session; its room restore runs even as the scope is cancelled (and is on disk).
+        meditation?.shutdown()
+        activeMeditationCue?.done?.complete(false)
+        activeMeditationCue = null
         try {
             localTts?.stop()
             localTts?.shutdown()
@@ -4283,10 +4364,14 @@ class TrekoAssistantService : Service() {
             }
 
             val speakOutLoud = overrideSpeak ?: prefs.proactiveSpeakOutLoud
+            // A meditation keeps Treko quiet; only a camera alert interrupts it (then it resumes).
+            val meditating = meditation?.isActive == true
+            val urgentDuringMeditation = meditating && recorded.category == ProactiveCategory.CAMERA_ANOMALY
             val canSpeakAutomatically = speakOutLoud &&
-                _serviceState.value == TrekoState.IDLE &&
+                (_serviceState.value == TrekoState.IDLE || urgentDuringMeditation) &&
                 !_isMuted.value &&
                 !_isCinemaMode.value &&
+                (!meditating || urgentDuringMeditation) &&
                 (!inQuietHours || force)
 
             TrekoLogBuffer.i(
@@ -4296,6 +4381,10 @@ class TrekoAssistantService : Service() {
 
             if (canSpeakAutomatically) {
                 trace?.decide("alert_spoken", override = true)
+                if (urgentDuringMeditation && meditation?.pauseForAlert() == true) {
+                    cancelMeditationCue()
+                    withTimeoutOrNull(3_000L) { while (_serviceState.value != TrekoState.IDLE) delay(100L) }
+                }
                 deliverProactiveInsightByVoice(recorded, fromUserTap = false)
             } else {
                 trace?.decide(
@@ -4305,6 +4394,7 @@ class TrekoAssistantService : Service() {
                         inQuietHours && !force -> "quiet hours"
                         _isMuted.value -> "microphone muted"
                         _isCinemaMode.value -> "cinema mode"
+                        meditating -> "meditation in progress"
                         else -> "assistant busy (${_serviceState.value})"
                     },
                     override = true
@@ -4391,6 +4481,112 @@ class TrekoAssistantService : Service() {
         activeVoiceProactiveInsight = null
         cancelThinkingWatchdog()
         speakLocalProactiveFallback(insight, openMicAfter = fromUserTap && !_isMuted.value)
+    }
+
+    /** What the meditation controller needs from the service. */
+    private val meditationHost = object : MeditationController.Host {
+        override fun haClient(): HomeAssistantClient? = currentWatchHaClient()
+        override fun detectedSkills(): Set<String> = TrekoPreferences(this@TrekoAssistantService).detectedSkills
+        override val radio: RadioBrowserClient get() = radioBrowserClient
+
+        override val xiaozhiChannel = object : XiaozhiMeditationVoice.Channel {
+            override fun isConnected(): Boolean =
+                wsClient?.let { !meditationXiaozhiUnreachable || it.isConnected } ?: false
+            override suspend fun deliverCue(text: String): Boolean = deliverMeditationCue(text)
+            override fun cancelCue() = cancelMeditationCue()
+        }
+
+        override fun isAssistantIdle(): Boolean =
+            _serviceState.value == TrekoState.IDLE && activeMeditationCue == null
+
+        override suspend fun playOnPlayer(query: String, entityId: String): Boolean {
+            val ha = currentWatchHaClient() ?: return false
+            val result = ha.playMusicOrRadio(query = query, targetDevice = entityId)
+            // HomeAssistantClient answers in Spanish; these are its success sentences.
+            return result.startsWith("Reproduciendo") || result.startsWith("Sintonizando")
+        }
+    }
+
+    /** Waits for a Xiaozhi session (the server drops idle ones, the client reconnects). */
+    private suspend fun ensureXiaozhiSession(client: XiaozhiWebSocketClient): Boolean {
+        if (client.isConnected && !_activeSessionId.value.isNullOrBlank()) return true
+        _connectionStatus.value = WsConnectionStatus.CONNECTING
+        client.connect()
+        var waitedMs = 0L
+        while (waitedMs < MEDITATION_SESSION_WAIT_MS && (!client.isConnected || _activeSessionId.value.isNullOrBlank())) {
+            delay(100L)
+            waitedMs += 100L
+        }
+        return client.isConnected && !_activeSessionId.value.isNullOrBlank()
+    }
+
+    /**
+     * Has Xiaozhi read one meditation cue word for word, through the proactive trigger (the
+     * model calls read_pending_alert and gets the cue). True once the speech ended normally.
+     * The mic is not opened afterwards: the TTS stop handler returns to IDLE for a cue.
+     */
+    private suspend fun deliverMeditationCue(text: String): Boolean {
+        val client = wsClient ?: return false
+        if (!ensureXiaozhiSession(client)) {
+            meditationXiaozhiUnreachable = true
+            TrekoLogBuffer.w(TAG, "Xiaozhi not reachable for a meditation cue.")
+            return false
+        }
+        meditationXiaozhiUnreachable = false
+        val idle = withTimeoutOrNull(10_000L) {
+            while (_serviceState.value != TrekoState.IDLE || isTrainingMode) delay(200L)
+        }
+        if (idle == null) return false
+
+        val req = MeditationCueRequest(text)
+        listeningTurnGeneration++
+        ttsDrainingJob?.cancel()
+        proactiveTtsFallbackJob?.cancel()
+        isClosingTurn = false
+        suppressIdleTts = false
+        listeningOpenedByAutoFollowUp = false
+        hasTurnEmotion = false
+        synchronized(opusSendOrderLock) {
+            clearPendingOpusPackets()
+            opusCodec?.stopPlayback()
+            NativeAudioEngine.resetSoftwareAec()
+        }
+        activeMeditationCue = req
+        transitionState(TrekoState.THINKING, TrekoEmotion.RELAX)
+        startThinkingTimeout()
+        if (!client.sendProactiveTrigger("${_assistantName.value} lee tu aviso pendiente")) {
+            endMeditationCue(req, abort = false)
+            return false
+        }
+        val ok = withTimeoutOrNull(MeditationTimelineBuilder.estimateSpeechMs(text) * 3 + 20_000L) {
+            val started = withTimeoutOrNull(MEDITATION_CUE_START_TIMEOUT_MS) {
+                while (!req.started && !req.done.isCompleted) delay(100L)
+            }
+            if (started == null) false else req.done.await()
+        } ?: false
+        if (activeMeditationCue === req) endMeditationCue(req, abort = true)
+        if (!ok) TrekoLogBuffer.w(TAG, "Meditation cue not read by Xiaozhi (consumed=${req.consumed}, started=${req.started}).")
+        return ok
+    }
+
+    /** Ends [req] if it is still the cue in flight; [abort] also stops the server's speech. */
+    private fun endMeditationCue(req: MeditationCueRequest, abort: Boolean) {
+        if (activeMeditationCue !== req) return
+        activeMeditationCue = null
+        req.done.complete(false)
+        cancelThinkingWatchdog()
+        if (abort) {
+            wsClient?.abortSpeaking(reason = "meditation_cue")
+            synchronized(opusSendOrderLock) { opusCodec?.stopPlayback() }
+        }
+        if (_serviceState.value == TrekoState.THINKING || _serviceState.value == TrekoState.SPEAKING) {
+            transitionState(TrekoState.IDLE, TrekoEmotion.RELAX)
+            _subtitleText.value = ""
+        }
+    }
+
+    private fun cancelMeditationCue() {
+        activeMeditationCue?.let { endMeditationCue(it, abort = true) }
     }
 
     private suspend fun ensureLocalTtsReady(): TextToSpeech? {

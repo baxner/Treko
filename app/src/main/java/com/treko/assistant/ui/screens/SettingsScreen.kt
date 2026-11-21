@@ -130,6 +130,10 @@ fun SettingsScreen(
     var proactiveIntervalMinutes by remember { mutableIntStateOf(prefs.proactiveIntervalMinutes) }
     val isProactiveRunning by TrekoAssistantService.isProactiveCheckRunning.collectAsState()
 
+    var meditationVoice by remember { mutableStateOf(prefs.meditationVoice) }
+    var meditationLights by remember { mutableStateOf(prefs.meditationAdjustLights) }
+    var meditationMusic by remember { mutableStateOf(prefs.meditationMusic) }
+
     LaunchedEffect(serviceCinemaMode) {
         cinemaModeEnabled = serviceCinemaMode
     }
@@ -696,6 +700,88 @@ fun SettingsScreen(
                         fontWeight = FontWeight.SemiBold
                     )
                 }
+            }
+        }
+
+        // Guided Meditation Card
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            val assistantName = TrekoAssistantService.formatAssistantName(customWakeWord, stringResource(R.string.wake_word))
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    stringResource(R.string.meditation_settings_title),
+                    color = NeonCyan,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    stringResource(R.string.meditation_settings_desc, assistantName),
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+                Text(
+                    stringResource(R.string.meditation_voice_label),
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        TrekoPreferences.MEDITATION_VOICE_TREKO to stringResource(R.string.meditation_voice_treko, assistantName),
+                        TrekoPreferences.MEDITATION_VOICE_PHONE to stringResource(R.string.meditation_voice_phone)
+                    ).forEach { (id, label) ->
+                        val selected = meditationVoice == id
+                        OutlinedButton(
+                            onClick = {
+                                meditationVoice = id
+                                prefs.meditationVoice = id
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, if (selected) NeonCyan else CardBorder),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (selected) NeonCyan.copy(alpha = 0.14f) else Color.Transparent,
+                                contentColor = if (selected) NeonCyan else TextPrimary
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = (if (selected) "✓ " else "") + label,
+                                fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+                Text(
+                    stringResource(R.string.meditation_voice_desc, assistantName),
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+                HorizontalDivider(color = TextSecondary.copy(alpha = 0.2f))
+                SettingsToggleRow(
+                    title = stringResource(R.string.meditation_lights_title),
+                    subtitle = stringResource(R.string.meditation_lights_sub),
+                    checked = meditationLights,
+                    onCheckedChange = { checked ->
+                        meditationLights = checked
+                        prefs.meditationAdjustLights = checked
+                    }
+                )
+                SettingsToggleRow(
+                    title = stringResource(R.string.meditation_music_title),
+                    subtitle = stringResource(R.string.meditation_music_sub),
+                    checked = meditationMusic,
+                    onCheckedChange = { checked ->
+                        meditationMusic = checked
+                        prefs.meditationMusic = checked
+                    }
+                )
             }
         }
 

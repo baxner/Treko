@@ -74,6 +74,15 @@ class TrekoPreferences(context: Context) {
         private const val KEY_CAMERA_SENTINEL_ENABLED = "camera_sentinel_enabled"
         private const val KEY_PROACTIVE_QUIET_HOURS_ENABLED = "proactive_quiet_hours_enabled"
 
+        private const val KEY_MEDITATION_VOICE = "meditation_voice"
+        private const val KEY_MEDITATION_ADJUST_LIGHTS = "meditation_adjust_lights"
+        private const val KEY_MEDITATION_MUSIC = "meditation_music"
+        private const val KEY_LAST_MEDITATION_PLACE = "last_meditation_place"
+
+        /** [meditationVoice] values. */
+        const val MEDITATION_VOICE_TREKO = "treko"
+        const val MEDITATION_VOICE_PHONE = "phone"
+
         const val DEFAULT_XIAOZHI_WS_URL = "wss://api.tenclass.net/xiaozhi/v1/"
         const val DEFAULT_BIOMETRIC_THRESHOLD = 0.56f
         const val DEFAULT_COMPLEMENTARY_MIN_SPEECH_MS = 420L
@@ -322,6 +331,27 @@ class TrekoPreferences(context: Context) {
     var proactiveQuietHoursEnabled: Boolean
         get() = prefs.getBoolean(KEY_PROACTIVE_QUIET_HOURS_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_PROACTIVE_QUIET_HOURS_ENABLED, value).apply()
+
+    /** Who reads meditation cues: [MEDITATION_VOICE_TREKO] (default) or [MEDITATION_VOICE_PHONE]. */
+    var meditationVoice: String
+        get() = prefs.getString(KEY_MEDITATION_VOICE, MEDITATION_VOICE_TREKO)
+            ?.takeIf { it == MEDITATION_VOICE_PHONE } ?: MEDITATION_VOICE_TREKO
+        set(value) = prefs.edit().putString(KEY_MEDITATION_VOICE, value).apply()
+
+    /** A meditation may dim the lights of the room (and puts them back afterwards). */
+    var meditationAdjustLights: Boolean
+        get() = prefs.getBoolean(KEY_MEDITATION_ADJUST_LIGHTS, true)
+        set(value) = prefs.edit().putBoolean(KEY_MEDITATION_ADJUST_LIGHTS, value).apply()
+
+    /** A meditation plays calm music in the room or on the phone. */
+    var meditationMusic: Boolean
+        get() = prefs.getBoolean(KEY_MEDITATION_MUSIC, true)
+        set(value) = prefs.edit().putBoolean(KEY_MEDITATION_MUSIC, value).apply()
+
+    /** Name of the space used for the last meditation (suggested next time). */
+    var lastMeditationPlace: String
+        get() = prefs.getString(KEY_LAST_MEDITATION_PLACE, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_LAST_MEDITATION_PLACE, value).apply()
 
     /** Home Assistant integrations found last time (see TrekoSkills); empty until detected. */
     var detectedSkills: Set<String>

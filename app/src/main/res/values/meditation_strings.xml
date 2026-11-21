@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Guided meditation. Tool results are read by the model; the other lines are spoken. -->
+    <string name="meditation_tool_ask">Before starting, ask the user «Which space are you in?» naming: %1$s, or here (just the phone). Do not start until they answer; then call meditation start again with place.</string>
+    <string name="meditation_tool_ask_suggest">Suggest %1$s, used last time.</string>
+    <string name="meditation_tool_ask_unmatched">No space matches «%1$s».</string>
+    <string name="meditation_tool_say">Say EXACTLY this, slowly and softly, adding nothing and asking nothing: «%1$s»</string>
+    <string name="meditation_tool_cue">Say EXACTLY this meditation cue, slowly and in a soft voice, adding nothing (no greeting, no question): «%1$s»</string>
+    <string name="meditation_tool_already">A %1$s session is already running, %2$d min left. Ask whether to stop it.</string>
+    <string name="meditation_tool_none">No meditation is running.</string>
+    <string name="meditation_tool_paused">Meditation paused. Tell the user in a few words; they can say «continue» to go on.</string>
+    <string name="meditation_tool_resumed">Meditation resumed. Say only «Let\'s go on» and nothing else.</string>
+    <string name="meditation_tool_status">%1$s in progress, %2$d min left.</string>
+    <string name="meditation_tool_status_paused">%1$s paused, %2$d min left.</string>
+
+    <string name="meditation_open">Let\'s do %1$d minutes of %2$s. Get comfortable and close your eyes if you like.</string>
+    <string name="meditation_open_place">Let\'s do %1$d minutes of %2$s in %3$s. Get comfortable and close your eyes if you like.</string>
+    <string name="meditation_open_phone">Let\'s do %1$d minutes of %2$s here, just with the phone. Get comfortable and close your eyes if you like.</string>
+    <string name="meditation_close">We\'re done. Gently move your fingers, take a deep breath and open your eyes whenever you\'re ready.</string>
+    <string name="meditation_close_sleep">We\'re done. Stay just like this, resting. Sleep well.</string>
+    <string name="meditation_close_early">All right, we\'ll stop here. Take a moment before getting up.</string>
+    <string name="meditation_music_failed">I couldn\'t start the music, so we\'ll go on without it.</string>
+    <!-- Searched on the room's speaker (Alexa, Music Assistant…). -->
+    <string name="meditation_music_query">meditation music</string>
+    <string name="meditation_music_query_sleep">rain sounds</string>
+
+    <string name="meditation_type_478">4-7-8 breathing</string>
+    <string name="meditation_type_box">box breathing</string>
+    <string name="meditation_type_scan">body scan</string>
+    <string name="meditation_type_sleep">relaxation for sleep</string>
+    <string name="meditation_type_mindful">mindfulness</string>
+
+    <!-- Face screen -->
+    <string name="meditation_phase_inhale">Breathe in</string>
+    <string name="meditation_phase_hold">Hold</string>
+    <string name="meditation_phase_exhale">Breathe out</string>
+    <string name="meditation_phase_rest">Rest</string>
+    <string name="meditation_preparing">Getting ready…</string>
+    <string name="meditation_paused">Paused</string>
+    <string name="meditation_ending">Finishing…</string>
+    <string name="meditation_remaining">%1$s left</string>
+    <string name="meditation_stop_cd">Stop meditation</string>
+    <string name="meditation_pause_cd">Pause meditation</string>
+    <string name="meditation_resume_cd">Resume meditation</string>
+    <string name="meditation_phone_voice_chip">Phone voice</string>
+
+    <!-- Settings -->
+    <string name="meditation_settings_title">Meditation</string>
+    <string name="meditation_settings_desc">Guided sessions and breathing: «%1$s, meditate with me for 10 minutes».</string>
+    <string name="meditation_voice_label">Meditation voice</string>
+    <string name="meditation_voice_treko">%1$s</string>
+    <string name="meditation_voice_phone">Phone</string>
+    <string name="meditation_voice_desc">%1$s opens and closes; the cues in between use this voice. If %1$s is offline, the phone takes over.</string>
+    <string name="meditation_lights_title">Adjust lights</string>
+    <string name="meditation_lights_sub">Dims the lights that are on in your space to a warm glow and puts them back exactly as they were.</string>
+    <string name="meditation_music_title">Music</string>
+    <string name="meditation_music_sub">Calm music on your space\'s speaker, or on the phone.</string>
+
+    <!-- Scripts: short cues, said slowly. intro = settling in, body = in order, reminders fill long sessions. -->
+    <string-array name="meditation_478_intro">
+        <item>Sit or lie down comfortably. Let your shoulders drop and your breathing settle.</item>
+        <item>We\'ll breathe four, seven, eight. Breathe in through your nose for four, hold for seven, and breathe out slowly through your mouth for eight.</item>
+    </string-array>
+    <string-array name="meditation_478_body">
+        <item>Breathe in, two, three, four. Hold… and let the air out slowly, all the way to eight.</item>
+        <item>Follow the circle on the screen if it helps: it grows as you breathe in, stops while you hold and shrinks as you breathe out.</item>
+        <item>Notice how each breath out is a little longer and softer.</item>
+        <item>If you feel a bit dizzy, breathe normally for a moment and come back when you like.</item>
+        <item>Let your body grow heavier with every breath out.</item>
+        <item>A few more breaths at your own pace: four, seven, eight.</item>
+    </string-array>
+    <string-array name="meditation_478_reminders">
+        <item>Breathe in for four, hold for seven, out for eight.</item>
+        <item>If your mind wanders, just go back to counting.</item>
+        <item>Shoulders loose, jaw relaxed.</item>
+        <item>Breathe out slowly, no hurry.</item>
+    </string-array>
+
+    <string-array name="meditation_box_intro">
+        <item>Find a comfortable position, back straight and shoulders loose.</item>
+        <item>We\'ll do box breathing: in for four, hold for four, out for four, and wait four with empty lungs.</item>
+    </string-array>
+    <string-array name="meditation_box_body">
+        <item>In, two, three, four. Hold, two, three, four. Out, two, three, four. Wait, two, three, four.</item>
+        <item>Imagine drawing a square, one side for each count.</item>
+        <item>Keep the same pace on all four sides, calm and even.</item>
+        <item>If you run short of air, make the box a little smaller, three counts each.</item>
+        <item>Notice the calm each turn of the square leaves behind.</item>
+    </string-array>
+    <string-array name="meditation_box_reminders">
+        <item>In four, hold four, out four, wait four.</item>
+        <item>If you get distracted, go back to the first side of the square.</item>
+        <item>Breathe evenly, without forcing.</item>
+    </string-array>
+
+    <string-array name="meditation_scan_intro">
+        <item>Lie down or sit comfortably, and close your eyes if you like.</item>
+        <item>Take three slow breaths and let your body rest its whole weight.</item>
+    </string-array>
+    <string-array name="meditation_scan_body">
+        <item>Bring your attention to your feet. Notice their weight and warmth, without changing anything.</item>
+        <item>Move up to your ankles and calves. If there is tension, let it loosen as you breathe out.</item>
+        <item>Now your knees and thighs. Let them soften a little more.</item>
+        <item>Notice your hips and lower back resting.</item>
+        <item>Bring your attention to your belly. Feel it rise and fall with your breath.</item>
+        <item>Move up to your chest and upper back. Let them open with each breath in.</item>
+        <item>Now your hands, arms and shoulders. Let them drop.</item>
+        <item>Notice your neck and jaw. Part your teeth slightly and relax your tongue.</item>
+        <item>Relax your face: your eyes, your forehead and your scalp.</item>
+        <item>Now feel your whole body at once, breathing calmly.</item>
+    </string-array>
+    <string-array name="meditation_scan_reminders">
+        <item>If your mind drifts, gently come back to the part of the body you were on.</item>
+        <item>Breathe slowly and let each breath out release a little more.</item>
+        <item>There is nothing to do right or wrong, just notice.</item>
+    </string-array>
+
+    <string-array name="meditation_sleep_intro">
+        <item>Lie down the way you usually sleep and let the bed hold you.</item>
+        <item>Breathe slowly: in through your nose, and let the air out more slowly than it came in.</item>
+    </string-array>
+    <string-array name="meditation_sleep_body">
+        <item>With every breath out, let your body sink a little deeper.</item>
+        <item>Relax your forehead, your eyes and your jaw.</item>
+        <item>Let your shoulders drop and relax your arms and hands.</item>
+        <item>Feel your chest and belly moving on their own, without effort.</item>
+        <item>Relax your legs and feet. Your whole body is heavy and warm.</item>
+        <item>If a thought comes, let it drift by like a cloud and go back to your breath.</item>
+        <item>There is nothing else to do. Just rest.</item>
+    </string-array>
+    <string-array name="meditation_sleep_reminders">
+        <item>Breathe in softly… and let the air out slowly.</item>
+        <item>Each breath takes you a little closer to rest.</item>
+        <item>Everything is fine. You can let the day go.</item>
+    </string-array>
+
+    <string-array name="meditation_mindful_intro">
+        <item>Sit comfortably, back straight but not stiff, and close your eyes if you like.</item>
+        <item>Take a deep breath and let it out slowly.</item>
+    </string-array>
+    <string-array name="meditation_mindful_body">
+        <item>Bring your attention to your breath, the air coming in and out of your nose.</item>
+        <item>Don\'t try to change it. Just watch it as it is.</item>
+        <item>Notice the sounds around you, without judging them, and come back to your breath.</item>
+        <item>Notice the sensations in your body: the support, the temperature, your clothes against your skin.</item>
+        <item>If thoughts come, name them silently, thinking, and come back to the air.</item>
+        <item>Rest in this moment, breath after breath.</item>
+    </string-array>
+    <string-array name="meditation_mindful_reminders">
+        <item>If you got distracted, that\'s fine. Kindly come back to your breath.</item>
+        <item>Breathing in, I know I\'m breathing in. Breathing out, I know I\'m breathing out.</item>
+        <item>Just this moment, just this breath.</item>
+        <item>Let your shoulders go and breathe.</item>
+    </string-array>
+</resources>

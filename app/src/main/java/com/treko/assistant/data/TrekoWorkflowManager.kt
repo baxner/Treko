@@ -59,6 +59,9 @@ interface WorkflowActions {
     suspend fun getHomeSummary(): String
     suspend fun getTasksSummary(): String
     suspend fun getHabitsSummary(): String
+
+    /** Starts a guided meditation (the `meditation` tool); its answer may ask where the user is. */
+    suspend fun startMeditation(type: String, minutes: Int): String = "Meditación no disponible."
 }
 
 interface WorkflowStorage {
@@ -115,7 +118,8 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
             "weather",
             "home_summary",
             "tasks_summary",
-            "habits_summary"
+            "habits_summary",
+            "meditation"
         )
 
         private val STEP_TYPE_ALIASES = mapOf(
@@ -142,7 +146,10 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
             "home_status_summary" to "home_summary",
             "summary" to "home_summary",
             "tasks" to "tasks_summary",
-            "habits" to "habits_summary"
+            "habits" to "habits_summary",
+            "meditacion" to "meditation",
+            "meditar" to "meditation",
+            "respiracion" to "meditation"
         )
 
         private val STOP_WORDS = setOf(
@@ -226,6 +233,15 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
                     ),
                     WorkflowStep(type = "tasks_summary")
                 ),
+                isBuiltIn = true
+            ),
+            WorkflowDefinition(
+                id = "meditacion",
+                name = "Meditación",
+                // Asks where the user is when the home has several spaces (see the meditation tool).
+                description = "Meditación guiada de 10 minutos con luces cálidas y música tranquila en tu espacio; todo vuelve a como estaba al terminar.",
+                aliases = listOf("meditacion", "modo meditacion", "meditar", "medita conmigo", "relajacion", "respiracion guiada"),
+                steps = listOf(WorkflowStep(type = "meditation", minutes = 10)),
                 isBuiltIn = true
             )
         )
@@ -413,6 +429,7 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
             "home_summary" -> actions.getHomeSummary()
             "tasks_summary" -> actions.getTasksSummary()
             "habits_summary" -> actions.getHabitsSummary()
+            "meditation" -> actions.startMeditation(type = step.value, minutes = step.minutes)
             else -> "Tipo de paso no soportado: ${step.type}"
         }
     }
