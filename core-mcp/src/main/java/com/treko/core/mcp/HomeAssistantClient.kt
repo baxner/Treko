@@ -3,6 +3,9 @@ package com.treko.core.mcp
 import android.util.Log
 import com.treko.core.common.model.TrekoSkills
 import com.treko.core.common.util.TrekoLogBuffer
+import com.treko.core.mcp.rooms.HaRoomBackend
+import com.treko.core.mcp.rooms.HaRoomControl
+import com.treko.core.mcp.rooms.HaServiceCall
 import com.treko.core.mcp.watch.HaEventStream
 import com.treko.core.mcp.watch.HaStateLite
 import com.treko.core.mcp.watch.WatchCatalog
@@ -1703,6 +1706,39 @@ class HomeAssistantClient(
         onStatus: (message: String, ok: Boolean) -> Unit
     ): HaEventStream =
         HaEventStream(getBaseUrl(), haToken, onSensorOn, onStatus)
+
+    /** Room control (areas, lights put back as they were, player volume) on this Home Assistant. */
+    val rooms: HaRoomControl by lazy {
+        HaRoomControl(object : HaRoomBackend {
+            override fun isConfigured(): Boolean = hasValidConfig()
+            override suspend fun renderTemplate(template: String): String? =
+                withContext(Dispatchers.IO) { if (hasValidConfig()) this@HomeAssistantClient.renderTemplate(template) else null }
+            override suspend fun callService(call: HaServiceCall): Boolean =
+                withContext(Dispatchers.IO) { postExactService(call) }
+        })
+    }
+
+    /** Runs [call] as given (exact entity ids, no fuzzy correction or gate); true on HTTP success. */
+    private fun postExactService(call: HaServiceCall): Boolean {
+        if (!hasValidConfig()) return false
+        if (!call.domain.matches(Regex("[a-z_]+")) || !call.service.matches(Regex("[a-z_]+"))) return false
+        val body = JSONObject(call.data).toString().toRequestBody("application/json".toMediaType())
+        val req = Request.Builder()
+            .url("${getBaseUrl()}/api/services/${call.domain}/${call.service}")
+            .addHeader("Authorization", "Bearer $haToken")
+            .post(body)
+            .build()
+        return try {
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) invalidateStatesCache()
+                else TrekoLogBuffer.w(TAG, "${call.domain}.${call.service} failed with HTTP ${resp.code}.")
+                resp.isSuccessful
+            }
+        } catch (e: Exception) {
+            TrekoLogBuffer.w(TAG, "${call.domain}.${call.service} failed: ${e.message}")
+            false
+        }
+    }
 
     /** Renders a Jinja template in Home Assistant; null if the call fails. */
     private fun renderTemplate(template: String): String? {
