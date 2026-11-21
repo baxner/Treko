@@ -13,5 +13,9 @@ internal fun cameraAlertTexts(context: Context): CameraAlertTexts = CameraAlertT
     vehicles = { n -> context.resources.getQuantityString(R.plurals.camera_alert_vehicles, n, n) },
     onePackage = context.getString(R.string.camera_alert_one_package),
     somethingToCheck = context.getString(R.string.camera_alert_something_to_check),
-    nothingSeen = context.getString(R.string.camera_alert_nothing_seen)
+    nothingSeen = context.getString(R.string.camera_alert_nothing_seen),
+    subjectPeople = { n -> context.resources.getQuantityString(R.plurals.camera_alert_subject_people, n, n) },
+    subjectVehicles = { n -> context.resources.getQuantityString(R.plurals.camera_alert_subject_vehicles, n, n) },
+    subjectPackage = context.getString(R.string.camera_alert_subject_package),
+    reassurances = context.resources.getStringArray(R.array.camera_alert_reassurances).toList()
 )

@@ -933,13 +933,13 @@ class TrekoProactiveManager(
 
     /**
      * The model's short sentence, or "En <camera>: <what it saw>." built from the verdict's
-     * fields. The raw answer is used only when the model gave no structured verdict (with one,
-     * the raw answer is JSON and is never spoken).
+     * fields (also when the sentence reassures at an attention/urgent level, see
+     * [VisionVerdict.spokenLine]). The raw answer is used only when the model gave no
+     * structured verdict (with one, the raw answer is JSON and is never spoken).
      */
     private fun spokenAlertOf(cam: CameraAnomalyCheckResult, texts: CameraAlertTexts): String {
         val verdict = cam.verdict
-        val aviso = verdict?.spokenAlert?.trim().orEmpty()
-        if (aviso.isNotEmpty()) return SpokenText.limitWords(aviso, VisionVerdict.MAX_SPOKEN_WORDS)
+        if (verdict != null && verdict.spokenAlert.isNotBlank()) return verdict.spokenLine(cam.cameraName, texts)
         val seenText = if (verdict != null) verdict.fallbackLine(texts) else cleanAnomalyPrefix(cam.visionReport)
         val seen = SpokenText.limitWords(firstSentence(seenText), 15)
         return String.format(Locale.ROOT, texts.fallbackSpeech, cam.cameraName, seen.replaceFirstChar { it.lowercase(Locale.getDefault()) })

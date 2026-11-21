@@ -5,8 +5,6 @@ import android.graphics.BitmapFactory
 import android.media.AudioManager
 import com.treko.assistant.R
 import com.treko.assistant.data.SentinelRunTrace
-import com.treko.assistant.data.SpokenText
-import com.treko.assistant.data.VisionVerdict
 import com.treko.assistant.data.parseVisionVerdict
 import com.treko.core.common.data.TrekoAlertLog
 import com.treko.core.common.data.TrekoPreferences
@@ -22,6 +20,9 @@ import com.treko.core.mcp.watch.WatchCatalog
 import com.treko.core.mcp.watch.WatchHit
 import com.treko.core.mcp.watch.WatchPersistence
 import com.treko.core.mcp.watch.WatchSensor
+import com.treko.core.mcp.watch.ZoneCameraLearner
+import com.treko.core.mcp.watch.ZoneCameraMemory
+import com.treko.core.mcp.watch.ZoneCameras
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -62,6 +63,9 @@ class CameraWatchCoordinator(
     private val onSentinelDetection: suspend (sensor: WatchSensor, trace: SentinelRunTrace) -> Boolean = { _, _ -> true }
 ) {
     private val book = CameraWatchBook(SharedPrefsWatchPersistence(context))
+    /** Which camera sees each Frigate zone, learned by co-firing (same file as the watches). */
+    private val zoneCameraMemory = ZoneCameraMemory(SharedPrefsWatchPersistence(context, key = "zone_cameras"))
+    private val zoneCameraLearner = ZoneCameraLearner()
     private var stream: HaEventStream? = null
     private var streamClient: HomeAssistantClient? = null
     @Volatile private var catalog: List<WatchSensor> = emptyList()
@@ -184,7 +188,7 @@ class CameraWatchCoordinator(
             watchedIds.filter { states[it] == "on" }.forEach { onSensorOn(it, replay = true) }
         }
         val until = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(watch.expiresAtMs))
-        val withPicture = resolution.sensors.any { it.snapshotEntityId != null || it.cameraEntityId != null }
+        val photo = photoPromise(resolution.sensors)
         val generic = resolution.sensors.filter { it.source == WatchSensor.Source.GENERIC }.map { it.areaName }.distinct()
         val notes = buildList {
             if (resolution.unknownQueries.isNotEmpty()) {
@@ -197,9 +201,36 @@ class CameraWatchCoordinator(
         }
         return "Vigilando ${areaNames.joinToString()} (${objectLabel(objectGroup)}) " +
             (if (once) "hasta el primer aviso, como máximo hasta las $until. " else "hasta las $until o hasta que me digas que pare. ") +
-            (if (withPicture) "Aviso con voz y notificación con foto." else "Aviso con voz y notificación (sin foto: no hay cámara asociada).") +
+            when (photo) {
+                PhotoPromise.KNOWN -> "Aviso con voz y notificación con foto."
+                PhotoPromise.FROM_CAMERA_SEEING_ZONE -> "Aviso con voz y notificación con la foto de la cámara que ve esa zona."
+                PhotoPromise.NONE -> "Aviso con voz y notificación (sin foto: no hay cámara asociada)."
+            } +
             (if (notes.isEmpty()) "" else " " + notes.joinToString(" "))
     }
+
+    private enum class PhotoPromise { KNOWN, FROM_CAMERA_SEEING_ZONE, NONE }
+
+    /**
+     * What the confirmation may promise about the picture: a known camera or detection picture;
+     * for a Frigate zone with no known camera yet, the picture of the camera that sees it
+     * (learned by co-firing or found on at alert time); nothing only without any camera.
+     */
+    private fun photoPromise(sensors: List<WatchSensor>): PhotoPromise {
+        if (sensors.any { it.snapshotEntityId != null || cameraOf(it) != null }) return PhotoPromise.KNOWN
+        val zoneWithCameras = sensors.any {
+            it.source == WatchSensor.Source.FRIGATE_ZONE && ZoneCameras.companionSensors(it, catalog).isNotEmpty()
+        }
+        return if (zoneWithCameras) PhotoPromise.FROM_CAMERA_SEEING_ZONE else PhotoPromise.NONE
+    }
+
+    /** The camera of [sensor]: its own, or for a Frigate zone the one the names or co-firing tie it to. */
+    private fun cameraOf(sensor: WatchSensor): String? =
+        sensor.cameraEntityId ?: if (sensor.source == WatchSensor.Source.FRIGATE_ZONE) {
+            ZoneCameras.knownCamera(sensor, catalog, zoneCameraMemory)
+        } else {
+            null
+        }
 
     private fun describeActive(): String {
         val active = book.active(now())
@@ -224,7 +255,13 @@ class CameraWatchCoordinator(
         } else {
             emptySet()
         }
-        val ids = active.flatMap { it.sensorIds }.toSet() + sentinelSensors
+        val watchedIds = active.flatMap { it.sensorIds }.toSet()
+        // A watched zone with no camera from its names: also listen to the cameras' sensors of
+        // the same object, to learn which camera sees it (the one that fires with it).
+        val learningSensors = catalog.filter {
+            it.entityId in watchedIds && it.source == WatchSensor.Source.FRIGATE_ZONE && ZoneCameras.linkedCamera(it, catalog) == null
+        }.flatMap { ZoneCameras.companionSensors(it, catalog) }.map { it.entityId }.toSet()
+        val ids = watchedIds + sentinelSensors + learningSensors
         val client = haClientProvider()
         if (rebuild || client !== streamClient) {
             stream?.release()
@@ -261,7 +298,10 @@ class CameraWatchCoordinator(
      * follows real off → on changes, so a restart or reconnect does not re-run vision.
      */
     private suspend fun onSensorOn(entityId: String, replay: Boolean) {
-        val hit = book.onSensorActivated(entityId, now())
+        val nowMs = now()
+        // Only live changes teach a zone's camera: a replay brings everything that is on at once.
+        if (!replay) learnZoneCamera(entityId, nowMs)
+        val hit = book.onSensorActivated(entityId, nowMs)
         // The sentinel can take a while (vision model): never let it delay the alert.
         if (entityId in sentinelSensors) {
             if (replay) {
@@ -275,15 +315,25 @@ class CameraWatchCoordinator(
         deliver(hit)
     }
 
+    private fun learnZoneCamera(entityId: String, nowMs: Long) {
+        for ((zone, camera) in zoneCameraLearner.onSensorOn(entityId, nowMs, catalog)) {
+            if (ZoneCameras.linkedCamera(zone, catalog) != null) continue
+            if (zoneCameraMemory.learn(zone.areaKey, camera)) {
+                TrekoLogBuffer.i(TAG, "Zone ${zone.areaName} is seen by $camera (they fired together).")
+            }
+        }
+    }
+
     /** The user asked to watch the place of [sensor] (same sensor, camera or place name). */
     private fun isWatched(sensor: WatchSensor): Boolean {
         val active = book.active(now())
         if (active.isEmpty()) return false
         val byId = catalog.associateBy { it.entityId }
+        val camera = cameraOf(sensor)
         return active.any { w ->
             sensor.entityId in w.sensorIds ||
                 w.areaNames.any { it.equals(sensor.areaName, ignoreCase = true) } ||
-                (sensor.cameraEntityId != null && w.sensorIds.any { byId[it]?.cameraEntityId == sensor.cameraEntityId })
+                (camera != null && w.sensorIds.any { id -> byId[id]?.let { cameraOf(it) } == camera })
         }
     }
 
@@ -363,7 +413,7 @@ class CameraWatchCoordinator(
                 source = AlertSource.WATCH,
                 title = text,
                 place = area,
-                cameraEntityId = sensor?.cameraEntityId,
+                cameraEntityId = sensor?.let { cameraOf(it) },
                 objectLabel = when {
                     sensor?.source == WatchSensor.Source.GENERIC -> "motion"
                     else -> sensor?.objectType ?: hit.watch.objectGroup
@@ -384,7 +434,7 @@ class CameraWatchCoordinator(
         // 2. Then the picture, and a short description when a vision model is available.
         val client = haClientProvider() ?: return
         val (imageEntity, cameraEntity) = pictureSources(client, sensor)
-        if (cameraEntity != null && sensor?.cameraEntityId == null) {
+        if (cameraEntity != null && sensor?.let { cameraOf(it) } != cameraEntity) {
             TrekoAlertLog.update(alertId) { it.copy(cameraEntityId = cameraEntity) }
         }
         val image = imageEntity?.let { client.fetchEntityImage(it) }
@@ -413,10 +463,10 @@ class CameraWatchCoordinator(
         val raw = answer ?: return
         val verdict = parseVisionVerdict(raw)
         // A parsed verdict is never shown as raw JSON; the raw answer only when it was plain text.
-        val description = verdict?.fallbackLine(cameraAlertTexts(context)) ?: raw
-        val shortText = verdict?.spokenAlert?.takeIf { it.isNotBlank() }
-            ?.let { SpokenText.limitWords(it, VisionVerdict.MAX_SPOKEN_WORDS) }
-            ?: description
+        val texts = cameraAlertTexts(context)
+        val description = verdict?.fallbackLine(texts) ?: raw
+        // Never a reassuring sentence for an attention/urgent verdict (see VisionVerdict.spokenLine).
+        val shortText = verdict?.takeIf { it.spokenAlert.isNotBlank() }?.spokenLine(area, texts) ?: description
         post(notificationId, text, shortText, bitmap, alertId)
         addChat("👁 $area: $shortText")
         TrekoAlertLog.update(alertId) { e ->
@@ -427,17 +477,33 @@ class CameraWatchCoordinator(
         }
     }
 
-    /** Frigate's detection picture when there is one; otherwise a live camera snapshot. */
+    /**
+     * (picture to show, camera): Frigate's detection picture when there is one, otherwise a live
+     * camera snapshot. A zone has no camera of its own: the one its names or co-firing tie it
+     * to, else the camera whose sensor for the same object is on right now.
+     */
     private suspend fun pictureSources(client: HomeAssistantClient, sensor: WatchSensor?): Pair<String?, String?> {
         if (sensor == null) return null to null
         if (sensor.source != WatchSensor.Source.FRIGATE_ZONE) {
             return (sensor.snapshotEntityId ?: sensor.cameraEntityId) to sensor.cameraEntityId
         }
-        // A zone has no camera of its own: use a camera that sees the same object right now.
-        val sameObject = catalog.filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.objectType == sensor.objectType }
-        val states = client.getStates(sameObject.map { it.entityId }.toSet())
-        val seeing = sameObject.firstOrNull { states[it.entityId] == "on" } ?: return null to null
-        return (seeing.snapshotEntityId ?: seeing.cameraEntityId) to seeing.cameraEntityId
+        // The camera's own detection picture for this object when it has one, else a live snapshot.
+        fun fromCamera(camera: String): Pair<String?, String?> =
+            (ZoneCameras.sensorOfCamera(camera, sensor, catalog)?.snapshotEntityId ?: camera) to camera
+        ZoneCameras.knownCamera(sensor, catalog, zoneCameraMemory)?.let { return fromCamera(it) }
+        val companions = ZoneCameras.companionSensors(sensor, catalog)
+        if (companions.isEmpty()) return null to null
+        // The camera may report the same sighting a moment after the zone: look twice.
+        repeat(2) { attempt ->
+            if (attempt > 0) {
+                delay(ZoneCameras.CO_FIRE_WINDOW_MS)
+                // Learned meanwhile from the camera firing with the zone.
+                ZoneCameras.knownCamera(sensor, catalog, zoneCameraMemory)?.let { return fromCamera(it) }
+            }
+            val states = client.getStates(companions.map { it.entityId }.toSet())
+            ZoneCameras.cameraSeeingNow(sensor, catalog, states)?.cameraEntityId?.let { return fromCamera(it) }
+        }
+        return null to null
     }
 
     private fun alertText(sensor: WatchSensor?, objectGroup: String, area: String): String {
@@ -476,12 +542,13 @@ class CameraWatchCoordinator(
 
     private fun now() = System.currentTimeMillis()
 
-    private class SharedPrefsWatchPersistence(context: Context) : WatchPersistence {
+    /** In `treko_watches` (excluded from backups): what is watched and how the home's cameras relate. */
+    private class SharedPrefsWatchPersistence(context: Context, private val key: String = "state") : WatchPersistence {
         private val prefs = context.applicationContext.getSharedPreferences("treko_watches", Context.MODE_PRIVATE)
         override fun save(encoded: String) {
-            prefs.edit().putString("state", encoded).apply()
+            prefs.edit().putString(key, encoded).apply()
         }
-        override fun load(): String? = prefs.getString("state", null)
+        override fun load(): String? = prefs.getString(key, null)
     }
 
     companion object {

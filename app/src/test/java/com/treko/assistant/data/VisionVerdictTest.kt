@@ -132,4 +132,63 @@ class VisionVerdictTest {
         assertEquals("", cut.spokenAlert)
         assertFalse(cut.fallbackLine().contains('{'))
     }
+
+    // From a real device log: nivel=atencion, a package being left, but a reassuring aviso.
+    private val contradictory = """{"confirmado": true, "personas": 1, "vehiculos": 0, "paquete": true,
+        "donde": "frente a la puerta", "actividad": "dejando un paquete", "nivel": "atencion",
+        "motivo": "Persona en la entrada con una caja", "aviso": "Se ve una persona en el jardín, no hay peligro."}"""
+
+    @Test
+    fun reassuringAvisoIsNotSpokenAtAttentionLevel() {
+        val v = parseVisionVerdict(contradictory)!!
+        assertNull(v.usableSpokenAlert())
+        val line = v.spokenLine("Jardín")
+        assertEquals("En Jardín: una persona dejando un paquete frente a la puerta.", line)
+        assertFalse(line.contains("peligro"))
+    }
+
+    @Test
+    fun reassuringAvisoIsKeptAtInfoLevelAndPlainAvisoAtAttention() {
+        val info = parseVisionVerdict(contradictory.replace("\"atencion\"", "\"info\""))!!
+        assertEquals("Se ve una persona en el jardín, no hay peligro.", info.spokenLine("Jardín"))
+        val plain = parseVisionVerdict(contradictory.replace("no hay peligro", "está en la puerta"))!!
+        assertEquals("Se ve una persona en el jardín, está en la puerta.", plain.spokenLine("Jardín"))
+    }
+
+    @Test
+    fun detectsReassurancesInBothLanguages() {
+        val es = CameraAlertTexts.SPANISH.reassurances
+        assertTrue(VisionVerdict.reassures("Todo bien en la cochera.", es))
+        assertTrue(VisionVerdict.reassures("Nada de qué preocuparse, es el cartero.", es))
+        assertTrue(VisionVerdict.reassures("Hay alguien, ¡NO HAY PELIGRO!", es))
+        assertFalse(VisionVerdict.reassures("Hay una persona parada en la puerta.", es))
+        val en = listOf("no danger", "nothing to worry", "don't worry", "all good")
+        assertTrue(VisionVerdict.reassures("A person at the gate, nothing to worry about.", en))
+        assertTrue(VisionVerdict.reassures("Someone is there, don't worry.", en))
+        assertFalse(VisionVerdict.reassures("Someone is standing at the door.", en))
+    }
+
+    @Test
+    fun composedLineFallsBackToCountsWhenFieldsAreEmpty() {
+        val v = parseVisionVerdict("""{"personas": 0, "vehiculos": 2, "nivel": "urgente", "aviso": "Todo en orden."}""")!!
+        assertEquals("2 vehículos.", v.composedLine())
+        assertEquals("En Cochera: 2 vehículos.", v.spokenLine("Cochera"))
+        val empty = parseVisionVerdict("""{"nivel": "atencion", "aviso": "No pasa nada."}""")!!
+        assertEquals("En Cochera: hay algo que conviene revisar.", empty.spokenLine("Cochera"))
+    }
+
+    @Test
+    fun packageNextToSomeonePassingDoesNotEscalateWithoutLevel() {
+        val passing = parseVisionVerdict(
+            """{"confirmado": true, "personas": 1, "paquete": true, "donde": "en la banqueta", "actividad": "caminando de paso"}"""
+        )!!
+        assertEquals(VisionLevel.INFO, passing.level)
+        val sidewalk = parseVisionVerdict("""{"personas": 1, "paquete": true, "donde": "on the sidewalk", "actividad": "walking past"}""")!!
+        assertEquals(VisionLevel.INFO, sidewalk.level)
+        val left = parseVisionVerdict("""{"confirmado": true, "personas": 0, "paquete": true, "donde": "frente a la puerta"}""")!!
+        assertEquals(VisionLevel.ATTENTION, left.level)
+        // The model's own level always wins.
+        val rated = parseVisionVerdict("""{"personas": 1, "paquete": true, "donde": "en la banqueta", "nivel": "atencion"}""")!!
+        assertEquals(VisionLevel.ATTENTION, rated.level)
+    }
 }

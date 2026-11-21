@@ -486,7 +486,7 @@
     <string name="alert_detail_said">What %1$s said</string>
     <string name="alert_detail_gone">This alert is no longer available.</string>
     <!-- Vision verdict prompt (camera sentinel and watches). Keys and level values of the JSON are fixed (the app reads them). -->
-    <string name="vision_verdict_prompt">You are the security filter of a home\'s cameras. Analyze ONLY what is visible in the picture; do not assume intentions.\nContext: %1$s\n%2$sAnswer ONLY with one valid JSON object, no extra text and no code blocks, with these keys (keep the keys and the level values exactly as written):\n{\"confirmado\": true or false, \"personas\": 0, \"vehiculos\": 0, \"paquete\": true or false, \"donde\": \"\", \"actividad\": \"\", \"nivel\": \"ninguno|info|atencion|urgente\", \"motivo\": \"\", \"aviso\": \"\"}\n- confirmado: whether what the detector reported is really visible (false for a shadow, reflection, plant, animal or empty scene).\n- personas and vehiculos: how many are visible.\n- donde: 2 to 6 words, for example \"on the sidewalk\", \"at the front door\", \"inside the yard\".\n- actividad: what is visibly happening, for example \"walking past\", \"standing at the entrance\", \"leaving a package\", \"trying to open\".\n- nivel: ninguno = nothing confirmed or an empty scene; info = a person or vehicle passing on the street or sidewalk, a parked vehicle, a courier already leaving; atencion = a person inside the property or standing at the entrance, a package left, a door or gate open; urgente = someone trying to open, force or climb, smoke or fire.\n- motivo: at most 12 words, visible facts only; if the picture is dark or blurry, say so here.\n- aviso: sentence to say out loud in English, at most 15 words, calm tone, saying what is there and where, naming the camera.\nDo not use the words intruder, suspicious or stranger unless the level is urgente with visible evidence.</string>
+    <string name="vision_verdict_prompt">You are the security filter of a home\'s cameras. Analyze ONLY what is visible in the picture; do not assume intentions.\nContext: %1$s\n%2$sAnswer ONLY with one valid JSON object, no extra text and no code blocks, with these keys (keep the keys and the level values exactly as written):\n{\"confirmado\": true or false, \"personas\": 0, \"vehiculos\": 0, \"paquete\": true or false, \"donde\": \"\", \"actividad\": \"\", \"nivel\": \"ninguno|info|atencion|urgente\", \"motivo\": \"\", \"aviso\": \"\"}\n- confirmado: whether what the detector reported is really visible (false for a shadow, reflection, plant, animal or empty scene).\n- personas and vehiculos: how many are visible.\n- donde: 2 to 6 words, for example \"on the sidewalk\", \"at the front door\", \"inside the yard\".\n- actividad: what is visibly happening, for example \"walking past\", \"standing at the entrance\", \"trying to open\".\n- paquete: true only when a box, parcel or bag is clearly visible left on the ground or at the door; false otherwise.\n- nivel: ninguno = nothing confirmed or an empty scene; info = a person or vehicle passing on the street or sidewalk, a parked vehicle, a courier already leaving; atencion = a person inside the property or standing at the entrance, a package left, a door or gate open; urgente = someone trying to open, force or climb, smoke or fire.\n- motivo: at most 12 words, visible facts only; if the picture is dark or blurry, say so here.\n- aviso: sentence to say out loud in English, at most 15 words, calm tone, saying what is there and where, naming the camera. It must match nivel: at atencion or urgente never reassure (no \"no danger\" or \"all good\").\nDo not use the words intruder, suspicious or stranger unless the level is urgente with visible evidence.</string>
     <string name="vision_ctx_detector">The detector saw %1$s on the camera “%2$s”.</string>
     <string name="vision_ctx_periodic">Periodic check of the camera “%1$s”, with no detection before.</string>
     <string name="vision_ctx_zone">Zone: %1$s.</string>
@@ -597,6 +597,37 @@
     <string name="camera_alert_one_package">there is a package</string>
     <string name="camera_alert_something_to_check">there is something worth checking</string>
     <string name="camera_alert_nothing_seen">nothing unusual is visible</string>
+    <!-- Who or what was seen, at the start of a spoken sentence ("a person walking on the sidewalk"). -->
+    <plurals name="camera_alert_subject_people">
+        <item quantity="one">a person</item>
+        <item quantity="other">%1$d people</item>
+    </plurals>
+    <plurals name="camera_alert_subject_vehicles">
+        <item quantity="one">a vehicle</item>
+        <item quantity="other">%1$d vehicles</item>
+    </plurals>
+    <string name="camera_alert_subject_package">a package</string>
+    <!-- Reassuring phrases: never said in an atencion or urgente alert (a sentence is built from the facts instead). Lowercase, no accents. -->
+    <string-array name="camera_alert_reassurances">
+        <item>no danger</item>
+        <item>not dangerous</item>
+        <item>no risk</item>
+        <item>no threat</item>
+        <item>nothing to worry</item>
+        <item>no need to worry</item>
+        <item>don\'t worry</item>
+        <item>no cause for concern</item>
+        <item>nothing to be concerned</item>
+        <item>all good</item>
+        <item>all clear</item>
+        <item>everything is fine</item>
+        <item>everything\'s fine</item>
+        <item>everything is normal</item>
+        <item>nothing serious</item>
+        <item>nothing unusual</item>
+        <item>nothing to fear</item>
+        <item>harmless</item>
+    </string-array>
     <plurals name="pending_alert_age_minutes">
         <item quantity="one">%1$d minute ago:</item>
         <item quantity="other">%1$d minutes ago:</item>

@@ -104,7 +104,55 @@ data class VisionVerdict(
         return sentence(line)
     }
 
+    /** Attention or urgent: the alert must not sound like "all is fine". */
+    val isAlarming: Boolean get() = level == VisionLevel.ATTENTION || level == VisionLevel.URGENT
+
+    /**
+     * The model's own short sentence when it can be said as is: not blank and, at attention or
+     * urgent level, not reassuring ("no hay peligro" next to nivel=atencion contradicts it).
+     */
+    fun usableSpokenAlert(texts: CameraAlertTexts = CameraAlertTexts.SPANISH): String? {
+        val aviso = spokenAlert.trim()
+        if (aviso.isEmpty()) return null
+        if (isAlarming && reassures(aviso, texts.reassurances)) return null
+        return SpokenText.limitWords(aviso, MAX_SPOKEN_WORDS)
+    }
+
+    /**
+     * What was seen, from the fields only: who or what + activity + where ("una persona
+     * caminando de paso en la banqueta"); the counted facts when those are missing.
+     */
+    fun composedLine(texts: CameraAlertTexts = CameraAlertTexts.SPANISH): String {
+        val subject = when {
+            people > 0 -> texts.subjectPeople(people)
+            vehicles > 0 -> texts.subjectVehicles(vehicles)
+            packageSeen -> texts.subjectPackage
+            else -> ""
+        }
+        val line = listOf(subject, activity, where).map { it.trim().trimEnd('.') }.filter { it.isNotBlank() }.joinToString(" ")
+        return if (subject.isBlank() && activity.isBlank() && where.isBlank()) genericLine(texts) else sentence(line)
+    }
+
+    /**
+     * The sentence to say for this verdict on [cameraName]: [usableSpokenAlert], else
+     * "En <camera>: <[composedLine]>".
+     */
+    fun spokenLine(cameraName: String, texts: CameraAlertTexts = CameraAlertTexts.SPANISH): String {
+        usableSpokenAlert(texts)?.let { return it }
+        val seen = composedLine(texts).replaceFirstChar { it.lowercase(Locale.getDefault()) }
+        return SpokenText.limitWords(String.format(Locale.ROOT, texts.fallbackSpeech, cameraName, seen), MAX_SPOKEN_WORDS)
+    }
+
     companion object {
+        /** True when [text] contains one of the reassuring [phrases] (case, accents and punctuation ignored). */
+        fun reassures(text: String, phrases: List<String>): Boolean {
+            val t = " ${plainWords(text)} "
+            return phrases.map { plainWords(it) }.any { it.isNotEmpty() && t.contains(" $it") }
+        }
+
+        private fun plainWords(text: String): String =
+            TrekoProactiveManager.normalizeAscii(text).replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+
         /** Longest spoken alert kept (the prompt asks for 15 words). */
         const val MAX_SPOKEN_WORDS = 18
 
@@ -137,7 +185,14 @@ data class CameraAlertTexts(
     val vehicles: (Int) -> String,
     val onePackage: String,
     val somethingToCheck: String,
-    val nothingSeen: String
+    val nothingSeen: String,
+    /** "una persona" / "3 personas": who was seen, at the start of a sentence. */
+    val subjectPeople: (Int) -> String = { n -> if (n == 1) "una persona" else "$n personas" },
+    /** "un vehículo" / "2 vehículos". */
+    val subjectVehicles: (Int) -> String = { n -> if (n == 1) "un vehículo" else "$n vehículos" },
+    val subjectPackage: String = "un paquete",
+    /** Reassuring phrases never said in an attention or urgent alert (see [VisionVerdict.usableSpokenAlert]). */
+    val reassurances: List<String> = SPANISH_REASSURANCES
 ) {
     companion object {
         val SPANISH = CameraAlertTexts(
@@ -153,6 +208,14 @@ data class CameraAlertTexts(
         )
     }
 }
+
+/** Default for [CameraAlertTexts.reassurances]; the app passes the list of its string resources. */
+internal val SPANISH_REASSURANCES = listOf(
+    "no hay peligro", "sin peligro", "no es peligros", "no hay riesgo", "sin riesgo",
+    "nada de que preocupar", "nada por lo que preocupar", "no hay de que preocupar", "no hay por que preocupar",
+    "no te preocupes", "todo bien", "todo en orden", "todo tranquilo", "todo normal", "nada grave",
+    "no pasa nada", "nada fuera de lo normal", "nada raro"
+)
 
 /** Text helpers for what Treko says out loud. */
 object SpokenText {
@@ -205,7 +268,9 @@ fun parseVisionVerdict(raw: String?): VisionVerdict? {
     val level = VisionLevel.parse(fields["nivel"]?.let(::asString)) ?: when {
         // No level given: derive a cautious one from what it did say.
         confirmed == false -> VisionLevel.NONE
-        packageSeen -> VisionLevel.ATTENTION
+        // A package next to someone passing on the street is not a delivery to this home.
+        packageSeen && !passingBy(fields["actividad"], fields["donde"]) -> VisionLevel.ATTENTION
+        packageSeen -> VisionLevel.INFO
         people > 0 || vehicles > 0 || confirmed == true -> VisionLevel.INFO
         else -> VisionLevel.NONE
     }
@@ -220,6 +285,17 @@ fun parseVisionVerdict(raw: String?): VisionVerdict? {
         reason = fields["motivo"]?.let(::asString).orEmpty(),
         spokenAlert = fields["aviso"]?.let(::asString).orEmpty()
     )
+}
+
+/** Words of a verdict's actividad/donde that mean "out on the street, passing by". */
+private val PASSING_WORDS = listOf(
+    "de paso", "pasando", "caminando por", "banqueta", "acera", "vereda", "en la calle",
+    "passing", "walking past", "walking by", "sidewalk", "pavement", "on the street", "in the street"
+)
+
+private fun passingBy(activity: String?, where: String?): Boolean {
+    val text = TrekoProactiveManager.normalizeAscii(listOfNotNull(activity, where).joinToString(" ") { asString(it) })
+    return PASSING_WORDS.any { text.contains(it) }
 }
 
 private val KNOWN_KEYS = listOf("nivel", "confirmado", "aviso", "personas", "vehiculos", "paquete", "motivo")

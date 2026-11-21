@@ -3,7 +3,8 @@
     Android 12+ backup rules. Never backed up or transferred:
     - treko_settings: holds the Home Assistant and Xiaozhi tokens (and the voice print).
     - treko_vault_memory: personal notes the user asked Treko to remember.
-    - treko_watches: active camera watches (places of the home being watched).
+    - treko_watches: active camera watches (places of the home being watched) and which
+      camera sees each Frigate zone, as learned on this phone.
     - files/avisos: alert history and camera snapshots, which can show people.
     Habits, tasks, timers and workflows are still backed up.
     Keep in sync with full_backup_content.xml (Android 11 and older).
