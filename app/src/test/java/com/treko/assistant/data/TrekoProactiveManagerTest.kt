@@ -97,7 +97,9 @@ class TrekoProactiveManagerTest {
         assertTrue(insight.summaryText.contains("Revisar sensores"))
         assertTrue(insight.summaryText.contains("Caminar 30 min"))
         assertTrue(insight.spokenPrompt.contains("Hidratación") || insight.spokenPrompt.contains("hidratación"))
-        assertTrue(insight.spokenPrompt.contains("Comprar café en grano"))
+        // A saved note that does not name today is not brought up.
+        assertFalse(insight.spokenPrompt.contains("Comprar café en grano"))
+        assertFalse(insight.spokenSpeechText.contains("Comprar café en grano"))
     }
 
     @Test

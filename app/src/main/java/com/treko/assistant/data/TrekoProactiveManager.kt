@@ -37,7 +37,11 @@ data class CameraAnomalyCheckResult(
     val visionReport: String,
     val hasAnomaly: Boolean,
     /** The camera itself (Home Assistant camera group's main entity), when known. */
-    val cameraEntityId: String? = null
+    val cameraEntityId: String? = null,
+    /** The structured verdict, when the model answered with one (else [hasAnomaly] came from keywords). */
+    val verdict: VisionVerdict? = null,
+    /** Detector label that started the look (person, car…), when there was a detector. */
+    val label: String? = null
 )
 
 /**
@@ -75,7 +79,9 @@ data class ProactiveInsight(
     /** Camera alerts: what the vision model reported. */
     val visionReport: String? = null,
     /** Entry of the alerts log for this insight, once it was recorded. */
-    val alertId: Long? = null
+    val alertId: Long? = null,
+    /** Camera alerts: the vision model's level ("info", "atencion", "urgente"), when it gave one. */
+    val visionLevel: String? = null
 )
 
 /**
@@ -150,11 +156,24 @@ class TrekoProactiveManager(
         private const val DEFAULT_COOLDOWN_MS = 45L * 60_000L
         private const val HABITS_TASK_REPEAT_COOLDOWN_MS = 120L * 60_000L
 
-        const val SENTINEL_VISION_PROMPT =
-            "Actúa como un sistema centinela de seguridad doméstica. Evalúa esta cámara e identifica ÚNICAMENTE si existe una ANOMALÍA REAL dentro de la propiedad que requiera atención inmediata del propietario (por ejemplo: desconocido detenido frente a la puerta o intentando entrar, intruso dentro del jardín, patio o cochera, paquete entregado en la entrada, puerta de casa o portón abierto de par en par, humo, fuego o fuga). " +
-                "IGNORA por completo escenas cotidianas normales: calle o escena tranquila, autos estacionados en la vía pública, peatones caminando por la acera pública, jardín despejado o habitación en calma. " +
-                "Si NO hay ninguna anomalía real que reportar, responde exactamente: [NORMAL]. " +
-                "Si SÍ hay una anomalía real, responde: [ANOMALIA] seguido de una descripción breve y directa en una sola frase."
+        /** Same camera alert (camera + label + level) is not repeated for this long; urgent ones always are. */
+        private const val CAMERA_ALERT_REPEAT_COOLDOWN_MS = 20L * 60_000L
+
+        /**
+         * Follow-up context handed to the voice model with a camera alert (facts only; the
+         * alert itself is read as is). %1$s camera(s), %2$s level, %3$s visible facts.
+         */
+        const val CAMERA_ALERT_FOLLOWUP_PROMPT =
+            "[AVISO DE CÁMARA] Cámara: %1\$s. Nivel: %2\$s. Hechos visibles: %3\$s. " +
+                "Si pide verla usa view_camera. Habla con calma y en una frase; no lo llames intruso ni sospechoso salvo que el nivel sea urgente."
+
+        /** Spoken when the vision model gave no short sentence: %1$s camera, %2$s what it saw. */
+        const val CAMERA_ALERT_FALLBACK_SPEECH = "En %1\$s: %2\$s"
+
+        /** Follow-up context for a briefing (facts only, never the spoken text again). */
+        const val BRIEFING_FOLLOWUP_PROMPT =
+            "[RESUMEN PROACTIVO] Datos por si pregunta: %1\$s " +
+                "Herramientas: posponer → manage_proactive_assistant action='snooze'; agua o hábitos → manage_habits; tareas → manage_tasks; aparatos → herramientas de Home Assistant."
 
         private val PERIMETER_CAMERA_KEYWORDS = listOf(
             "entrada", "puerta", "porton", "jardin", "patio", "cochera", "garage", "garaje",
@@ -200,26 +219,29 @@ class TrekoProactiveManager(
             "coches aparcados",
             "camina junto a un coche",
             "caminando por la acera",
+            "caminando por la banqueta",
             "caminando por la calle",
+            "por la banqueta",
             "pasa caminando",
             "no anomaly",
             "nothing unusual",
             "all clear"
         )
 
+        // A person, "alguien", a box or a delivery alone is an ordinary scene (Frigate already saw
+        // a person): only what makes it worth an alert counts.
         private val ANOMALY_CAMERA_KEYWORDS = listOf(
-            "[anomalia]",
             "anomal",
-            "persona",
-            "alguien",
             "intruso",
             "desconocid",
             "esperando en la puerta",
             "frente a la puerta",
             "tocando la puerta",
             "paquete",
-            "caja",
-            "entrega",
+            "intentando entrar",
+            "intentando abrir",
+            "forzando",
+            "trepando",
             "puerta abierta",
             "porton abierto",
             "ventana abierta",
@@ -229,8 +251,6 @@ class TrekoProactiveManager(
             "fuego",
             "incendio",
             "fuga",
-            "person",
-            "someone",
             "package",
             "open door",
             "intruder"
@@ -245,6 +265,99 @@ class TrekoProactiveManager(
             return h >= 23 || h < 7
         }
 
+        /** "1 hora", "2 horas". */
+        internal fun countPhrase(n: Int, singular: String, plural: String): String =
+            "$n ${if (n == 1) singular else plural}"
+
+        internal const val TOPIC_HOME = "home"
+        internal const val TOPIC_TASKS = "tasks"
+        internal const val TOPIC_HABITS = "habits"
+        internal const val TOPIC_WATER = "water"
+        internal const val TOPIC_MEMORY = "memory"
+
+        private val ACCESS_ITEM_REGEX = Regex("""[^,()]+\([^()]*\)""")
+
+        /**
+         * The "Sensores y accesos activos (n): A (abierto), B (movimiento)…" line of the home
+         * summary without motion, occupancy and presence sensors. Null when nothing is left.
+         */
+        internal fun accessAlertsOnly(line: String?): String? {
+            if (line.isNullOrBlank()) return null
+            val body = line.substringAfter(':', "").trim().removeSuffix(".")
+                .replace(Regex("""\s+y\s+\d+\s+más$"""), "")
+            val items = ACCESS_ITEM_REGEX.findAll(body)
+                .map { it.value.trim() }
+                .filter { it.isNotEmpty() && !it.endsWith("(movimiento)") }
+                .toList()
+            if (items.isEmpty()) return null
+            return "Accesos abiertos (${items.size}): ${items.joinToString(", ")}"
+        }
+
+        /** "En casa sigue abierto o sin seguro: Puerta Jardín." from [accessAlertsOnly]. */
+        internal fun homeAccessSpeech(accessLine: String): String {
+            val names = ACCESS_ITEM_REGEX.findAll(accessLine.substringAfter(':', accessLine))
+                .map { it.value.substringBefore('(').trim() }
+                .filter { it.isNotEmpty() }
+                .toList()
+            if (names.isEmpty()) return "En casa hay accesos abiertos."
+            val joined = if (names.size == 1) names[0] else names.dropLast(1).joinToString(", ") + " y " + names.last()
+            return if (names.size == 1) "En casa sigue abierto o sin seguro: $joined."
+            else "En casa siguen abiertos o sin seguro: $joined."
+        }
+
+        /** Closing question about the topics the briefing actually spoke of; null when none asks for one. */
+        internal fun closingQuestion(spokenTopics: Set<String>): String? {
+            val actions = buildList {
+                if (TOPIC_HOME in spokenTopics) add("ajuste algo en casa")
+                if (TOPIC_HABITS in spokenTopics) add("marque algún hábito")
+                if (TOPIC_WATER in spokenTopics) add("registre un vaso de agua")
+                if (TOPIC_TASKS in spokenTopics) add("marque alguna tarea como hecha")
+            }
+            if (actions.isEmpty()) return null
+            val joined = if (actions.size == 1) actions[0] else actions.dropLast(1).joinToString(", ") + " o " + actions.last()
+            return "¿Quieres que $joined?"
+        }
+
+        private val WEEKDAYS_ES = listOf("domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado")
+        private val WEEKDAYS_EN = listOf("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
+        private val MONTHS_ES = listOf(
+            "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+        )
+        private val MONTHS_EN = listOf(
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december"
+        )
+
+        /**
+         * A saved note is worth mentioning today only when it names today: the weekday
+         * ("los martes…") or the date (21/11, 2026-11-21, "21 de noviembre", "november 21").
+         */
+        internal fun isMemoryRelevantToday(key: String, value: String, today: Calendar): Boolean {
+            val text = " " + normalizeAscii("$key $value").replace('_', ' ') + " "
+            val dow = today.get(Calendar.DAY_OF_WEEK) - 1
+            val day = today.get(Calendar.DAY_OF_MONTH)
+            val month = today.get(Calendar.MONTH)
+            val year = today.get(Calendar.YEAR)
+            val word = { w: String -> Regex("""(^|[^a-z])$w([^a-z]|$)""").containsMatchIn(text) }
+            if (word(WEEKDAYS_ES[dow]) || word(WEEKDAYS_EN[dow])) return true
+            val d = day.toString()
+            val dd = d.padStart(2, '0')
+            val m = (month + 1).toString()
+            val mm = m.padStart(2, '0')
+            val numeric = listOf(
+                Regex("""(^|[^0-9])0?$d[/\-.]0?$m([^0-9]|$)"""),
+                Regex("""(^|[^0-9])$year-$mm-$dd([^0-9]|$)""")
+            )
+            if (numeric.any { it.containsMatchIn(text) }) return true
+            val named = listOf(
+                Regex("""(^|[^0-9])0?$d\s+(de\s+)?${MONTHS_ES[month]}([^a-z]|$)"""),
+                Regex("""(^|[^a-z])${MONTHS_EN[month]}\s+0?$d([^0-9]|$)"""),
+                Regex("""(^|[^0-9])0?$d\s+(of\s+)?${MONTHS_EN[month]}([^a-z]|$)""")
+            )
+            return named.any { it.containsMatchIn(text) }
+        }
+
         internal fun normalizeAscii(text: String): String =
             text.lowercase(Locale.ROOT)
                 .replace("á", "a")
@@ -256,8 +369,10 @@ class TrekoProactiveManager(
                 .replace("ñ", "n")
                 .trim()
 
+        private val NEGATIVE_TAG_START = listOf("ninguna", "ninguno", "no hay", "no se", "nada", "sin ", "none", "no ")
+
         private val NEGATED_CLAUSE_REGEX = Regex(
-            """\b(?:no\s+se\s+observa[n]?|no\s+se\s+ve[n]?|no\s+detect[ao]n?|no\s+hay|sin|ningun[ao]?|ni)\s+(?:(?:una|un|el|la|los|las|de)\s+)?(?:anomal[a-z]*|personas?|gente|alguien|intrus[ao]s?|desconocid[ao]s?|paquetes?|cajas?|movimientos?|vehiculos?|coches?|autos?|novedad(?:es)?|actividad(?:es)?\s+inusual(?:es)?|(?:puertas?|porton(?:es)?|ventanas?|cocheras?)\s+abiert[ao]s?)(?:\s*(?:,|ni|o|y)\s*(?:(?:una|un|el|la|los|las|de|ningun[ao]?)\s+)?(?:anomal[a-z]*|personas?|gente|alguien|intrus[ao]s?|desconocid[ao]s?|paquetes?|cajas?|movimientos?|vehiculos?|coches?|autos?|novedad(?:es)?|actividad(?:es)?\s+inusual(?:es)?|(?:puertas?|porton(?:es)?|ventanas?|cocheras?)\s+abiert[ao]s?))*"""
+            """\b(?:no\s+se\s+observa[n]?|no\s+se\s+ve[n]?|no\s+detect[ao]n?|no\s+hay|sin|ningun[ao]?|ni)\s+(?:(?:una|un|el|la|los|las|de|a)\s+)?(?:anomal[a-z]*|personas?|gente|alguien|intrus[ao]s?|desconocid[ao]s?|paquetes?|cajas?|movimientos?|vehiculos?|coches?|autos?|novedad(?:es)?|actividad(?:es)?\s+inusual(?:es)?|(?:puertas?|porton(?:es)?|ventanas?|cocheras?)\s+abiert[ao]s?)(?:\s*(?:,|ni|o|y)\s*(?:(?:una|un|el|la|los|las|de|ningun[ao]?)\s+)?(?:anomal[a-z]*|personas?|gente|alguien|intrus[ao]s?|desconocid[ao]s?|paquetes?|cajas?|movimientos?|vehiculos?|coches?|autos?|novedad(?:es)?|actividad(?:es)?\s+inusual(?:es)?|(?:puertas?|porton(?:es)?|ventanas?|cocheras?)\s+abiert[ao]s?))*"""
         )
 
         /**
@@ -272,10 +387,10 @@ class TrekoProactiveManager(
                 return false
             }
             if (normalized.startsWith("[anomalia]")) {
-                val afterTag = normalized.removePrefix("[anomalia]").trim()
-                if (afterTag.isNotBlank() && !afterTag.startsWith("ninguna") && !afterTag.startsWith("no hay")) {
-                    return true
-                }
+                val afterTag = normalized.removePrefix("[anomalia]").trim().trimStart(':', '-', ' ')
+                // "[ANOMALIA] ninguna" / "[ANOMALIA]: no hay nada" is the model saying "nothing".
+                if (afterTag.isBlank() || NEGATIVE_TAG_START.any { afterTag.startsWith(it) }) return false
+                return true
             }
 
             // Si el reporte describe explícitamente una escena tranquila o normal sin prefijo de alerta,
@@ -295,7 +410,7 @@ class TrekoProactiveManager(
                 "intruso", "desconocid", "paquete", "puerta abierta", "porton abierto",
                 "cochera abierta", "humo", "fuego", "sospech", "intentando entrar", "tocando la puerta"
             )
-            var cleaned = NEGATED_CLAUSE_REGEX.replace(normalized, " ")
+            var cleaned = NEGATED_CLAUSE_REGEX.replace(normalized.replace("[anomalia]", " "), " ")
             for (neg in NEGATIVE_CAMERA_PHRASES) {
                 cleaned = cleaned.replace(neg, " ")
             }
@@ -440,18 +555,23 @@ class TrekoProactiveManager(
             }
 
             val spokenCoaching = if (remaining > 0) {
+                val glasses = "$currentGlasses de $targetGlasses ${if (targetGlasses == 1) "vaso" else "vasos"} de agua"
                 val sincePhrase = when {
-                    minutesSinceLastGlass == null -> "llevas $currentGlasses de $targetGlasses vasos de agua hoy"
-                    minutesSinceLastGlass < 60 -> "llevas $currentGlasses de $targetGlasses vasos de agua y tomaste el último hace $minutesSinceLastGlass minutos"
+                    minutesSinceLastGlass == null -> "llevas $glasses hoy"
+                    minutesSinceLastGlass < 60 ->
+                        "llevas $glasses y tomaste el último hace ${countPhrase(minutesSinceLastGlass, "minuto", "minutos")}"
                     else -> {
                         val h = minutesSinceLastGlass / 60
                         val m = minutesSinceLastGlass % 60
-                        val timeStr = if (m >= 15) "$h horas y $m minutos" else "$h horas"
-                        "llevas $currentGlasses de $targetGlasses vasos de agua y pasaron $timeStr desde tu último vaso"
+                        val timeStr = if (m >= 15) {
+                            "${countPhrase(h, "hora", "horas")} y ${countPhrase(m, "minuto", "minutos")}"
+                        } else {
+                            countPhrase(h, "hora", "horas")
+                        }
+                        "llevas $glasses y ${if (h == 1 && m < 15) "pasó" else "pasaron"} $timeStr desde tu último vaso"
                     }
                 }
-                val hoursStr = if (hoursUntilBedtime >= 2.0) "${hoursUntilBedtime.roundToInt()} horas" else "poco tiempo"
-                "En hidratación, $sincePhrase; te faltan $remaining vasos en las próximas $hoursStr antes de dormir, aproximadamente uno cada $cadenceLabel."
+                "En hidratación, $sincePhrase; te ${if (remaining == 1) "falta 1" else "faltan $remaining"} antes de dormir."
             } else {
                 "Ya cumpliste tu meta de hidratación de $targetGlasses vasos hoy."
             }
@@ -478,6 +598,7 @@ class TrekoProactiveManager(
      * Regla de oro para cámaras: si las cámaras no presentan ninguna anomalía real,
      * se omiten por completo del reporte ("si no ve nada anormal que se lo ahorre").
      */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun evaluateNow(
         includeCameraScan: Boolean,
         force: Boolean = false,
@@ -488,24 +609,34 @@ class TrekoProactiveManager(
         camerasOnly: Boolean = false
     ): ProactiveInsight? {
         val now = clockMs()
-        val cleanAssistantName = assistantName.trim().ifBlank { "Treko" }
         // Present only in a camera-sentinel run: collects what happened for its log line.
         val trace = coroutineContext[SentinelRunTrace]
-
-        val homeStartMs = System.currentTimeMillis()
-        val homeSummary = runCatching { sources.getHomeStatusSummary() }.getOrDefault("")
-        trace?.stage("home", System.currentTimeMillis() - homeStartMs)
         val camerasSnoozed = isTopicSnoozed("cameras", now) && !force
-        val cameraResults = if (includeCameraScan && !camerasSnoozed) {
-            cameraRotationOffset = (cameraRotationOffset + 1) % 12
-            val scanStartMs = System.currentTimeMillis()
-            runCatching { sources.scanPriorityCamerasForAnomalies(homeSummary) }
-                .onFailure { trace?.decide("error", "camera scan failed: ${it.message}") }
-                .getOrDefault(emptyList())
-                .also { trace?.stage("scan", System.currentTimeMillis() - scanStartMs) }
-        } else {
-            trace?.decide("skipped", if (!includeCameraScan) "camera scan is off" else "cameras topic snoozed")
-            emptyList()
+
+        // The sentinel only looks at the camera(s): home, habits, tasks and memories are not loaded.
+        if (camerasOnly) {
+            if (!includeCameraScan || camerasSnoozed) {
+                trace?.decide("skipped", if (!includeCameraScan) "camera scan is off" else "cameras topic snoozed")
+                return null
+            }
+            val results = scanCameras(homeSummary = "", trace = trace)
+            return when (val outcome = cameraAlert(results, now, force, trace)) {
+                is CameraOutcome.Alert -> outcome.insight
+                CameraOutcome.Suppressed -> null
+                CameraOutcome.Nothing -> {
+                    trace?.decide("normal", if (results.isEmpty()) "no camera verdict" else "no anomaly in the verdict")
+                    null
+                }
+            }
+        }
+
+        val homeSummary = runCatching { sources.getHomeStatusSummary() }.getOrDefault("")
+        val cameraResults = if (includeCameraScan && !camerasSnoozed) scanCameras(homeSummary, trace) else emptyList()
+        // Prioridad 1: anomalía visual REAL en una o más cámaras. Si no hay, no se habla de cámaras.
+        when (val outcome = cameraAlert(cameraResults, now, force, trace)) {
+            is CameraOutcome.Alert -> return outcome.insight
+            CameraOutcome.Suppressed -> return null
+            CameraOutcome.Nothing -> Unit
         }
 
         val habitsSummary = runCatching { sources.getHabitsSummary() }.getOrDefault("")
@@ -516,7 +647,9 @@ class TrekoProactiveManager(
             .getOrDefault(0L)
             .takeIf { it > 0L } ?: parseLastWaterIntakeFromSummary(habitsSummary, now)
 
-        val homeAlertsLine = extractSectionPrefix(homeSummary, "Sensores y accesos activos")
+        // Motion, occupancy and presence sensors are not news (they toggle all day and the
+        // cameras already cover people): only open doors, windows, covers and unlocked locks.
+        val homeAccessLine = accessAlertsOnly(extractSectionPrefix(homeSummary, "Sensores y accesos activos"))
         val lightsOnLine = extractSectionPrefix(homeSummary, "Luces encendidas")
         val climateLine = extractSectionPrefix(homeSummary, "Ambiente")
 
@@ -525,85 +658,36 @@ class TrekoProactiveManager(
         val waterProgress = parseWaterProgress(habitsSummary)
         val pendingTasks = parseTaggedItems(tasksSummary, "[Pendiente")
 
-        // Prioridad 1: Anomalía visual REAL detectada en una o más cámaras.
-        // Si no hay anomalía real, NO se menciona nada sobre las cámaras.
-        val anomalousCameras = cameraResults.filter { it.hasAnomaly }
-        if (anomalousCameras.isNotEmpty()) {
-            val camNames = anomalousCameras.joinToString(", ") { it.cameraName }
-            val combinedReport = anomalousCameras.joinToString(" | ") { cam ->
-                val clean = cleanAnomalyPrefix(cam.visionReport).take(180)
-                if (anomalousCameras.size > 1) "${cam.cameraName}: $clean" else clean
-            }
-            val primaryCam = anomalousCameras.first()
-            val fp = "cam_anomaly:${primaryCam.entityId}:${combinedReport.take(60).lowercase()}"
-            if (!force && isInCooldown(fp, now)) {
-                trace?.decide("suppressed", "same alert already given (fingerprint cooldown)")
-                return null
-            }
-            recordFingerprint(fp, now)
-            trace?.decide("alert")
-
-            val summary = "Alerta visual en $camNames: $combinedReport"
-            val spokenSpeech = buildString {
-                append("Atención. Revisé tus cámaras y detecté una anomalía en $camNames: ")
-                append(combinedReport.removeSuffix("."))
-                append(". ")
-                if (!homeAlertsLine.isNullOrBlank()) {
-                    append("Además, en Home Assistant aparece: ${homeAlertsLine.removeSuffix(".")}. ")
-                }
-                append("¿Quieres que abra el panel de cámaras o ejecutemos alguna acción en casa?")
-            }
-            val spokenPrompt = buildString {
-                append("[MODO CENTINELA PROACTIVO] Acabas de detectar una anomalía real en cámara ($camNames): $combinedReport. ")
-                if (!homeAlertsLine.isNullOrBlank()) {
-                    append("Además en Home Assistant figura: $homeAlertsLine. ")
-                }
-                append("Conversa con el usuario en español sobre esta alerta y ayúdale con cualquier acción que solicite.")
-            }
-            return ProactiveInsight(
-                id = UUID.randomUUID().toString(),
-                category = ProactiveCategory.CAMERA_ANOMALY,
-                title = "Centinela · $camNames",
-                summaryText = summary,
-                spokenPrompt = spokenPrompt,
-                fingerprint = fp,
-                createdAtMs = now,
-                spokenSpeechText = spokenSpeech,
-                cameraEntityIds = anomalousCameras.map { it.cameraEntityId ?: it.entityId },
-                cameraNames = anomalousCameras.map { it.cameraName },
-                visionReport = combinedReport
-            ).also { recordDeliveredInsight(it) }
-        }
-
-        if (camerasOnly) {
-            trace?.decide("normal", if (cameraResults.isEmpty()) "no camera verdict" else "no anomaly in the verdict")
-            return null
-        }
-
-        // Evaluación inteligente de Casa (Home Assistant), Hábitos, Hidratación y Tareas
+        // Evaluación de Casa (Home Assistant), Hábitos, Hidratación y Tareas
         val highlights = mutableListOf<String>()
         val spokenParts = mutableListOf<String>()
         val promptContext = mutableListOf<String>()
+        /** What this briefing actually talks about (the closing question follows it). */
+        val spokenTopics = LinkedHashSet<String>()
 
-        // 1. Estado de Home Assistant (Sensores activos, puertas/ventanas, luces)
+        // 1. Estado de Home Assistant (puertas/ventanas/cerraduras abiertas; luces de noche)
         val homeAllowed = !isTopicSnoozed("home", now) || force
         if (homeAllowed) {
-            val homeStateHash = "${homeAlertsLine.orEmpty()}|${lightsOnLine.orEmpty()}"
+            val lightsMatter = hourOfDay >= 21 || hourOfDay < 7 || force
+            // Only what could be said counts as a change (lights toggling by day do not).
+            val homeStateHash = "${homeAccessLine.orEmpty()}|${if (lightsMatter) lightsOnLine.orEmpty() else ""}"
             val homeChanged = topicLastStateHash["home"] != homeStateHash
             val homeLastMs = topicLastRemindedMs["home"] ?: 0L
             val canSurfaceHome = force || homeChanged || (now - homeLastMs) >= DEFAULT_COOLDOWN_MS
 
             if (canSurfaceHome) {
-                if (!homeAlertsLine.isNullOrBlank()) {
-                    highlights.add(homeAlertsLine)
-                    spokenParts.add("En Home Assistant tienes ${homeAlertsLine.lowercase(Locale.getDefault())}.")
-                    promptContext.add("Estado de Home Assistant: $homeAlertsLine.")
+                if (!homeAccessLine.isNullOrBlank()) {
+                    highlights.add(homeAccessLine)
+                    spokenParts.add(homeAccessSpeech(homeAccessLine))
+                    promptContext.add("Estado de Home Assistant: $homeAccessLine.")
+                    spokenTopics += TOPIC_HOME
                     topicLastStateHash["home"] = homeStateHash
                     topicLastRemindedMs["home"] = now
-                } else if (!lightsOnLine.isNullOrBlank() && (hourOfDay >= 21 || hourOfDay < 7 || force)) {
+                } else if (!lightsOnLine.isNullOrBlank() && lightsMatter) {
                     highlights.add(lightsOnLine)
-                    spokenParts.add("En tu casa figuran ${lightsOnLine.lowercase(Locale.getDefault())}.")
+                    spokenParts.add("En tu casa siguen ${lightsOnLine.lowercase(Locale.getDefault())}.")
                     promptContext.add("Iluminación actual en Home Assistant: $lightsOnLine.")
+                    spokenTopics += TOPIC_HOME
                     topicLastStateHash["home"] = homeStateHash
                     topicLastRemindedMs["home"] = now
                 } else if (force && !climateLine.isNullOrBlank()) {
@@ -629,6 +713,7 @@ class TrekoProactiveManager(
                 val extraPhrase = if (extraCount > 0) " y $extraCount más" else ""
                 spokenParts.add("Tienes ${pendingTasks.size} ${if (pendingTasks.size == 1) "tarea pendiente" else "tareas pendientes"}: $preview$extraPhrase.")
                 promptContext.add("Tareas pendientes del usuario (${pendingTasks.size}): ${pendingTasks.take(4).joinToString("; ")}.")
+                spokenTopics += TOPIC_TASKS
                 topicLastStateHash["tasks"] = tasksHash
                 topicLastRemindedMs["tasks"] = now
             }
@@ -647,12 +732,21 @@ class TrekoProactiveManager(
                     val preview = pendingHabits.take(3).joinToString(", ")
                     val donePrefix = if (completedHabitsCount > 0) "$completedHabitsCount cumplidos, " else ""
                     highlights.add("Hábitos (${donePrefix}faltan ${pendingHabits.size}): $preview")
-                    val doneSpoken = if (completedHabitsCount > 0) "Ya cumpliste $completedHabitsCount hábitos hoy y te " else "Te "
-                    spokenParts.add("${doneSpoken}quedan ${pendingHabits.size} hábitos por completar: $preview.")
+                    val doneSpoken = if (completedHabitsCount > 0) {
+                        "Ya cumpliste ${countPhrase(completedHabitsCount, "hábito", "hábitos")} hoy y te "
+                    } else {
+                        "Te "
+                    }
+                    val left = if (pendingHabits.size == 1) "queda 1 hábito" else "quedan ${pendingHabits.size} hábitos"
+                    spokenParts.add("${doneSpoken}$left por completar: $preview.")
                     promptContext.add("Hábitos de hoy: $completedHabitsCount completados y ${pendingHabits.size} pendientes (${pendingHabits.take(4).joinToString("; ")}).")
+                    spokenTopics += TOPIC_HABITS
                 } else if (completedHabitsCount > 0 && force) {
                     highlights.add("Hábitos al día ($completedHabitsCount completados hoy)")
-                    spokenParts.add("Ya completaste todos tus $completedHabitsCount hábitos de hoy.")
+                    spokenParts.add(
+                        if (completedHabitsCount == 1) "Ya completaste tu hábito de hoy."
+                        else "Ya completaste tus $completedHabitsCount hábitos de hoy."
+                    )
                     promptContext.add("El usuario ya cumplió sus $completedHabitsCount hábitos hoy.")
                 }
                 topicLastStateHash["habits"] = habitsHash
@@ -677,6 +771,7 @@ class TrekoProactiveManager(
                 highlights.add(assessment.shortSummary)
                 spokenParts.add(assessment.spokenCoaching)
                 promptContext.add(assessment.spokenCoaching)
+                if (assessment.remainingGlasses > 0) spokenTopics += TOPIC_WATER
                 topicLastRemindedMs["water"] = now
             }
         }
@@ -688,46 +783,53 @@ class TrekoProactiveManager(
             promptContext.add("Hay $activeTimers temporizadores activos en curso.")
         }
 
-        // 6. Memoria relevante de la bóveda (solo si no hay otros pendientes o en chequeo completo)
-        val featuredMemory = memories.firstOrNull { (k, v) -> k.isNotBlank() && v.isNotBlank() }
-        if (featuredMemory != null) {
-            promptContext.add("Memoria guardada relevante (${featuredMemory.first}): ${featuredMemory.second}.")
-            if (highlights.isEmpty()) {
-                highlights.add("Nota en memoria (${featuredMemory.first}): ${featuredMemory.second.take(80)}")
-                spokenParts.add("Recordé tu nota sobre ${featuredMemory.first}: ${featuredMemory.second}.")
-            }
+        // 6. Una nota de la bóveda solo si es de hoy (menciona la fecha o el día de la semana),
+        // una vez al día; nunca una nota cualquiera.
+        val today = Calendar.getInstance().apply { timeInMillis = now }
+        val dayKey = "${today.get(Calendar.YEAR)}-${today.get(Calendar.DAY_OF_YEAR)}"
+        val relevantMemory = memories.firstOrNull { (k, v) ->
+            k.isNotBlank() && v.isNotBlank() && isMemoryRelevantToday(k, v, today) &&
+                topicLastStateHash["memory:$k"] != dayKey
+        }
+        if (relevantMemory != null) {
+            val label = relevantMemory.first.replace('_', ' ').trim()
+            highlights.add("Nota en memoria ($label): ${relevantMemory.second.take(80)}")
+            spokenParts.add("Recuerda tu nota sobre $label: ${relevantMemory.second.trim().removeSuffix(".")}.")
+            promptContext.add("Nota guardada para hoy ($label): ${relevantMemory.second}.")
+            spokenTopics += TOPIC_MEMORY
+            topicLastStateHash["memory:${relevantMemory.first}"] = dayKey
         }
 
         if (highlights.isEmpty()) {
             if (!force) return null
             val fallbackSummary = "Hogar en orden, hábitos y tareas al día."
-            val fallbackSpeech = "Hola. Revisé Home Assistant, tus hábitos y tareas: todo está en orden y estás al día. ¿En qué te puedo ayudar?"
-            val fallbackPrompt = "[ASISTENTE PROACTIVO] Acabas de revisar Home Assistant, hábitos y tareas. Todo está en orden. Conversa brevemente con el usuario en español."
+            val fallbackSpeech = "Revisé tu casa, tus hábitos y tus tareas: todo está en orden."
             return ProactiveInsight(
                 id = UUID.randomUUID().toString(),
                 category = ProactiveCategory.DAILY_BRIEFING,
                 title = "Resumen proactivo",
                 summaryText = fallbackSummary,
-                spokenPrompt = fallbackPrompt,
+                spokenPrompt = String.format(Locale.ROOT, BRIEFING_FOLLOWUP_PROMPT, "todo en orden."),
                 fingerprint = "briefing:all_clear:$now",
                 createdAtMs = now,
                 spokenSpeechText = fallbackSpeech
             ).also { recordDeliveredInsight(it) }
         }
 
-        val hasHome = !homeAlertsLine.isNullOrBlank() || (!lightsOnLine.isNullOrBlank() && highlights.any { it.startsWith("Luces", ignoreCase = true) })
         val category = when {
-            hasHome -> ProactiveCategory.HOME_STATUS
-            pendingTasks.isNotEmpty() && highlights.any { it.startsWith("Tareas", ignoreCase = true) } -> ProactiveCategory.TASKS_AND_REMINDERS
-            highlights.any { it.startsWith("Hábitos", ignoreCase = true) || it.startsWith("Hidratación", ignoreCase = true) } -> ProactiveCategory.HABITS_AND_WATER
-            featuredMemory != null && highlights.size == 1 -> ProactiveCategory.MEMORY_FOLLOWUP
+            TOPIC_HOME in spokenTopics -> ProactiveCategory.HOME_STATUS
+            TOPIC_TASKS in spokenTopics -> ProactiveCategory.TASKS_AND_REMINDERS
+            TOPIC_HABITS in spokenTopics || TOPIC_WATER in spokenTopics ||
+                highlights.any { it.startsWith("Hábitos", ignoreCase = true) || it.startsWith("Hidratación", ignoreCase = true) } ->
+                ProactiveCategory.HABITS_AND_WATER
+            TOPIC_MEMORY in spokenTopics && highlights.size == 1 -> ProactiveCategory.MEMORY_FOLLOWUP
             else -> ProactiveCategory.DAILY_BRIEFING
         }
 
         val activeSectionsCount = listOf(
-            hasHome,
-            highlights.any { it.startsWith("Tareas", ignoreCase = true) },
-            highlights.any { it.startsWith("Hábitos", ignoreCase = true) || it.startsWith("Hidratación", ignoreCase = true) }
+            TOPIC_HOME in spokenTopics,
+            TOPIC_TASKS in spokenTopics,
+            TOPIC_HABITS in spokenTopics || TOPIC_WATER in spokenTopics
         ).count { it }
 
         val title = if (activeSectionsCount >= 2) {
@@ -748,53 +850,113 @@ class TrekoProactiveManager(
         if (!force && isInCooldown(fp, now)) return null
         recordFingerprint(fp, now)
 
-        val closingQuestion = when {
-            hasHome && (pendingHabits.isNotEmpty() || pendingTasks.isNotEmpty()) ->
-                "¿Quieres que ajustemos algo en casa, registremos algún hábito o revisemos tus tareas?"
-            hasHome ->
-                "¿Deseas que controle algún dispositivo de tu casa?"
-            pendingHabits.isNotEmpty() || waterProgress != null ->
-                "¿Quieres que marque algún hábito como cumplido, registre un vaso de agua o lo posponga para más tarde?"
-            pendingTasks.isNotEmpty() ->
-                "¿Quieres que marquemos alguna tarea como completada o agreguemos un recordatorio?"
-            else ->
-                "¿Te gustaría que te ayude con algo de esto ahora?"
-        }
-
-        val spokenSpeechText = buildString {
-            append("Hola. ")
-            append(spokenParts.joinToString(" "))
-            append(" ")
-            append(closingQuestion)
-        }
-
-        val spokenPrompt = buildString {
-            append("[ASISTENTE PROACTIVO] Eres $cleanAssistantName. Acabas de entregarle al usuario este resumen proactivo por voz: \"$spokenSpeechText\". ")
-            append("Contexto detallado: ")
-            append(promptContext.joinToString(" "))
-            append(" Si el usuario pide posponer un recordatorio usa 'manage_proactive_assistant' con action='snooze'; si pide registrar agua o hábitos usa 'manage_habits'; si pide completar tareas usa 'manage_tasks'; si pide controlar dispositivos usa las herramientas de Home Assistant.")
-        }
+        val spokenSpeechText = SpokenText.stripEmoji(
+            listOfNotNull(spokenParts.joinToString(" "), closingQuestion(spokenTopics)).joinToString(" ")
+        )
 
         return ProactiveInsight(
             id = UUID.randomUUID().toString(),
             category = category,
             title = title,
             summaryText = summaryText,
-            spokenPrompt = spokenPrompt,
+            spokenPrompt = String.format(Locale.ROOT, BRIEFING_FOLLOWUP_PROMPT, promptContext.joinToString(" ")),
             fingerprint = fp,
             createdAtMs = now,
             spokenSpeechText = spokenSpeechText
         ).also { recordDeliveredInsight(it) }
     }
 
+    private sealed class CameraOutcome {
+        class Alert(val insight: ProactiveInsight) : CameraOutcome()
+        /** The same alert was already given a moment ago. */
+        object Suppressed : CameraOutcome()
+        object Nothing : CameraOutcome()
+    }
+
+    private suspend fun scanCameras(homeSummary: String, trace: SentinelRunTrace?): List<CameraAnomalyCheckResult> {
+        cameraRotationOffset = (cameraRotationOffset + 1) % 12
+        val scanStartMs = System.currentTimeMillis()
+        return runCatching { sources.scanPriorityCamerasForAnomalies(homeSummary) }
+            .onFailure { trace?.decide("error", "camera scan failed: ${it.message}") }
+            .getOrDefault(emptyList())
+            .also { trace?.stage("scan", System.currentTimeMillis() - scanStartMs) }
+    }
+
+    /**
+     * The camera alert, if a camera showed something worth it. The alert says the vision
+     * model's own short sentence ("aviso"), nothing more; the same camera + label + level is
+     * not repeated within [CAMERA_ALERT_REPEAT_COOLDOWN_MS] (urgent ones always are).
+     */
+    private fun cameraAlert(
+        results: List<CameraAnomalyCheckResult>,
+        now: Long,
+        force: Boolean,
+        trace: SentinelRunTrace?
+    ): CameraOutcome {
+        val anomalous = results.filter { it.hasAnomaly }
+        if (anomalous.isEmpty()) return CameraOutcome.Nothing
+        val primary = anomalous.first()
+        val level = primary.verdict?.level
+        val label = primary.label ?: primary.verdict?.mainObject ?: "?"
+        val fp = "cam_anomaly:${primary.cameraEntityId ?: primary.entityId}:$label:${level?.key ?: "texto"}"
+        if (!force && level != VisionLevel.URGENT && isInCooldown(fp, now, CAMERA_ALERT_REPEAT_COOLDOWN_MS)) {
+            trace?.decide("suppressed", "same alert already given (camera, label and level)")
+            return CameraOutcome.Suppressed
+        }
+        recordFingerprint(fp, now)
+        trace?.decide("alert")
+
+        val camNames = anomalous.joinToString(", ") { it.cameraName }
+        val speech = SpokenText.stripEmoji(anomalous.take(2).joinToString(" ") { spokenAlertOf(it) })
+        val report = anomalous.joinToString(" | ") { cam ->
+            val d = describeLook(cam)
+            if (anomalous.size > 1) "${cam.cameraName}: $d" else d
+        }
+        val levels = anomalous.mapNotNull { it.verdict?.level?.key }.distinct().joinToString("/").ifBlank { "sin nivel" }
+        return CameraOutcome.Alert(
+            ProactiveInsight(
+                id = UUID.randomUUID().toString(),
+                category = ProactiveCategory.CAMERA_ANOMALY,
+                title = "Centinela · $camNames",
+                summaryText = speech,
+                spokenPrompt = String.format(Locale.ROOT, CAMERA_ALERT_FOLLOWUP_PROMPT, camNames, levels, report),
+                fingerprint = fp,
+                createdAtMs = now,
+                spokenSpeechText = speech,
+                cameraEntityIds = anomalous.map { it.cameraEntityId ?: it.entityId },
+                cameraNames = anomalous.map { it.cameraName },
+                visionReport = report,
+                visionLevel = level?.key
+            ).also { recordDeliveredInsight(it) }
+        )
+    }
+
+    /** The model's short sentence, or "En <camera>: <first words of what it saw>." */
+    private fun spokenAlertOf(cam: CameraAnomalyCheckResult): String {
+        val aviso = cam.verdict?.spokenAlert?.trim().orEmpty()
+        if (aviso.isNotEmpty()) return SpokenText.limitWords(aviso, VisionVerdict.MAX_SPOKEN_WORDS)
+        val seen = SpokenText.limitWords(firstSentence(cleanAnomalyPrefix(cam.visionReport)), 15)
+        return String.format(Locale.ROOT, CAMERA_ALERT_FALLBACK_SPEECH, cam.cameraName, seen.replaceFirstChar { it.lowercase(Locale.getDefault()) })
+    }
+
+    private fun describeLook(cam: CameraAnomalyCheckResult): String =
+        cam.verdict?.describe()?.takeIf { it.isNotBlank() }
+            ?: SpokenText.limitWords(cleanAnomalyPrefix(cam.visionReport), 40)
+
     private fun cleanAnomalyPrefix(report: String): String =
         report.trim()
             .replace(Regex("""^\[?ANOMAL[IÍ]A\]?\s*:?\s*""", RegexOption.IGNORE_CASE), "")
             .trim()
 
-    private fun isInCooldown(fingerprint: String, nowMs: Long): Boolean {
+    private fun isInCooldown(fingerprint: String, nowMs: Long, cooldownMs: Long = DEFAULT_COOLDOWN_MS): Boolean {
         val last = recentFingerprints[fingerprint] ?: return false
-        return (nowMs - last) < DEFAULT_COOLDOWN_MS
+        return (nowMs - last) < cooldownMs
+    }
+
+    private fun firstSentence(text: String): String {
+        val t = text.trim()
+        val end = Regex("""[.!?](\s|$)""").find(t)?.range?.first ?: return t
+        return t.substring(0, end + 1)
     }
 
     private fun recordFingerprint(fingerprint: String, nowMs: Long) {

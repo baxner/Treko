@@ -13,7 +13,9 @@ import com.treko.core.common.model.AlertSource
 import com.treko.core.common.util.LogText
 import com.treko.core.common.util.TrekoLogBuffer
 import com.treko.core.mcp.HomeAssistantClient
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,6 +29,10 @@ internal object AlertRecording {
     /** How much of a vision verdict a "no news" entry keeps. */
     private const val NO_NEWS_REPORT_CHARS = 300
     private const val DETECTION_IMAGE_WAIT_MS = 10_000L
+    /** How long the spoken alert waits to know whether a picture is kept ("te dejé la foto…"). */
+    private const val PHOTO_NOTE_WAIT_MS = 2_500L
+    /** Extra key: the vision model's level for the entry ("ninguno", "info", "atencion", "urgente"). */
+    const val EXTRA_VISION_LEVEL = "vision_level"
 
     /**
      * Records [insight] as delivered (a camera alert as SENTINEL, anything else as PROACTIVE)
@@ -49,6 +55,7 @@ internal object AlertRecording {
                 put("category", insight.category.name)
                 put("insight_id", insight.id)
                 trace?.let { put("trigger", it.sensorId) }
+                insight.visionLevel?.let { put(EXTRA_VISION_LEVEL, it) }
             }
         )
         return insight.copy(alertId = TrekoAlertLog.record(event))
@@ -84,9 +91,13 @@ internal object AlertRecording {
         val looks = trace.looks()
         val place = trace.area.ifBlank { looks.firstOrNull()?.cameraName.orEmpty() }
             .ifBlank { context.getString(R.string.alert_place_unknown) }
-        val report = looks.filter { it.verdict.isNotBlank() }.joinToString(" | ") { look ->
-            if (looks.size > 1) "${look.cameraName}: ${look.verdict}" else look.verdict
+        // The readable line of a structured verdict, never its raw JSON.
+        val seen = looks.map { look -> look to (look.description?.takeIf { it.isNotBlank() } ?: look.verdict) }
+            .filter { it.second.isNotBlank() }
+        val report = seen.joinToString(" | ") { (look, text) ->
+            if (looks.size > 1) "${look.cameraName}: $text" else text
         }
+        val visionLevel = looks.firstNotNullOfOrNull { it.level }
         TrekoAlertLog.record(
             AlertEvent(
                 timestampMs = trace.startedAtMs,
@@ -106,6 +117,7 @@ internal object AlertRecording {
                 extra = buildMap {
                     put("trigger", trace.sensorId)
                     trace.reason?.let { put("reason", it) }
+                    visionLevel?.let { put(EXTRA_VISION_LEVEL, it) }
                 }
             )
         )
@@ -115,6 +127,9 @@ internal object AlertRecording {
      * Posts the sentinel alert at once on the camera alerts channel (also when it is spoken),
      * then adds the picture: the detector's own picture when it is of the same camera, else a
      * live snapshot of the camera. The picture is kept in the alerts log too.
+     *
+     * Returns whether a picture was found (it completes as soon as it is known, before the
+     * picture is stored), or null when there is no picture to look for.
      */
     fun announceCameraAlert(
         context: Context,
@@ -122,29 +137,53 @@ internal object AlertRecording {
         scope: CoroutineScope,
         client: HomeAssistantClient?,
         trace: SentinelRunTrace?
-    ) {
+    ): Deferred<Boolean>? {
         val appCtx = context.applicationContext
         val alertId = insight.alertId
         val notificationId = AlertNotifications.nextWatchNotificationId()
-        val body = insight.visionReport ?: insight.summaryText
+        // The short alert as the text; what the camera showed underneath.
+        val body = listOfNotNull(
+            insight.summaryText.takeIf { it.isNotBlank() },
+            insight.visionReport?.takeIf { it.isNotBlank() && it.trim() != insight.summaryText.trim() }
+        ).joinToString("\n")
         val notified = AlertNotifications.postCameraAlert(appCtx, notificationId, insight.title, body, null, alertId)
         if (alertId != null) {
             TrekoAlertLog.update(alertId) { it.copy(notified = it.notified || notified, notificationId = notificationId) }
         }
         val primaryCamera = insight.cameraEntityIds.firstOrNull()
         val detection = trace?.detectionImage?.takeIf { primaryCamera == null || primaryCamera == trace.cameraEntityId }
-        if (detection == null && (client == null || primaryCamera == null)) return
+        if (detection == null && (client == null || primaryCamera == null)) return null
+        val found = CompletableDeferred<Boolean>()
         scope.launch(Dispatchers.IO) {
-            val bytes = detection?.let { withTimeoutOrNull(DETECTION_IMAGE_WAIT_MS) { runCatching { it.await() }.getOrNull() } }
-                ?: primaryCamera?.let { client?.fetchEntityImage(it) }
-                ?: return@launch
-            val bitmap = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
-            if (bitmap != null) {
+            try {
+                val bytes = detection?.let { withTimeoutOrNull(DETECTION_IMAGE_WAIT_MS) { runCatching { it.await() }.getOrNull() } }
+                    ?: primaryCamera?.let { client?.fetchEntityImage(it) }
+                val bitmap = bytes?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+                found.complete(bitmap != null)
+                if (bytes == null || bitmap == null) return@launch
                 AlertNotifications.postCameraAlert(appCtx, notificationId, insight.title, body, bitmap, alertId)
-            }
-            if (alertId != null && !TrekoAlertLog.attachSnapshot(alertId, bytes)) {
-                TrekoLogBuffer.w(TAG, "Could not keep the picture of sentinel alert $alertId.")
+                if (alertId != null && !TrekoAlertLog.attachSnapshot(alertId, bytes)) {
+                    TrekoLogBuffer.w(TAG, "Could not keep the picture of sentinel alert $alertId.")
+                }
+            } finally {
+                found.complete(false)
             }
         }
+        return found
+    }
+
+    /**
+     * Ends a spoken camera alert with "Te dejé la foto en Avisos." when its picture was found
+     * (waits at most [PHOTO_NOTE_WAIT_MS]); the alerts log keeps the final spoken text.
+     */
+    suspend fun withPhotoNote(context: Context, insight: ProactiveInsight, photo: Deferred<Boolean>?): ProactiveInsight {
+        if (insight.category != ProactiveCategory.CAMERA_ANOMALY || photo == null) return insight
+        val hasPhoto = withTimeoutOrNull(PHOTO_NOTE_WAIT_MS) { runCatching { photo.await() }.getOrDefault(false) } == true
+        if (!hasPhoto) return insight
+        val note = context.getString(R.string.sentinel_photo_in_alerts)
+        val speech = insight.spokenSpeechText.trim().let { if (it.isEmpty() || it.last() in ".!?…") it else "$it." }
+        val updated = insight.copy(spokenSpeechText = "$speech $note".trim())
+        updated.alertId?.let { id -> TrekoAlertLog.update(id) { it.copy(spokenSummary = updated.spokenSpeechText) } }
+        return updated
     }
 }

@@ -22,7 +22,9 @@ class SentinelRunTrace(
     val label: String?,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
     /** The detector's own picture of the detection (Frigate image entity), when there is one. */
-    val snapshotEntityId: String? = null
+    val snapshotEntityId: String? = null,
+    /** The user asked Treko to watch this place right now (then info-level verdicts also alert). */
+    val watchRequested: Boolean = false
 ) : AbstractCoroutineContextElement(Key) {
 
     /**
@@ -42,7 +44,11 @@ class SentinelRunTrace(
         val imageEntityId: String,
         val durationMs: Long,
         val verdict: String,
-        val anomaly: Boolean?
+        val anomaly: Boolean?,
+        /** Level of the structured verdict ("ninguno", "info"…), null when the model gave none. */
+        val level: String? = null,
+        /** Readable line built from the structured verdict, for the alerts log. */
+        val description: String? = null
     )
 
     val startedAtMs: Long = clockMs()
@@ -67,9 +73,17 @@ class SentinelRunTrace(
         }
     }
 
-    fun look(cameraName: String, imageEntityId: String, durationMs: Long, verdict: String?, anomaly: Boolean?) {
+    fun look(
+        cameraName: String,
+        imageEntityId: String,
+        durationMs: Long,
+        verdict: String?,
+        anomaly: Boolean?,
+        level: String? = null,
+        description: String? = null
+    ) {
         synchronized(lock) {
-            looks += Look(cameraName, imageEntityId, durationMs, verdict.orEmpty(), anomaly)
+            looks += Look(cameraName, imageEntityId, durationMs, verdict.orEmpty(), anomaly, level, description)
         }
     }
 
@@ -107,6 +121,7 @@ class SentinelRunTrace(
             label?.let { append(" label=").append(it) }
             append(" camera=").append(cameraEntityId ?: "?")
             append(" area=\"").append(area).append('"')
+            if (watchRequested) append(" watch=yes")
             if (looks.isEmpty()) {
                 append(" | looked=none")
             } else {
@@ -115,6 +130,7 @@ class SentinelRunTrace(
                     append('"').append(look.cameraName).append("\" image=").append(look.imageEntityId)
                     append(' ').append(look.durationMs).append("ms")
                     look.anomaly?.let { append(" anomaly=").append(it) }
+                    look.level?.let { append(" level=").append(it) }
                     val verdict = LogText.preview(look.verdict, VERDICT_PREVIEW_CHARS)
                     append(" verdict=\"").append(verdict.ifEmpty { "<empty>" }).append('"')
                 }

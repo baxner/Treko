@@ -30,6 +30,8 @@ class HomeAssistantClient(
     companion object {
         private const val TAG = "HomeAssistantClient"
         private const val STATES_CACHE_TTL_MS = 3000L
+        private const val VISION_PROVIDER_TTL_MS = 30 * 60_000L
+        private const val VISION_PROVIDER_MISSING_TTL_MS = 5 * 60_000L
 
         /** Live-view suffixes some integrations give camera entities (English and Spanish names). */
         private val LIVE_SUFFIX = Regex("_(live|live_view|liveview|vista_en_vivo)$")
@@ -69,6 +71,7 @@ class HomeAssistantClient(
         this.haUrl = sanitizeUrl(url)
         this.haToken = token.trim()
         invalidateStatesCache()
+        visionProviderCache = null
     }
 
     private fun invalidateStatesCache() {
@@ -1039,30 +1042,24 @@ class HomeAssistantClient(
 
     suspend fun getCameras(): List<CameraInfo> = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder()
-                .url("${getBaseUrl()}/api/states")
-                .addHeader("Authorization", "Bearer $haToken")
-                .get()
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    Log.w(TAG, "getCameras() falló HTTP ${resp.code}")
-                    return@withContext emptyList()
-                }
-                val array = JSONArray(resp.body?.string().orEmpty())
-                val list = mutableListOf<CameraInfo>()
-                for (i in 0 until array.length()) {
-                    val item = array.getJSONObject(i)
-                    val eid = item.getString("entity_id")
-                    if (eid.startsWith("camera.")) {
-                        val fn = item.optJSONObject("attributes")?.optString("friendly_name", eid) ?: eid
-                        val st = item.optString("state", "idle")
-                        val snapUrl = "${getBaseUrl()}/api/camera_proxy/$eid"
-                        list.add(CameraInfo(eid, fn, st, snapUrl))
-                    }
-                }
-                list
+            // The shared states cache (a few seconds): a sentinel or proactive run that just read
+            // every state does not download them again.
+            val array = fetchStatesArray() ?: run {
+                Log.w(TAG, "getCameras(): could not read the states")
+                return@withContext emptyList()
             }
+            val list = mutableListOf<CameraInfo>()
+            for (i in 0 until array.length()) {
+                val item = array.getJSONObject(i)
+                val eid = item.getString("entity_id")
+                if (eid.startsWith("camera.")) {
+                    val fn = item.optJSONObject("attributes")?.optString("friendly_name", eid) ?: eid
+                    val st = item.optString("state", "idle")
+                    val snapUrl = "${getBaseUrl()}/api/camera_proxy/$eid"
+                    list.add(CameraInfo(eid, fn, st, snapUrl))
+                }
+            }
+            list
         } catch (_: Exception) {
             emptyList()
         }
@@ -1246,58 +1243,84 @@ class HomeAssistantClient(
         }
     }
 
-    suspend fun analyzeCameraWithLlmVision(cameraEntityId: String, question: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val visionClient = client.newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(50, TimeUnit.SECONDS)
-                .build()
+    /** LLM Vision provider (config entry) of this Home Assistant, looked up once in a while. */
+    private class VisionProviderLookup(val providerId: String?, val atMs: Long, val key: String)
 
-            // 1. Descubrir proveedor llmvision dinámicamente en la instancia de Home Assistant
-            var providerId: String? = null
-            var fallbackLlmVisionEntryId: String? = null
-            try {
-                val reqEntries = Request.Builder()
-                    .url("${getBaseUrl()}/api/config/config_entries/entry")
-                    .addHeader("Authorization", "Bearer $haToken")
-                    .get()
-                    .build()
-                client.newCall(reqEntries).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val arr = JSONArray(resp.body?.string().orEmpty())
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.getJSONObject(i)
-                            if (obj.optString("domain") == "llmvision") {
-                                val title = obj.optString("title", "")
-                                val entryId = obj.optString("entry_id", "")
-                                if (entryId.isBlank()) continue
-                                val looksLikeSettings = title.contains("setting", ignoreCase = true) ||
-                                    title.contains("config", ignoreCase = true)
-                                if (title.contains("Provider", ignoreCase = true) ||
-                                    title.contains("OpenAI", ignoreCase = true) ||
-                                    title.contains("Gemini", ignoreCase = true) ||
-                                    title.contains("Anthropic", ignoreCase = true) ||
-                                    title.contains("Claude", ignoreCase = true) ||
-                                    title.contains("Ollama", ignoreCase = true) ||
-                                    title.contains("Groq", ignoreCase = true) ||
-                                    !looksLikeSettings
-                                ) {
-                                    providerId = entryId
-                                    break
-                                } else if (fallbackLlmVisionEntryId == null) {
-                                    fallbackLlmVisionEntryId = entryId
-                                }
-                            }
+    @Volatile
+    private var visionProviderCache: VisionProviderLookup? = null
+
+    /** One client for every vision call (they can take tens of seconds). */
+    private val visionClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(50, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * The llmvision provider entry to use, cached per URL (30 min when found, 5 min when this
+     * Home Assistant has none) instead of reading every config entry on each vision call.
+     */
+    private fun llmVisionProviderId(): String? {
+        val key = getBaseUrl()
+        val now = System.currentTimeMillis()
+        visionProviderCache?.let { cached ->
+            val ttl = if (cached.providerId != null) VISION_PROVIDER_TTL_MS else VISION_PROVIDER_MISSING_TTL_MS
+            if (cached.key == key && now - cached.atMs < ttl) return cached.providerId
+        }
+        var providerId: String? = null
+        var fallbackLlmVisionEntryId: String? = null
+        try {
+            val reqEntries = Request.Builder()
+                .url("$key/api/config/config_entries/entry")
+                .addHeader("Authorization", "Bearer $haToken")
+                .get()
+                .build()
+            client.newCall(reqEntries).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "config_entries for llmvision answered HTTP ${resp.code}")
+                    return null
+                }
+                val arr = JSONArray(resp.body?.string().orEmpty())
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    if (obj.optString("domain") == "llmvision") {
+                        val title = obj.optString("title", "")
+                        val entryId = obj.optString("entry_id", "")
+                        if (entryId.isBlank()) continue
+                        val looksLikeSettings = title.contains("setting", ignoreCase = true) ||
+                            title.contains("config", ignoreCase = true)
+                        if (title.contains("Provider", ignoreCase = true) ||
+                            title.contains("OpenAI", ignoreCase = true) ||
+                            title.contains("Gemini", ignoreCase = true) ||
+                            title.contains("Anthropic", ignoreCase = true) ||
+                            title.contains("Claude", ignoreCase = true) ||
+                            title.contains("Ollama", ignoreCase = true) ||
+                            title.contains("Groq", ignoreCase = true) ||
+                            !looksLikeSettings
+                        ) {
+                            providerId = entryId
+                            break
+                        } else if (fallbackLlmVisionEntryId == null) {
+                            fallbackLlmVisionEntryId = entryId
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "No se pudo consultar config_entries para llmvision: ${e.message}")
             }
+        } catch (e: Exception) {
+            // Not cached: the next call tries again.
+            Log.w(TAG, "No se pudo consultar config_entries para llmvision: ${e.message}")
+            return null
+        }
+        val chosen = providerId ?: fallbackLlmVisionEntryId
+        visionProviderCache = VisionProviderLookup(chosen, now, key)
+        return chosen
+    }
 
-            if (providerId.isNullOrBlank()) {
-                providerId = fallbackLlmVisionEntryId
-            }
+    suspend fun analyzeCameraWithLlmVision(cameraEntityId: String, question: String): String? = withContext(Dispatchers.IO) {
+        try {
+            // 1. Proveedor llmvision de esta instancia de Home Assistant (en caché)
+            val providerId = llmVisionProviderId()
 
             // Preparar entidades candidatas: priorizar la entidad de snapshot si es cámara de batería o live view
             val entitiesToTry = mutableListOf<String>()
@@ -1540,10 +1563,13 @@ class HomeAssistantClient(
             .takeIf { it.isNotEmpty() }
     }
 
-    /** Current state of some entities ("on"/"off"…); missing ones are left out. */
-    suspend fun getStates(entityIds: Set<String>): Map<String, String> = withContext(Dispatchers.IO) {
+    /**
+     * Current state of some entities ("on"/"off"…); missing ones are left out. [forceRefresh]
+     * false accepts the states read a few seconds ago by the same client.
+     */
+    suspend fun getStates(entityIds: Set<String>, forceRefresh: Boolean = true): Map<String, String> = withContext(Dispatchers.IO) {
         val states = try {
-            fetchStatesLite(forceRefresh = true)
+            fetchStatesLite(forceRefresh = forceRefresh)
         } catch (e: Exception) {
             null
         } ?: return@withContext emptyMap()

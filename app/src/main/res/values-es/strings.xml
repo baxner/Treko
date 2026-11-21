@@ -1,4 +1,4 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Treko Asistente</string>
     <string name="assistant_header_title">%1$s Asistente</string>
     <string name="wake_word">Treko</string>
@@ -429,7 +429,7 @@
     <string name="watch_alert_body">Toca para abrir Treko.</string>
     <string name="watch_channel_name">Vigilancia de cámaras</string>
     <string name="watch_channel_desc">Avisos cuando Treko ve a alguien donde se lo pediste</string>
-    <string name="watch_vision_question">Describe en una sola frase corta quién o qué se ve (persona, vehículo, animal) y qué está haciendo. Sin introducciones.</string>
+    <string name="watch_vision_question">El usuario pidió que le avisaras de %1$s aquí: describe siempre lo que ves aunque el nivel sea info, con rasgos útiles (uniforme de repartidor, paquete en mano, color del vehículo).\n</string>
     <string name="watch_chip">Vigilando: %1$s</string>
     <string name="watch_stop_cd">Dejar de vigilar</string>
     <string name="notification_watching">Vigilando: %1$s</string>
@@ -486,4 +486,22 @@
     <string name="alert_detail_vision">Lo que mostró la cámara</string>
     <string name="alert_detail_said">Lo que dijo %1$s</string>
     <string name="alert_detail_gone">Este aviso ya no está.</string>
+    <!-- Vision verdict prompt (camera sentinel and watches). Keys of the JSON are fixed (the app reads them). -->
+    <string name="vision_verdict_prompt" tools:ignore="Typos">Eres el filtro de seguridad de las cámaras de una casa. Analiza SOLO lo que se ve en la imagen; no supongas intenciones.\nContexto: %1$s\n%2$sResponde ÚNICAMENTE con un objeto JSON válido, sin texto adicional ni bloques de código, con estas claves:\n{\"confirmado\": true o false, \"personas\": 0, \"vehiculos\": 0, \"paquete\": true o false, \"donde\": \"\", \"actividad\": \"\", \"nivel\": \"ninguno|info|atencion|urgente\", \"motivo\": \"\", \"aviso\": \"\"}\n- confirmado: si de verdad se ve lo que dijo el detector (false si es sombra, reflejo, planta, animal o escena vacía).\n- personas y vehiculos: cuántos se ven.\n- donde: de 2 a 6 palabras, por ejemplo \"en la banqueta\", \"frente a la puerta\", \"dentro del patio\".\n- actividad: lo que se ve hacer, por ejemplo \"caminando de paso\", \"parada en la entrada\", \"dejando un paquete\", \"intentando abrir\".\n- nivel: ninguno = no se confirma nada o la escena está vacía; info = persona o vehículo de paso en la calle o banqueta, vehículo estacionado, repartidor que ya se va; atencion = persona dentro de la propiedad o parada en la entrada, paquete dejado, puerta o portón abierto; urgente = alguien intentando abrir, forzar o trepar, humo o fuego.\n- motivo: máximo 12 palabras, solo hechos visibles; si la imagen está oscura o borrosa, dilo aquí.\n- aviso: frase para decir en voz alta en español de México, máximo 15 palabras, tono calmado, que diga qué hay y dónde, mencionando la cámara.\nNo uses las palabras intruso, sospechoso ni desconocido salvo en nivel urgente con evidencia visible.</string>
+    <string name="vision_ctx_detector">El detector vio %1$s en la cámara «%2$s».</string>
+    <string name="vision_ctx_periodic">Revisión periódica de la cámara «%1$s», sin detección previa.</string>
+    <string name="vision_ctx_zone">Zona: %1$s.</string>
+    <string name="vision_ctx_time_day">Hora local: %1$s, de día.</string>
+    <string name="vision_ctx_time_night">Hora local: %1$s, de noche.</string>
+    <string name="vision_ctx_watch_yes">El usuario pidió vigilar este lugar.</string>
+    <string name="vision_ctx_watch_no">El usuario no pidió vigilar este lugar.</string>
+    <string name="vision_label_person">una persona</string>
+    <string name="vision_label_vehicle">un vehículo</string>
+    <string name="vision_label_animal">un animal</string>
+    <string name="vision_label_package">un paquete</string>
+    <string name="vision_label_motion">movimiento</string>
+    <string name="vision_label_any">algo</string>
+    <string name="sentinel_photo_in_alerts">Te dejé la foto en Avisos.</string>
+    <string name="proactive_tool_read_exactly">Lee EXACTAMENTE este aviso, sin saludo, emoji ni preguntas extra: «%1$s»</string>
+    <string name="proactive_tool_followup_facts">Datos solo por si pregunta después (no los leas): %1$s</string>
 </resources>

@@ -5,6 +5,9 @@ import android.graphics.BitmapFactory
 import android.media.AudioManager
 import com.treko.assistant.R
 import com.treko.assistant.data.SentinelRunTrace
+import com.treko.assistant.data.SpokenText
+import com.treko.assistant.data.VisionVerdict
+import com.treko.assistant.data.parseVisionVerdict
 import com.treko.core.common.data.TrekoAlertLog
 import com.treko.core.common.model.AlertEvent
 import com.treko.core.common.model.AlertSource
@@ -59,13 +62,14 @@ class CameraWatchCoordinator(
     private val book = CameraWatchBook(SharedPrefsWatchPersistence(context))
     private var stream: HaEventStream? = null
     private var streamClient: HomeAssistantClient? = null
-    private var catalog: List<WatchSensor> = emptyList()
+    @Volatile private var catalog: List<WatchSensor> = emptyList()
     private var expiryJob: Job? = null
     @Volatile private var released = false
     /** Last problem of the live connection; null while alerts can arrive. */
     @Volatile private var liveProblem: String? = null
     private var sentinelSensors: Set<String> = emptySet()
-    private val lastSentinelRunByCamera = HashMap<String, Long>()
+    /** Camera → until when the sentinel leaves it alone (see [SentinelCooldown]). */
+    private val sentinelRestUntilByCamera = HashMap<String, Long>()
 
     private val _activeAreas = MutableStateFlow<List<String>>(emptyList())
     /** Places being watched right now, for the UI and the persistent notification. */
@@ -76,6 +80,9 @@ class CameraWatchCoordinator(
     val activeWatches: StateFlow<List<CameraWatch>> = _activeWatches.asStateFlow()
 
     val hasActiveWatches: Boolean get() = book.active(now()).isNotEmpty()
+
+    /** What can be watched, as last read from Home Assistant (refreshed every 15 minutes). */
+    val catalogSnapshot: List<WatchSensor> get() = catalog
 
     /** Restores saved watches and reconnects; call on service start and on config change. */
     fun start() {
@@ -252,27 +259,45 @@ class CameraWatchCoordinator(
      * follows real off → on changes, so a restart or reconnect does not re-run vision.
      */
     private suspend fun onSensorOn(entityId: String, replay: Boolean) {
+        val hit = book.onSensorActivated(entityId, now())
         // The sentinel can take a while (vision model): never let it delay the alert.
         if (entityId in sentinelSensors) {
             if (replay) {
                 TrekoLogBuffer.d(TAG, "Sentinel ignores $entityId: already on when the live connection started.")
             } else {
-                scope.launch { maybeRunSentinel(entityId) }
+                scope.launch { maybeRunSentinel(entityId, watchAlerted = hit != null) }
             }
         }
-        val hit = book.onSensorActivated(entityId, now()) ?: return
+        if (hit == null) return
         if (hit.consumedOneShot) syncStream(rebuild = false)
         deliver(hit)
     }
 
-    private suspend fun maybeRunSentinel(entityId: String) {
+    /** The user asked to watch the place of [sensor] (same sensor, camera or place name). */
+    private fun isWatched(sensor: WatchSensor): Boolean {
+        val active = book.active(now())
+        if (active.isEmpty()) return false
+        val byId = catalog.associateBy { it.entityId }
+        return active.any { w ->
+            sensor.entityId in w.sensorIds ||
+                w.areaNames.any { it.equals(sensor.areaName, ignoreCase = true) } ||
+                (sensor.cameraEntityId != null && w.sensorIds.any { byId[it]?.cameraEntityId == sensor.cameraEntityId })
+        }
+    }
+
+    /**
+     * [watchAlerted]: a camera watch is alerting this very detection (with its own picture and
+     * description), so the sentinel does not look again nor speak a second time.
+     */
+    private suspend fun maybeRunSentinel(entityId: String, watchAlerted: Boolean = false) {
         val sensor = catalog.firstOrNull { it.entityId == entityId }
         val trace = SentinelRunTrace(
             sensorId = entityId,
             cameraEntityId = sensor?.cameraEntityId,
             area = sensor?.areaName.orEmpty(),
             label = sensor?.objectType,
-            snapshotEntityId = sensor?.snapshotEntityId
+            snapshotEntityId = sensor?.snapshotEntityId,
+            watchRequested = sensor != null && isWatched(sensor)
         )
         val camera = sensor?.cameraEntityId
         if (sensor == null || camera == null) {
@@ -281,17 +306,23 @@ class CameraWatchCoordinator(
             return
         }
         val nowMs = now()
-        val cooldownLeftMs = synchronized(lastSentinelRunByCamera) {
-            val last = lastSentinelRunByCamera[camera]
-            if (last != null && nowMs - last < SENTINEL_COOLDOWN_MS) {
-                SENTINEL_COOLDOWN_MS - (nowMs - last)
+        val restLeftMs = synchronized(sentinelRestUntilByCamera) {
+            val until = sentinelRestUntilByCamera[camera]
+            if (until != null && nowMs < until) {
+                until - nowMs
             } else {
-                lastSentinelRunByCamera[camera] = nowMs
+                // Held while this run is in progress; set by the outcome once it ends.
+                sentinelRestUntilByCamera[camera] = nowMs + if (watchAlerted) SentinelCooldown.AFTER_ALERT_MS else SentinelCooldown.WHILE_RUNNING_MS
                 null
             }
         }
-        if (cooldownLeftMs != null) {
-            trace.decide("skipped", "camera cooldown, ${cooldownLeftMs / 1000}s left")
+        if (restLeftMs != null) {
+            trace.decide("skipped", "camera cooldown, ${restLeftMs / 1000}s left")
+            TrekoLogBuffer.i(TAG, trace.format())
+            return
+        }
+        if (watchAlerted) {
+            trace.decide(SentinelCooldown.DECISION_WATCH_ALERTED, "a camera watch already alerts this detection")
             TrekoLogBuffer.i(TAG, trace.format())
             return
         }
@@ -307,10 +338,11 @@ class CameraWatchCoordinator(
             trace.decide("error", e.message ?: e.javaClass.simpleName)
             false
         }
-        if (!ran) {
-            // It could not run: do not mute this camera for the cooldown.
-            synchronized(lastSentinelRunByCamera) { lastSentinelRunByCamera.remove(camera) }
-            trace.decide("not_run", "sentinel check did not run")
+        if (!ran) trace.decide("not_run", "sentinel check did not run")
+        // A short rest after "nothing new", a long one after an alert; none if it did not run.
+        val restMs = SentinelCooldown.afterOutcome(trace.decision, ran)
+        synchronized(sentinelRestUntilByCamera) {
+            if (restMs == null) sentinelRestUntilByCamera.remove(camera) else sentinelRestUntilByCamera[camera] = now() + restMs
         }
         // Only an alert uses the picture.
         if (trace.decision?.startsWith("alert") != true) trace.detectionImage?.cancel()
@@ -359,13 +391,32 @@ class CameraWatchCoordinator(
         // Kept for the alerts screen; encoding must not delay the description.
         if (image != null) scope.launch { TrekoAlertLog.attachSnapshot(alertId, image) }
         val camera = cameraEntity ?: return
-        val description = runCatching {
-            client.analyzeCameraWithLlmVision(camera, context.getString(R.string.watch_vision_question))
-        }.getOrNull()?.trim()
-        if (!description.isNullOrBlank() && !description.startsWith("Error", ignoreCase = true)) {
-            post(notificationId, text, description, bitmap, alertId)
-            addChat("👁 $area: $description")
-            TrekoAlertLog.update(alertId) { it.copy(visionDescription = description) }
+        // One vision call gives the notification's text and the description (same JSON verdict
+        // as the sentinel), looking at the detector's own picture first, then the live camera.
+        val prompt = VisionPrompts(context).watch(
+            cameraName = area,
+            label = if (sensor?.source == WatchSensor.Source.GENERIC) "motion" else sensor?.objectType,
+            objectGroup = hit.watch.objectGroup
+        )
+        var answer: String? = null
+        for (image in listOfNotNull(imageEntity?.takeIf { it.startsWith("image.") }, camera).distinct()) {
+            answer = runCatching { client.analyzeCameraWithLlmVision(image, prompt) }.getOrNull()?.trim()
+                ?.takeIf { it.isNotBlank() && !it.startsWith("Error", ignoreCase = true) }
+            if (answer != null) break
+        }
+        val raw = answer ?: return
+        val verdict = parseVisionVerdict(raw)
+        val description = verdict?.describe()?.takeIf { it.isNotBlank() } ?: raw
+        val shortText = verdict?.spokenAlert?.takeIf { it.isNotBlank() }
+            ?.let { SpokenText.limitWords(it, VisionVerdict.MAX_SPOKEN_WORDS) }
+            ?: description
+        post(notificationId, text, shortText, bitmap, alertId)
+        addChat("👁 $area: $shortText")
+        TrekoAlertLog.update(alertId) { e ->
+            e.copy(
+                visionDescription = description,
+                extra = verdict?.let { e.extra + (AlertRecording.EXTRA_VISION_LEVEL to it.level.key) } ?: e.extra
+            )
         }
     }
 
@@ -430,6 +481,5 @@ class CameraWatchCoordinator(
         private const val TAG = "CameraWatch"
         const val CHANNEL_ID = AlertNotifications.WATCH_CHANNEL_ID
         private val SENTINEL_OBJECTS = setOf("person", "car")
-        private const val SENTINEL_COOLDOWN_MS = 10 * 60_000L
     }
 }

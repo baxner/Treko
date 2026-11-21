@@ -429,7 +429,7 @@
     <string name="watch_alert_body">Tap to open Treko.</string>
     <string name="watch_channel_name">Camera watch</string>
     <string name="watch_channel_desc">Alerts when Treko sees someone where you asked it to watch</string>
-    <string name="watch_vision_question">Describe in one short sentence who or what is visible (person, vehicle, animal) and what they are doing. No preamble.</string>
+    <string name="watch_vision_question">The user asked you to tell them about %1$s here: always describe what you see even when the level is info, with useful details (courier uniform, package in hand, vehicle color).\n</string>
     <string name="watch_chip">Watching: %1$s</string>
     <string name="watch_stop_cd">Stop watching</string>
     <string name="notification_watching">Watching: %1$s</string>
@@ -485,4 +485,22 @@
     <string name="alert_detail_vision">What the camera showed</string>
     <string name="alert_detail_said">What %1$s said</string>
     <string name="alert_detail_gone">This alert is no longer available.</string>
+    <!-- Vision verdict prompt (camera sentinel and watches). Keys and level values of the JSON are fixed (the app reads them). -->
+    <string name="vision_verdict_prompt">You are the security filter of a home\'s cameras. Analyze ONLY what is visible in the picture; do not assume intentions.\nContext: %1$s\n%2$sAnswer ONLY with one valid JSON object, no extra text and no code blocks, with these keys (keep the keys and the level values exactly as written):\n{\"confirmado\": true or false, \"personas\": 0, \"vehiculos\": 0, \"paquete\": true or false, \"donde\": \"\", \"actividad\": \"\", \"nivel\": \"ninguno|info|atencion|urgente\", \"motivo\": \"\", \"aviso\": \"\"}\n- confirmado: whether what the detector reported is really visible (false for a shadow, reflection, plant, animal or empty scene).\n- personas and vehiculos: how many are visible.\n- donde: 2 to 6 words, for example \"on the sidewalk\", \"at the front door\", \"inside the yard\".\n- actividad: what is visibly happening, for example \"walking past\", \"standing at the entrance\", \"leaving a package\", \"trying to open\".\n- nivel: ninguno = nothing confirmed or an empty scene; info = a person or vehicle passing on the street or sidewalk, a parked vehicle, a courier already leaving; atencion = a person inside the property or standing at the entrance, a package left, a door or gate open; urgente = someone trying to open, force or climb, smoke or fire.\n- motivo: at most 12 words, visible facts only; if the picture is dark or blurry, say so here.\n- aviso: sentence to say out loud in English, at most 15 words, calm tone, saying what is there and where, naming the camera.\nDo not use the words intruder, suspicious or stranger unless the level is urgente with visible evidence.</string>
+    <string name="vision_ctx_detector">The detector saw %1$s on the camera “%2$s”.</string>
+    <string name="vision_ctx_periodic">Periodic check of the camera “%1$s”, with no detection before.</string>
+    <string name="vision_ctx_zone">Zone: %1$s.</string>
+    <string name="vision_ctx_time_day">Local time: %1$s, daytime.</string>
+    <string name="vision_ctx_time_night">Local time: %1$s, night.</string>
+    <string name="vision_ctx_watch_yes">The user asked to watch this place.</string>
+    <string name="vision_ctx_watch_no">The user did not ask to watch this place.</string>
+    <string name="vision_label_person">a person</string>
+    <string name="vision_label_vehicle">a vehicle</string>
+    <string name="vision_label_animal">an animal</string>
+    <string name="vision_label_package">a package</string>
+    <string name="vision_label_motion">motion</string>
+    <string name="vision_label_any">something</string>
+    <string name="sentinel_photo_in_alerts">I left the photo in Alerts.</string>
+    <string name="proactive_tool_read_exactly">Read this alert EXACTLY, with no greeting, emoji or extra questions: «%1$s»</string>
+    <string name="proactive_tool_followup_facts">Facts only in case they ask later (do not read them): %1$s</string>
 </resources>

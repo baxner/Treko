@@ -38,6 +38,8 @@ import com.treko.assistant.data.SentinelRunTrace
 import com.treko.assistant.data.TrekoProactiveManager
 import com.treko.assistant.data.TrekoWorkflowManager
 import com.treko.assistant.data.WorkflowActions
+import com.treko.assistant.data.SpokenText
+import com.treko.assistant.data.parseVisionVerdict
 import com.treko.core.audio.FullDuplexComplementaryQueue
 import com.treko.core.audio.NativeAudioEngine
 import com.treko.core.audio.NearFieldListeningGate
@@ -431,17 +433,43 @@ class TrekoAssistantService : Service() {
         @Volatile
         private var sharedProactiveManager: TrekoProactiveManager? = null
 
+        private val fallbackHaLock = Any()
+        private var fallbackHaClient: HomeAssistantClient? = null
+        private var fallbackHaKey: String? = null
+
+        /**
+         * The Home Assistant client to use for proactive and sentinel work: the running
+         * service's (shared with the live event stream, so caches such as the states and the
+         * vision provider are reused), else one kept per configuration. Null when not configured.
+         */
+        private fun sharedHaClient(context: Context): HomeAssistantClient? {
+            instance?.let { return it.currentWatchHaClient() }
+            val p = TrekoPreferences(context.applicationContext)
+            val haUrl = p.haUrl.trim()
+            val haToken = p.haToken.trim()
+            return synchronized(fallbackHaLock) {
+                if (haUrl.isBlank() || haToken.isBlank()) {
+                    fallbackHaClient = null
+                    fallbackHaKey = null
+                    return@synchronized null
+                }
+                val key = "$haUrl\n$haToken"
+                if (key != fallbackHaKey) {
+                    fallbackHaClient = HomeAssistantClient(haUrl, haToken)
+                    fallbackHaKey = key
+                }
+                fallbackHaClient
+            }
+        }
+
         private fun getOrCreateProactiveManager(context: Context): TrekoProactiveManager {
             val appCtx = context.applicationContext
             return synchronized(sharedProactiveLock) {
                 sharedProactiveManager ?: TrekoProactiveManager(
                     sources = object : ProactiveDataSources {
                         override suspend fun getHomeStatusSummary(): String {
-                            val p = TrekoPreferences(appCtx)
-                            val haUrl = p.haUrl.trim()
-                            val haToken = p.haToken.trim()
-                            if (haUrl.isBlank() || haToken.isBlank()) return ""
-                            return HomeAssistantClient(haUrl, haToken).getHomeStatusSummary()
+                            val client = sharedHaClient(appCtx) ?: return ""
+                            return client.getHomeStatusSummary()
                         }
 
                         override suspend fun scanPriorityCamerasForAnomalies(
@@ -451,13 +479,71 @@ class TrekoAssistantService : Service() {
                             // periodic check follows the camera-scan setting, the sentinel its own.
                             val p = TrekoPreferences(appCtx)
                             val trace = coroutineContext[SentinelRunTrace]
-                            val haUrl = p.haUrl.trim()
-                            val haToken = p.haToken.trim()
-                            if (haUrl.isBlank() || haToken.isBlank()) {
+                            val client = sharedHaClient(appCtx)
+                            if (client == null) {
                                 trace?.decide("skipped", "Home Assistant not configured")
                                 return emptyList()
                             }
-                            val client = HomeAssistantClient(haUrl, haToken)
+                            val prompts = VisionPrompts(appCtx)
+
+                            /** One vision look at [imageEntity], recorded in the run's trace. */
+                            suspend fun look(
+                                cameraName: String,
+                                imageEntity: String,
+                                cameraEntityId: String?,
+                                prompt: String,
+                                label: String?,
+                                watchRequested: Boolean
+                            ): CameraAnomalyCheckResult? {
+                                val visionStartMs = System.currentTimeMillis()
+                                val report = client.analyzeCameraWithLlmVision(imageEntity, prompt)?.trim().orEmpty()
+                                val verdict = parseVisionVerdict(report)
+                                val result = if (report.isBlank()) {
+                                    null
+                                } else {
+                                    CameraAnomalyCheckResult(
+                                        cameraName = cameraName,
+                                        entityId = imageEntity,
+                                        visionReport = report,
+                                        // The structured level decides; keywords only when the model gave no JSON.
+                                        hasAnomaly = verdict?.raisesAlert(watchRequested)
+                                            ?: TrekoProactiveManager.detectCameraAnomaly(report),
+                                        cameraEntityId = cameraEntityId,
+                                        verdict = verdict,
+                                        label = label
+                                    )
+                                }
+                                trace?.look(
+                                    cameraName = cameraName,
+                                    imageEntityId = imageEntity,
+                                    durationMs = System.currentTimeMillis() - visionStartMs,
+                                    verdict = report,
+                                    anomaly = result?.hasAnomaly,
+                                    level = verdict?.level?.key,
+                                    description = verdict?.describe()
+                                )
+                                return result
+                            }
+
+                            // A detector fired: look only at its camera, at the detector's own
+                            // picture of the detection first (the person may be gone from the
+                            // live view by now), then at the live camera. No other camera.
+                            val triggerCamera = trace?.cameraEntityId
+                            if (trace != null && triggerCamera != null) {
+                                val name = trace.area.ifBlank { triggerCamera.substringAfter('.').replace('_', ' ') }
+                                val prompt = prompts.sentinel(
+                                    cameraName = name,
+                                    label = trace.label,
+                                    watchRequested = trace.watchRequested
+                                )
+                                val images = listOfNotNull(trace.snapshotEntityId, triggerCamera).distinct()
+                                for (image in images) {
+                                    val result = look(name, image, triggerCamera, prompt, trace.label, trace.watchRequested)
+                                    if (result != null) return listOf(result)
+                                }
+                                return emptyList()
+                            }
+
                             val camerasStartMs = System.currentTimeMillis()
                             val groups = client.getDeduplicatedCameras()
                             trace?.stage("cameras", System.currentTimeMillis() - camerasStartMs)
@@ -468,9 +554,13 @@ class TrekoAssistantService : Service() {
                             var frigateBusy: Set<String> = emptySet()
                             if (TrekoSkills.FRIGATE in p.detectedSkills) {
                                 val catalogStartMs = System.currentTimeMillis()
-                                val sensors = client.getWatchCatalog().orEmpty()
+                                // The watch coordinator's catalog when it has one (no extra download).
+                                val catalog = instance?.cameraWatch?.catalogSnapshot?.takeIf { it.isNotEmpty() }
+                                    ?: client.getWatchCatalog().orEmpty()
+                                val sensors = catalog
                                     .filter { it.source == WatchSensor.Source.FRIGATE_CAMERA && it.cameraEntityId != null }
-                                val states = client.getStates(sensors.map { it.entityId }.toSet())
+                                // The states read a moment ago for the camera list are fresh enough.
+                                val states = client.getStates(sensors.map { it.entityId }.toSet(), forceRefresh = false)
                                 if (sensors.isNotEmpty() && states.isNotEmpty()) {
                                     frigateCameras = sensors.mapNotNull { it.cameraEntityId }.toSet()
                                     frigateBusy = sensors.filter { states[it.entityId] == "on" }.mapNotNull { it.cameraEntityId }.toSet()
@@ -478,9 +568,6 @@ class TrekoAssistantService : Service() {
                                 trace?.stage("catalog", System.currentTimeMillis() - catalogStartMs)
                                 trace?.note("frigate_busy=${frigateBusy.sorted().ifEmpty { listOf("none") }.joinToString(",")}")
                             }
-                            // The camera whose detector fired is always looked at, even if its
-                            // sensor already turned off by now.
-                            trace?.cameraEntityId?.let { frigateBusy = frigateBusy + it }
                             fun idsOf(g: HomeAssistantClient.HaCameraGroup) =
                                 setOfNotNull(g.primaryEntityId, g.snapshotEntityId, g.liveEntityId)
                             fun candidateOf(g: HomeAssistantClient.HaCameraGroup) = ProactiveCameraCandidate(
@@ -492,10 +579,7 @@ class TrekoAssistantService : Service() {
                             // is always looked at; the remaining slots rotate as before.
                             val busy = groups.filter { g -> idsOf(g).any { it in frigateBusy } }.map(::candidateOf)
                             val others = groups.filter { g -> idsOf(g).none { it in frigateCameras || it in frigateBusy } }.map(::candidateOf)
-                            // The camera each look is about: the trigger's own entity when it is in that group.
-                            val mainEntityOf = groups.associate { g ->
-                                candidateOf(g).entityId to (trace?.cameraEntityId?.takeIf { it in idsOf(g) } ?: g.primaryEntityId)
-                            }
+                            val mainEntityOf = groups.associate { g -> candidateOf(g).entityId to g.primaryEntityId }
                             val busyPicked = busy.take(3)
                             val selected = busyPicked + TrekoProactiveManager.selectImportantCamerasForScan(
                                 candidates = others,
@@ -511,30 +595,14 @@ class TrekoAssistantService : Service() {
                             return coroutineScope {
                                 selected.map { cam ->
                                     async {
-                                        val visionStartMs = System.currentTimeMillis()
-                                        val report = client.analyzeCameraWithLlmVision(
-                                            cam.entityId,
-                                            TrekoProactiveManager.SENTINEL_VISION_PROMPT
-                                        )?.trim().orEmpty()
-                                        val result = if (report.isBlank()) {
-                                            null
-                                        } else {
-                                            CameraAnomalyCheckResult(
-                                                cameraName = cam.friendlyName,
-                                                entityId = cam.entityId,
-                                                visionReport = report,
-                                                hasAnomaly = TrekoProactiveManager.detectCameraAnomaly(report),
-                                                cameraEntityId = mainEntityOf[cam.entityId]
-                                            )
-                                        }
-                                        trace?.look(
+                                        look(
                                             cameraName = cam.friendlyName,
-                                            imageEntityId = cam.entityId,
-                                            durationMs = System.currentTimeMillis() - visionStartMs,
-                                            verdict = report,
-                                            anomaly = result?.hasAnomaly
+                                            imageEntity = cam.entityId,
+                                            cameraEntityId = mainEntityOf[cam.entityId],
+                                            prompt = prompts.sentinel(cameraName = cam.friendlyName, label = null),
+                                            label = null,
+                                            watchRequested = false
                                         )
-                                        result
                                     }
                                 }.awaitAll().filterNotNull()
                             }
@@ -676,12 +744,12 @@ class TrekoAssistantService : Service() {
                         assistantName = resolveAssistantName(appCtx)
                     ) ?: return@launch
                     TrekoAlertLog.init(appCtx)
-                    val insight = AlertRecording.recordInsight(found, trace = null)
+                    var insight = AlertRecording.recordInsight(found, trace = null)
                     if (insight.category == ProactiveCategory.CAMERA_ANOMALY) {
-                        val haUrl = prefs.haUrl.trim()
-                        val haToken = prefs.haToken.trim()
-                        val client = if (haUrl.isBlank() || haToken.isBlank()) null else HomeAssistantClient(haUrl, haToken)
-                        AlertRecording.announceCameraAlert(appCtx, insight, proactiveFallbackScope, client, trace = null)
+                        val photo = AlertRecording.announceCameraAlert(
+                            appCtx, insight, proactiveFallbackScope, sharedHaClient(appCtx), trace = null
+                        )
+                        insight = AlertRecording.withPhotoNote(appCtx, insight, photo)
                     }
                     val shouldSpeak = (forceSpeak ?: prefs.proactiveSpeakOutLoud) && hasMicPermission(appCtx)
                     if (shouldSpeak) {
@@ -3422,7 +3490,7 @@ class TrekoAssistantService : Service() {
                                 removePendingInsight(chosen.id)
                                 if (chosen === pending) AlertRecording.markDelivered(chosen, spoken = true)
                                 cancelProactiveNotification(this@TrekoAssistantService)
-                                "Di esto al usuario en voz alta ahora mismo con naturalidad: \"${chosen.spokenSpeechText}\"\nContexto detallado para preguntas de seguimiento: ${chosen.spokenPrompt}"
+                                readExactlyToolResult(chosen)
                             } else {
                                 // "What were you going to tell me?": a quick look at the other
                                 // topics, never a slow camera scan.
@@ -3433,7 +3501,7 @@ class TrekoAssistantService : Service() {
                                 )?.let { AlertRecording.recordInsight(it, trace = null) }
                                 if (fresh != null) {
                                     AlertRecording.markDelivered(fresh, spoken = true)
-                                    "Di esto al usuario en voz alta ahora mismo: \"${fresh.spokenSpeechText}\"\nContexto adicional: ${fresh.spokenPrompt}"
+                                    readExactlyToolResult(fresh)
                                 } else {
                                     "No hay avisos pendientes ni anomalías en este momento."
                                 }
@@ -4056,10 +4124,11 @@ class TrekoAssistantService : Service() {
                 trace?.let { AlertRecording.recordSentinelCheck(this, it) }
                 return true
             }
-            val recorded = AlertRecording.recordInsight(insight, trace)
+            var recorded = AlertRecording.recordInsight(insight, trace)
             if (recorded.category == ProactiveCategory.CAMERA_ANOMALY) {
                 // Always a high-importance notification with the picture, spoken or not.
-                AlertRecording.announceCameraAlert(this, recorded, serviceScope, currentWatchHaClient(), trace)
+                val photo = AlertRecording.announceCameraAlert(this, recorded, serviceScope, currentWatchHaClient(), trace)
+                recorded = AlertRecording.withPhotoNote(this, recorded, photo)
             }
 
             val speakOutLoud = overrideSpeak ?: prefs.proactiveSpeakOutLoud
@@ -4208,8 +4277,19 @@ class TrekoAssistantService : Service() {
         }
     }
 
+    /**
+     * What `deliver_pending` hands the voice model: read the alert word for word (no greeting,
+     * emoji or extra questions), plus the facts only for follow-up questions.
+     */
+    private fun readExactlyToolResult(insight: ProactiveInsight): String {
+        val speech = SpokenText.stripEmoji(insight.spokenSpeechText.ifBlank { insight.summaryText })
+        val read = getString(R.string.proactive_tool_read_exactly, speech)
+        val facts = insight.spokenPrompt.trim()
+        return if (facts.isEmpty()) read else read + "\n" + getString(R.string.proactive_tool_followup_facts, facts)
+    }
+
     private suspend fun speakLocalProactiveFallback(insight: ProactiveInsight, openMicAfter: Boolean) {
-        val textToSpeak = insight.spokenSpeechText.ifBlank { insight.summaryText }
+        val textToSpeak = SpokenText.stripEmoji(insight.spokenSpeechText.ifBlank { insight.summaryText })
         val name = _assistantName.value
         _subtitleText.value = "$name: $textToSpeak"
         addChatMessage(name, textToSpeak)
