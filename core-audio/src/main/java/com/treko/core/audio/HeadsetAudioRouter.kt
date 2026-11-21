@@ -39,6 +39,34 @@ class HeadsetAudioRouter(
 
     private var callbackRegistered = false
 
+    /**
+     * Decides whether a connected device may carry Treko's voice. Set by the app, which can
+     * ask Bluetooth what kind of device it is (a watch or band also exposes a call profile,
+     * but it is not a headset). Default: everything except names that look like wearables.
+     */
+    @Volatile
+    var deviceFilter: (AudioDeviceInfo) -> Boolean = { device ->
+        !looksLikeWearable(device.productName?.toString())
+    }
+
+    private val skippedLogged = HashSet<String>()
+
+    private fun usable(devices: List<AudioDeviceInfo>): List<AudioDeviceInfo> = devices.filter { device ->
+        if (!isHeadsetInputType(device.type)) return@filter true
+        val ok = try {
+            deviceFilter(device)
+        } catch (_: Exception) {
+            true
+        }
+        if (!ok) {
+            val name = device.productName?.toString().orEmpty()
+            if (skippedLogged.add(name)) {
+                TrekoLogBuffer.i(TAG, "Ignorando '$name' como audífono: no es un dispositivo de audio (reloj, banda…).")
+            }
+        }
+        ok
+    }
+
     private interface AudioRecordHolder {
         fun setPreferredDevice(device: AudioDeviceInfo?): Boolean
     }
@@ -89,9 +117,9 @@ class HeadsetAudioRouter(
 
     fun hasHeadsetConnected(): Boolean {
         val am = audioManager ?: return false
-        val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        val inputs = usable(am.getDevices(AudioManager.GET_DEVICES_INPUTS).toList())
         val commDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            am.availableCommunicationDevices
+            usable(am.availableCommunicationDevices)
         } else {
             emptyList()
         }
@@ -141,10 +169,10 @@ class HeadsetAudioRouter(
             return currentRoute
         }
 
-        val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
-        val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        val inputs = usable(am.getDevices(AudioManager.GET_DEVICES_INPUTS).toList())
+        val outputs = usable(am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList())
         val commDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            am.availableCommunicationDevices
+            usable(am.availableCommunicationDevices)
         } else {
             emptyList()
         }
@@ -233,6 +261,15 @@ class HeadsetAudioRouter(
             AudioDeviceInfo.TYPE_BLE_HEADSET,
             AudioDeviceInfo.TYPE_BLUETOOTH_SCO
         )
+
+        private val WEARABLE_NAME = Regex(
+            "\\b(watch|reloj|smartwatch|band|fitbit|amazfit|garmin|gear fit|galaxy fit|mi band|whoop)\\d*\\b",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** Fallback when Bluetooth can't say the device class: watches and bands by name. */
+        fun looksLikeWearable(productName: String?): Boolean =
+            !productName.isNullOrBlank() && WEARABLE_NAME.containsMatchIn(productName)
 
         internal fun isHeadsetInputType(type: Int): Boolean {
             return type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
