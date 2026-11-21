@@ -27,6 +27,9 @@ class HaRoomControl(
 ) {
     private companion object {
         const val TAG = "HaRoomControl"
+        const val PING_TEMPLATE = "{{ 1 }}"
+
+        fun playerTemplate(entityId: String) = "{{ states('$entityId') }}|{{ state_attr('$entityId', 'volume_level') }}"
     }
 
     /** Every area with its players and lights; null without Home Assistant or template API. */
@@ -50,29 +53,55 @@ class HaRoomControl(
 
     /**
      * Snapshots [lightIds], saves a Home Assistant scene of the ones that are on (best
-     * effort) and dims them warm. Off lights are not touched. Returns what must be restored
-     * (empty record when nothing was changed); null when the lights could not be read.
-     * Save the record before or right after calling, so a crash can still restore.
+     * effort, only when [createScene]) and dims them warm. Off lights are not touched.
+     * [onPlanned] gets the record of what will change before the first light is dimmed:
+     * persist it there, so a crash or cancellation mid-way can still put everything back.
+     * Returns that record (empty when nothing was changed); null when the lights could not
+     * be read.
      */
     suspend fun dimLightsWarm(
         lightIds: List<String>,
         kelvin: Int = HaRooms.DEFAULT_WARM_KELVIN,
         brightnessPercent: Int = HaRooms.DEFAULT_DIM_PERCENT,
-        transitionSeconds: Int = HaRooms.DEFAULT_TRANSITION_S
+        transitionSeconds: Int = HaRooms.DEFAULT_TRANSITION_S,
+        createScene: Boolean = true,
+        onPlanned: suspend (RoomRestoreRecord) -> Unit = {}
     ): RoomRestoreRecord? {
         val snapshots = snapshotLights(lightIds) ?: return null
         val toAdjust = HaRooms.lightsToAdjust(snapshots)
         if (toAdjust.isEmpty()) return RoomRestoreRecord(sceneEntityId = null, lights = emptyList())
-        val sceneOk = backend.callService(HaRooms.planSceneSnapshot(toAdjust.map { it.entityId }))
-        if (!sceneOk) TrekoLogBuffer.w(TAG, "scene.create failed; lights will be restored from the local snapshot.")
+        // scene.create changes nothing in the room, so it may come before the record is saved.
+        val sceneOk = createScene && backend.callService(HaRooms.planSceneSnapshot(toAdjust.map { it.entityId }))
+        if (createScene && !sceneOk) TrekoLogBuffer.w(TAG, "scene.create failed; lights will be restored from the local snapshot.")
         val record = RoomRestoreRecord(
             sceneEntityId = if (sceneOk) HaRooms.RESTORE_SCENE_ENTITY else null,
-            lights = toAdjust
+            lights = toAdjust,
+            dimBrightnessPercent = brightnessPercent,
+            dimKelvin = kelvin
         )
+        onPlanned(record)
         HaRooms.planDim(toAdjust, kelvin, brightnessPercent, transitionSeconds).forEach { call ->
             if (!backend.callService(call)) TrekoLogBuffer.w(TAG, "Could not dim ${call.data["entity_id"]}.")
         }
         return record
+    }
+
+    /** True when Home Assistant answers right now (a trivial template renders). */
+    suspend fun isReachable(): Boolean =
+        backend.isConfigured() && backend.renderTemplate(PING_TEMPLATE)?.trim() == "1"
+
+    /**
+     * What a late restore of [record] may still put back ([HaRooms.planLateRestore]), from
+     * the current state of its lights and player; null when Home Assistant cannot be read.
+     */
+    suspend fun planLateRestore(record: RoomRestoreRecord): HaRooms.LateRestorePlan? {
+        val lights = if (record.lights.isEmpty()) emptyList() else snapshotLights(record.lights.map { it.entityId }) ?: return null
+        val player = record.mediaPlayer?.let { id ->
+            if (!backend.isConfigured()) return null
+            val out = backend.renderTemplate(playerTemplate(id)) ?: return null
+            HaRooms.parsePlayer(id, out)
+        }
+        return HaRooms.planLateRestore(record, lights, player)
     }
 
     /**
@@ -116,11 +145,29 @@ class HaRoomControl(
         backend.callService(HaServiceCall("scene", "delete", linkedMapOf("entity_id" to sceneEntityId)))
     }
 
+    /**
+     * Turns the lights of [record] off slowly (the end of a sleep session) instead of putting
+     * them back; its scene, no longer needed, is deleted. True when every light went off.
+     */
+    suspend fun turnOffLights(record: RoomRestoreRecord, transitionSeconds: Int = HaRooms.SLEEP_OFF_TRANSITION_S): Boolean {
+        if (record.lights.isEmpty() && record.sceneEntityId == null) return true
+        if (!backend.isConfigured()) return false
+        var allOk = true
+        HaRooms.planTurnOff(record.lights, transitionSeconds).forEach { call ->
+            if (!backend.callService(call)) {
+                allOk = false
+                TrekoLogBuffer.w(TAG, "Could not turn off ${call.data["entity_id"]}.")
+            }
+        }
+        val scene = record.sceneEntityId
+        if (allOk && scene != null && sceneExists(scene)) deleteScene(scene)
+        return allOk
+    }
+
     /** State and volume (0..1, null if the player does not report it) of a media player. */
     suspend fun getPlayer(entityId: String): PlayerSnapshot? {
         if (!HaRooms.isValidEntityId(entityId) || !backend.isConfigured()) return null
-        val out = backend.renderTemplate("{{ states('$entityId') }}|{{ state_attr('$entityId', 'volume_level') }}")
-            ?: return null
+        val out = backend.renderTemplate(playerTemplate(entityId)) ?: return null
         return HaRooms.parsePlayer(entityId, out)
     }
 
@@ -178,7 +225,8 @@ class HaRoomControl(
             if (stopPlayer) stopPlayback(player)
             record.volume?.let { if (!setVolume(player, it)) ok = false }
         }
-        if (!restoreLights(record)) ok = false
+        val lightsOk = if (record.lightsOffAtEnd) turnOffLights(record) else restoreLights(record)
+        if (!lightsOk) ok = false
         return ok
     }
 }

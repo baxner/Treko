@@ -71,6 +71,12 @@ object MeditationPlanner {
 
     private val HABIT_PREFIXES = listOf("medit", "respir", "mindful", "breath")
 
+    /** Whole minutes left (rounded up, at least 1): a fresh 10-minute session has 10 left. */
+    fun remainingMinutes(totalMs: Long, activeMs: Long): Int {
+        val left = (totalMs - activeMs).coerceAtLeast(0L)
+        return ((left + 59_999L) / 60_000L).toInt().coerceAtLeast(1)
+    }
+
     /** Share of the session that counts it as done for a habit. */
     const val HABIT_DONE_FRACTION = 0.8
 }

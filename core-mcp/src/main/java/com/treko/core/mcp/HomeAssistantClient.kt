@@ -1991,7 +1991,9 @@ class HomeAssistantClient(
         query: String,
         targetDevice: String = "",
         mediaType: String = "auto",
-        provider: String = "auto"
+        provider: String = "auto",
+        /** False: never fall back to a station found by searching for [query] (it may be unrelated). */
+        searchFallback: Boolean = true
     ): String = withContext(Dispatchers.IO) {
         try {
             if (!hasValidConfig()) {
@@ -2048,7 +2050,7 @@ class HomeAssistantClient(
                     "El reproductor '${resolution.target.friendlyName}' (${resolution.target.entityId}) no está disponible en este momento (estado: ${resolution.target.state}).$othersNote"
                 }
                 is MediaTargetResolution.Found -> {
-                    executePlayOnTarget(resolution.target, effectiveQuery, normType, provider)
+                    executePlayOnTarget(resolution.target, effectiveQuery, normType, provider, searchFallback)
                 }
             }
         } catch (e: Exception) {
@@ -2060,16 +2062,17 @@ class HomeAssistantClient(
         target: MediaPlayerCandidate,
         query: String,
         mediaType: String,
-        provider: String
+        provider: String,
+        searchFallback: Boolean = true
     ): String {
         val intent = detectMediaIntent(query, mediaType, provider)
+        val directStream = query.startsWith("http://", ignoreCase = true) || query.startsWith("https://", ignoreCase = true)
 
         if (!target.isAlexa) {
             if (intent == MediaIntent.ROUTINE) {
                 return "Las rutinas solo están disponibles en dispositivos Alexa/Echo; '${target.friendlyName}' no es un dispositivo Alexa."
             }
-            val directStream = query.startsWith("http://", ignoreCase = true) || query.startsWith("https://", ignoreCase = true)
-            val resolvedStation = if (directStream) null else radioBrowserClient.findBestStation(query)
+            val resolvedStation = if (directStream || !searchFallback) null else radioBrowserClient.findBestStation(query)
             val streamUrl = if (directStream) query.trim() else resolvedStation?.streamUrl.orEmpty()
             if (streamUrl.isBlank()) {
                 return "No encontré un flujo de audio reproducible para '$query' en '${target.friendlyName}'."
@@ -2088,7 +2091,18 @@ class HomeAssistantClient(
             }
         }
 
-        val needsUpfrontStation = intent == MediaIntent.RADIO &&
+        if (directStream && intent != MediaIntent.ROUTINE) {
+            // A stream URL plays as it is, also on Alexa (no search for it).
+            val payload = JSONObject().apply {
+                put("entity_id", target.entityId)
+                put("media_content_id", query.trim())
+                put("media_content_type", "music")
+            }
+            val result = callService("media_player", "play_media", payload)
+            return if (result.contains("correctamente")) "Reproduciendo '$query' en '${target.friendlyName}'." else result
+        }
+
+        val needsUpfrontStation = searchFallback && intent == MediaIntent.RADIO &&
             (radioBrowserClient.isGenericQuery(query) || isRadioGenreQuery(query))
         val resolvedStation = if (needsUpfrontStation) {
             radioBrowserClient.findBestStation(query)
@@ -2126,7 +2140,7 @@ class HomeAssistantClient(
         }
 
         // Fallback con flujo de RadioBrowser cuando TuneIn/custom/Amazon Music fallaron
-        if (intent == MediaIntent.MUSIC || (intent == MediaIntent.RADIO && !needsUpfrontStation)) {
+        if (searchFallback && (intent == MediaIntent.MUSIC || (intent == MediaIntent.RADIO && !needsUpfrontStation))) {
             val fallbackStation = radioBrowserClient.findBestStation(query)
             if (fallbackStation != null) {
                 val payload = JSONObject().apply {

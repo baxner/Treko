@@ -269,7 +269,7 @@ fun parseVisionVerdict(raw: String?): VisionVerdict? {
         // No level given: derive a cautious one from what it did say.
         confirmed == false -> VisionLevel.NONE
         // A package next to someone passing on the street is not a delivery to this home.
-        packageSeen && !passingBy(fields["actividad"], fields["donde"]) -> VisionLevel.ATTENTION
+        packageSeen && !passingBy(fields["actividad"]) -> VisionLevel.ATTENTION
         packageSeen -> VisionLevel.INFO
         people > 0 || vehicles > 0 || confirmed == true -> VisionLevel.INFO
         else -> VisionLevel.NONE
@@ -287,15 +287,20 @@ fun parseVisionVerdict(raw: String?): VisionVerdict? {
     )
 }
 
-/** Words of a verdict's actividad/donde that mean "out on the street, passing by". */
+/**
+ * Words of a verdict's actividad that mean "passing by". Only the activity counts: a place
+ * word alone ("en la banqueta", "on the sidewalk") is where many deliveries are left.
+ */
 private val PASSING_WORDS = listOf(
-    "de paso", "pasando", "caminando por", "banqueta", "acera", "vereda", "en la calle",
-    "passing", "walking past", "walking by", "sidewalk", "pavement", "on the street", "in the street"
+    "de paso", "pasando", "caminando", "passing", "walking past", "walking by"
 )
 
-private fun passingBy(activity: String?, where: String?): Boolean {
-    val text = TrekoProactiveManager.normalizeAscii(listOfNotNull(activity, where).joinToString(" ") { asString(it) })
-    return PASSING_WORDS.any { text.contains(it) }
+/** Leaving or delivering something: never "just passing", whatever else the activity says. */
+private val LEAVING_WORDS = listOf("dej", "entreg", "leav", "left", "deliver", "drop")
+
+private fun passingBy(activity: String?): Boolean {
+    val text = TrekoProactiveManager.normalizeAscii(activity?.let { asString(it) }.orEmpty())
+    return PASSING_WORDS.any { text.contains(it) } && LEAVING_WORDS.none { text.contains(it) }
 }
 
 private val KNOWN_KEYS = listOf("nivel", "confirmado", "aviso", "personas", "vehiculos", "paquete", "motivo")

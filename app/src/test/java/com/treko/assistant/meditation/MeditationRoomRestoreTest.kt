@@ -1,5 +1,6 @@
 package com.treko.assistant.meditation
 
+import com.treko.core.mcp.RadioStation
 import com.treko.core.mcp.rooms.HaArea
 import com.treko.core.mcp.rooms.HaAreaPlayer
 import com.treko.core.mcp.rooms.HaRoomBackend
@@ -31,26 +32,33 @@ class MeditationRoomRestoreTest {
         }
     }
 
-    /** Home Assistant with real-looking lights and one player; records every service call. */
+    /**
+     * Home Assistant with real-looking lights and one player that follow the service calls
+     * (dims, turn-offs, the scene, volume, stop); records every call.
+     */
     private class FakeHa : HaRoomBackend {
         var online = true
         val calls = mutableListOf<HaServiceCall>()
         val failing = mutableSetOf<String>()
         var sceneExists = true
+        var playerState = "playing"
+        var playerVolume: Double? = 0.45
+        private var scene: List<LightSnapshot> = emptyList()
         val lights = linkedMapOf(
-            "light.techo" to "light.techo|on|200|color_temp|4000||||||None|color_temp|",
-            "light.lampara" to "light.lampara|on|150|hs|None|30.0,60.0|||||None|hs,color_temp|",
-            "light.buro" to "light.buro|off|None|None|None||||||None|color_temp|"
+            "light.techo" to light("light.techo|on|200|color_temp|4000||||||None|color_temp|"),
+            "light.lampara" to light("light.lampara|on|150|hs|None|30.0,60.0|||||None|hs,color_temp|"),
+            "light.buro" to light("light.buro|off|None|None|None||||||None|color_temp|")
         )
 
         override fun isConfigured() = true
 
         override suspend fun renderTemplate(template: String): String? {
             if (!online) return null
+            if (template.trim() == "{{ 1 }}") return "1"
             if (template.startsWith("{%- for e in [")) {
-                return lights.filterKeys { "'$it'" in template }.values.joinToString("\n")
+                return lights.filterKeys { "'$it'" in template }.values.joinToString("\n") { HaRooms.encodeLight(it) }
             }
-            if (template.contains("volume_level")) return "playing|0.45"
+            if (template.contains("volume_level")) return "$playerState|${playerVolume ?: "None"}"
             if (template.contains("scene.")) return if (sceneExists) "2024-01-01T00:00:00" else "unknown"
             return null
         }
@@ -58,11 +66,39 @@ class MeditationRoomRestoreTest {
         override suspend fun callService(call: HaServiceCall): Boolean {
             if (!online) return false
             calls += call
-            return "${call.domain}.${call.service}" !in failing
+            val key = "${call.domain}.${call.service}"
+            if (key in failing) return false
+            val id = call.data["entity_id"] as? String
+            when (key) {
+                "light.turn_on" -> lights[id]?.let { l ->
+                    val kelvin = call.data["color_temp_kelvin"] as? Int
+                    @Suppress("UNCHECKED_CAST")
+                    val hs = call.data["hs_color"] as? List<Double>
+                    lights[l.entityId] = l.copy(
+                        isOn = true,
+                        brightness = call.data["brightness"] as? Int ?: l.brightness,
+                        colorMode = if (kelvin != null) "color_temp" else if (hs != null) "hs" else l.colorMode,
+                        colorTempKelvin = kelvin ?: l.colorTempKelvin,
+                        hsColor = hs ?: l.hsColor
+                    )
+                }
+                "light.turn_off" -> lights[id]?.let { lights[it.entityId] = it.copy(isOn = false) }
+                "scene.create" -> scene = (call.data["snapshot_entities"] as List<*>).mapNotNull { lights[it] }
+                "scene.turn_on" -> scene.forEach { lights[it.entityId] = it }
+                "media_player.volume_set" -> playerVolume = call.data["volume_level"] as Double
+                "media_player.media_stop" -> playerState = "idle"
+            }
+            return true
         }
 
         fun touched(entityId: String) = calls.any { c ->
             c.data["entity_id"] == entityId || (c.data["snapshot_entities"] as? List<*>)?.contains(entityId) == true
+        }
+
+        fun servicesFor(entityId: String) = calls.filter { it.data["entity_id"] == entityId }.map { "${it.domain}.${it.service}" }
+
+        companion object {
+            fun light(line: String) = HaRooms.decodeLight(line)!!
         }
     }
 
@@ -73,20 +109,32 @@ class MeditationRoomRestoreTest {
         lights = listOf("light.techo", "light.lampara", "light.buro")
     )
 
-    private fun room(ha: FakeHa, store: MeditationRestoreStore, area: HaArea? = bedroom, playOk: Boolean = true, played: MutableList<String> = mutableListOf()) =
+    private fun room(
+        ha: FakeHa,
+        store: MeditationRestoreStore,
+        area: HaArea? = bedroom,
+        playOk: Boolean = true,
+        played: MutableList<String> = mutableListOf(),
+        type: MeditationType = MeditationType.MINDFULNESS,
+        stream: RadioStation? = null,
+        onPlay: () -> Unit = {}
+    ) =
         HomeMeditationRoom(
             rooms = HaRoomControl(ha, sleep = {}),
             area = area,
-            type = MeditationType.MINDFULNESS,
+            type = type,
             settings = MeditationRoomSettings(adjustLights = true, playMusic = true, preferAlexa = true),
             store = store,
             playOnPlayer = { q, id ->
                 played += "$id:$q"
+                if (playOk) onPlay()
                 playOk
             },
             musicQuery = "música para meditar",
+            calmStream = { stream },
             phoneMusic = null,
-            wallClock = { 1_000L }
+            wallClock = { 1_000L },
+            sleep = {}
         )
 
     @Test
@@ -119,7 +167,7 @@ class MeditationRoomRestoreTest {
         val r = room(ha, store)
         r.prepare()
         ha.calls.clear()
-        r.finish()
+        r.finish(completed = true)
         val services = ha.calls.map { "${it.domain}.${it.service}" }
         // Fade down in steps, stop, then the saved volume, then the lights through the scene.
         val volumes = ha.calls.filter { it.service == "volume_set" }.map { it.data["volume_level"] }
@@ -139,7 +187,7 @@ class MeditationRoomRestoreTest {
         r.prepare()
         assertNull(store.load()!!.sceneEntityId)
         ha.calls.clear()
-        r.finish()
+        r.finish(completed = true)
         val restores = ha.calls.filter { it.domain == "light" }
         val techo = restores.single { it.data["entity_id"] == "light.techo" }
         assertEquals(200, techo.data["brightness"])
@@ -235,9 +283,212 @@ class MeditationRoomRestoreTest {
         val r = HomeMeditationRoom(
             rooms = HaRoomControl(FakeHa(), sleep = {}), area = lightsOnly, type = MeditationType.SLEEP,
             settings = MeditationRoomSettings(), store = MeditationRestoreStore(MemoryKeyValue()),
-            playOnPlayer = { _, _ -> error("no room player") }, musicQuery = "", phoneMusic = phone
+            playOnPlayer = { _, _ -> error("no room player") }, musicQuery = "", calmStream = { null }, phoneMusic = phone
         )
         assertTrue(r.prepare())
         assertEquals(listOf(MeditationType.SLEEP), started)
+    }
+
+    // ---- Sleep sessions: lights off at the end ----
+
+    @Test
+    fun aSleepSessionThatRunsToItsEndTurnsItsLightsOffAndRestoresTheVolume() = runBlocking {
+        val ha = FakeHa()
+        val store = MeditationRestoreStore(MemoryKeyValue(), wallClock = { 2_000L })
+        val r = room(ha, store, type = MeditationType.SLEEP)
+        r.prepare()
+        assertTrue(store.load()!!.lightsOffAtEnd)
+        ha.calls.clear()
+        r.finish(completed = true)
+        val offs = ha.calls.filter { it.domain == "light" && it.service == "turn_off" }
+        assertEquals(listOf("light.techo", "light.lampara"), offs.map { it.data["entity_id"] })
+        assertTrue(offs.all { it.data["transition"] == HaRooms.SLEEP_OFF_TRANSITION_S })
+        // Not put back on, and the light that was already off is never touched.
+        assertTrue(ha.calls.none { it.domain == "light" && it.service == "turn_on" })
+        assertTrue(ha.calls.none { "${it.domain}.${it.service}" == "scene.turn_on" })
+        assertFalse(ha.touched("light.buro"))
+        assertFalse(ha.lights.getValue("light.techo").isOn)
+        assertFalse(ha.lights.getValue("light.lampara").isOn)
+        // The music fades out and stops; the speaker's own volume comes back.
+        assertTrue("media_player.media_stop" in ha.servicesFor("media_player.echo"))
+        assertEquals(0.45, ha.calls.last { it.service == "volume_set" }.data["volume_level"])
+        assertNull(store.load())
+    }
+
+    @Test
+    fun aSleepSessionStoppedEarlyPutsTheLightsBackAsTheyWere() = runBlocking {
+        val ha = FakeHa()
+        val store = MeditationRestoreStore(MemoryKeyValue(), wallClock = { 2_000L })
+        val r = room(ha, store, type = MeditationType.SLEEP)
+        r.prepare()
+        ha.calls.clear()
+        r.finish(completed = false)
+        assertTrue(ha.calls.none { it.domain == "light" && it.service == "turn_off" })
+        assertTrue(ha.calls.any { "${it.domain}.${it.service}" == "scene.turn_on" })
+        assertEquals(200, ha.lights.getValue("light.techo").brightness)
+        assertTrue(ha.lights.getValue("light.lampara").isOn)
+        assertEquals(0.45, ha.playerVolume)
+        assertNull(store.load())
+    }
+
+    @Test
+    fun aSleepSessionStoppedEarlyWhileHomeAssistantIsAwayIsRestoredLaterNotTurnedOff() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        val r = room(ha, MeditationRestoreStore(kv, wallClock = { 2_000L }), type = MeditationType.SLEEP)
+        r.prepare()
+        ha.online = false
+        r.finish(completed = false)
+        val left = MeditationRestoreStore(kv, wallClock = { 3_000L })
+        assertFalse(left.load()!!.lightsOffAtEnd)
+        ha.online = true
+        ha.calls.clear()
+        assertEquals(RestoreResult.RESTORED, left.restore(HaRoomControl(ha, sleep = {}), late = true))
+        assertTrue(ha.calls.none { it.domain == "light" && it.service == "turn_off" })
+        assertEquals(200, ha.lights.getValue("light.techo").brightness)
+    }
+
+    @Test
+    fun aSleepSessionCutByACrashTurnsItsLightsOffOnRecovery() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        room(ha, MeditationRestoreStore(kv, wallClock = { 2_000L }), type = MeditationType.SLEEP).prepare()
+        // The process dies mid-session. Meanwhile the user switched the lamp off by hand.
+        ha.lights["light.lampara"] = ha.lights.getValue("light.lampara").copy(isOn = false)
+        ha.calls.clear()
+        val next = MeditationRestoreStore(kv, wallClock = { 60_000L })
+        assertTrue(next.load()!!.lightsOffAtEnd)
+        assertEquals(RestoreResult.RESTORED, next.restore(HaRoomControl(ha, sleep = {}), late = true))
+        // The dimmed light goes off instead of back to full brightness; the lamp is left alone.
+        assertEquals(listOf("light.techo"), ha.calls.filter { it.domain == "light" }.map { it.data["entity_id"] })
+        assertEquals("turn_off", ha.calls.single { it.domain == "light" }.service)
+        assertFalse(ha.lights.getValue("light.techo").isOn)
+        assertTrue(ha.calls.none { "${it.domain}.${it.service}" == "scene.turn_on" })
+        // Treko's stream is still playing at Treko's level: stopped, volume put back.
+        assertTrue("media_player.media_stop" in ha.servicesFor("media_player.echo"))
+        assertEquals(0.45, ha.playerVolume)
+        assertNull(next.load())
+    }
+
+    // ---- Volume ----
+
+    @Test
+    fun anUnknownVolumeIsNeverLoweredNorFadedToZero() = runBlocking {
+        val ha = FakeHa().apply {
+            playerState = "off"
+            playerVolume = null
+        }
+        val store = MeditationRestoreStore(MemoryKeyValue(), wallClock = { 2_000L })
+        val r = room(ha, store)
+        assertTrue(r.prepare())
+        assertNull(store.load()!!.volume)
+        r.finish(completed = true)
+        assertTrue(ha.calls.none { it.service == "volume_set" })
+        assertTrue("media_player.media_stop" in ha.servicesFor("media_player.echo"))
+        assertNull(store.load())
+    }
+
+    @Test
+    fun anOffPlayerReportsItsVolumeOnceItPlaysAndGetsItBack() = runBlocking {
+        val ha = FakeHa().apply {
+            playerState = "off"
+            playerVolume = null
+        }
+        val store = MeditationRestoreStore(MemoryKeyValue(), wallClock = { 2_000L })
+        val r = room(ha, store, onPlay = {
+            ha.playerState = "playing"
+            ha.playerVolume = 0.3
+        })
+        assertTrue(r.prepare())
+        assertEquals(0.3, store.load()!!.volume!!, 0.0001)
+        assertEquals(HomeMeditationRoom.PLAYER_LEVEL, ha.playerVolume)
+        r.finish(completed = true)
+        assertEquals(0.3, ha.playerVolume)
+    }
+
+    // ---- Players without Alexa ----
+
+    @Test
+    fun aPlayerWithoutAlexaGetsACalmStreamUrlOrNothing() = runBlocking {
+        val speaker = bedroom.copy(mediaPlayers = listOf(HaAreaPlayer("media_player.nest", "idle", isAlexa = false)))
+        val calm = RadioStation("Calm Radio", "https://example.org/calm.mp3", tags = "meditation,ambient")
+        val played = mutableListOf<String>()
+        assertTrue(room(FakeHa(), MeditationRestoreStore(MemoryKeyValue()), area = speaker, played = played, stream = calm).prepare())
+        assertEquals(listOf("media_player.nest:https://example.org/calm.mp3"), played)
+
+        val none = mutableListOf<String>()
+        assertFalse(room(FakeHa(), MeditationRestoreStore(MemoryKeyValue()), area = speaker, played = none, stream = null).prepare())
+        // No search for a phrase that could find a pop or news station.
+        assertTrue(none.isEmpty())
+    }
+
+    // ---- Leftover records ----
+
+    @Test
+    fun aLeftoverRecordIsPutBackBeforeTheNextSessionSnapshotsTheRoom() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        room(ha, MeditationRestoreStore(kv, wallClock = { 2_000L })).prepare()
+        // Crash; a new session starts before any leftover retry ran.
+        ha.calls.clear()
+        val store = MeditationRestoreStore(kv, wallClock = { 3_000L })
+        room(ha, store).prepare()
+        val services = ha.calls.map { "${it.domain}.${it.service}" }
+        assertTrue(services.indexOf("scene.turn_on") < services.indexOf("scene.create"))
+        // The new snapshot is the user's room, not the dimmed one.
+        val saved = store.load()!!
+        assertEquals(200, saved.lights.single { it.entityId == "light.techo" }.brightness)
+        assertEquals(0.45, saved.volume!!, 0.0001)
+    }
+
+    @Test
+    fun aLeftoverThatCannotBePutBackIsCarriedNotOverwritten() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        room(ha, MeditationRestoreStore(kv, wallClock = { 2_000L })).prepare()
+        // Crash; the lights refuse every change now, so neither restore nor dimming works.
+        ha.failing += setOf("light.turn_on", "scene.turn_on")
+        ha.calls.clear()
+        val store = MeditationRestoreStore(kv, wallClock = { 3_000L })
+        room(ha, store).prepare()
+        val saved = store.load()!!
+        // The older snapshot (before any dimming) is kept for the carried lights.
+        assertEquals(200, saved.lights.single { it.entityId == "light.techo" }.brightness)
+        assertEquals(150, saved.lights.single { it.entityId == "light.lampara" }.brightness)
+        // The restore scene that still holds the original state is not overwritten.
+        assertTrue(ha.calls.none { "${it.domain}.${it.service}" == "scene.create" })
+    }
+
+    @Test
+    fun aLateRestoreLeavesWhatTheUserChangedSince() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        room(ha, MeditationRestoreStore(kv, wallClock = { 2_000L })).prepare()
+        // Crash. Later the user turned the lamp off, set the ceiling to full and played their own music.
+        ha.lights["light.lampara"] = ha.lights.getValue("light.lampara").copy(isOn = false)
+        ha.lights["light.techo"] = ha.lights.getValue("light.techo").copy(brightness = 255)
+        ha.playerVolume = 0.6
+        ha.calls.clear()
+        val next = MeditationRestoreStore(kv, wallClock = { 60_000L })
+        assertEquals(RestoreResult.RESTORED, next.restore(HaRoomControl(ha, sleep = {}), late = true))
+        assertTrue(ha.calls.none { it.domain == "light" || it.domain == "media_player" })
+        assertTrue(ha.calls.none { "${it.domain}.${it.service}" == "scene.turn_on" })
+        assertFalse(ha.lights.getValue("light.lampara").isOn)
+        assertNull(next.load())
+    }
+
+    @Test
+    fun anUnreachableHomeAssistantNeverUsesUpTheRetries() = runBlocking {
+        val ha = FakeHa()
+        val kv = MemoryKeyValue()
+        val store = MeditationRestoreStore(kv, wallClock = { 2_000L })
+        room(ha, store).prepare()
+        ha.online = false
+        repeat(MeditationRestoreStore.MAX_ATTEMPTS * 3) {
+            assertEquals(RestoreResult.KEPT, store.restore(HaRoomControl(ha, sleep = {}), late = true))
+        }
+        assertEquals(0, store.attempts)
+        ha.online = true
+        assertEquals(RestoreResult.RESTORED, store.restore(HaRoomControl(ha, sleep = {}), late = true))
     }
 }

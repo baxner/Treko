@@ -5,6 +5,8 @@ import android.content.Context
 import com.treko.core.mcp.rooms.HaRoomControl
 import com.treko.core.mcp.rooms.HaRooms
 import com.treko.core.mcp.rooms.RoomRestoreRecord
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Tiny key-value storage, so the store can be tested without Android. */
 interface MeditationKeyValue {
@@ -29,25 +31,34 @@ class SharedPrefsMeditationKeyValue(context: Context) : MeditationKeyValue {
     }
 }
 
-enum class RestoreResult { NOTHING, RESTORED, KEPT, DROPPED }
+/**
+ * [KEPT]: something is still to be put back (retry later). [SKIPPED]: not tried now (a
+ * session is running and owns the record).
+ */
+enum class RestoreResult { NOTHING, RESTORED, KEPT, DROPPED, SKIPPED }
 
 /**
  * The pending-restore record of a meditation: what was changed in the room (lights,
  * player volume) and must be put back, kept on disk so a session cut short by the app or
- * service dying is restored the next time the service starts.
+ * service dying is restored the next time the service starts. Restores never run at the
+ * same time (a retry and a new session's start would fight over the record).
  */
 class MeditationRestoreStore(
     private val kv: MeditationKeyValue,
     private val wallClock: () -> Long = { System.currentTimeMillis() }
 ) {
+    private val mutex = Mutex()
+
     fun load(): RoomRestoreRecord? = HaRooms.decodeRecord(kv.getString(KEY_RECORD))?.takeUnless { it.isEmpty }
 
-    fun save(record: RoomRestoreRecord) {
+    /** Saves [record]; [newSession] starts its retry count again (the record is a new session's). */
+    fun save(record: RoomRestoreRecord, newSession: Boolean = false) {
         if (record.isEmpty) {
             clear()
             return
         }
         kv.putString(KEY_RECORD, HaRooms.encodeRecord(record))
+        if (newSession) kv.putInt(KEY_ATTEMPTS, 0)
     }
 
     fun clear() {
@@ -59,49 +70,86 @@ class MeditationRestoreStore(
 
     /**
      * Puts back what [record] (default: the stored one) changed, part by part: what was
-     * restored leaves the record, what failed stays for a later try. A record older than
-     * [MAX_AGE_MS] or tried [MAX_ATTEMPTS] times is dropped: by then the user has surely
-     * set the room the way they want and restoring would undo it.
+     * restored leaves the record, what failed stays for a later try. A record with
+     * [RoomRestoreRecord.lightsOffAtEnd] turns its lights off slowly instead (a sleep
+     * session); its player and volume are restored all the same.
+     *
+     * [late]: the restore comes after the session (a crash, a retry once Home Assistant is
+     * back): only what is still as Treko left it is put back ([HaRooms.planLateRestore]),
+     * so a light the user turned off or changed, or music they started, is left alone.
+     *
+     * Without Home Assistant, or while it does not answer, nothing is tried and nothing is
+     * counted. A try counts only when it answered and still refused a call; after
+     * [MAX_ATTEMPTS] such tries, or once the record is older than [MAX_AGE_MS], it is
+     * dropped: by then the user has surely set the room the way they want.
+     *
+     * [proceed] is checked under the lock: false → [RestoreResult.SKIPPED], nothing touched.
      */
-    suspend fun restore(rooms: HaRoomControl?, record: RoomRestoreRecord? = load(), stopPlayer: Boolean = true): RestoreResult {
-        if (record == null || record.isEmpty) {
+    suspend fun restore(
+        rooms: HaRoomControl?,
+        record: RoomRestoreRecord? = null,
+        stopPlayer: Boolean = true,
+        late: Boolean = false,
+        proceed: () -> Boolean = { true }
+    ): RestoreResult = mutex.withLock {
+        if (!proceed()) return@withLock RestoreResult.SKIPPED
+        val rec = record ?: load()
+        if (rec == null || rec.isEmpty) {
             clear()
-            return RestoreResult.NOTHING
+            return@withLock RestoreResult.NOTHING
         }
-        if (record.startedAtMs > 0L && wallClock() - record.startedAtMs > MAX_AGE_MS) {
+        if (rec.startedAtMs > 0L && wallClock() - rec.startedAtMs > MAX_AGE_MS) {
             clear()
-            return RestoreResult.DROPPED
+            return@withLock RestoreResult.DROPPED
         }
-        var remaining = record
-        if (rooms != null) {
-            val player = record.mediaPlayer
-            if (player != null) {
-                if (stopPlayer) rooms.stopPlayback(player)
-                val volumeOk = record.volume?.let { rooms.setVolume(player, it) } ?: true
-                if (volumeOk) remaining = remaining.copy(mediaPlayer = null, volume = null)
+        if (rooms == null || !rooms.isReachable()) {
+            // Not reachable is no refusal: keep it as it is, uncounted.
+            save(rec)
+            return@withLock RestoreResult.KEPT
+        }
+        var target = rec
+        var stop = stopPlayer
+        if (late) {
+            val plan = rooms.planLateRestore(rec)
+            if (plan == null) {
+                save(rec)
+                return@withLock RestoreResult.KEPT
             }
-            if (remaining.sceneEntityId != null || remaining.lights.isNotEmpty()) {
-                if (rooms.restoreLights(remaining)) remaining = remaining.copy(sceneEntityId = null, lights = emptyList())
-            }
+            target = plan.record
+            stop = stopPlayer && plan.stopPlayer
+        }
+        var remaining = target
+        val player = target.mediaPlayer
+        if (player != null) {
+            if (stop) rooms.stopPlayback(player)
+            val volumeOk = target.volume?.let { rooms.setVolume(player, it) } ?: true
+            if (volumeOk) remaining = remaining.copy(mediaPlayer = null, volume = null)
+        }
+        if (remaining.sceneEntityId != null || remaining.lights.isNotEmpty()) {
+            // A sleep session's end (or its crash): the lights it dimmed go off, not back on.
+            val lightsOk = if (remaining.lightsOffAtEnd) rooms.turnOffLights(remaining) else rooms.restoreLights(remaining)
+            if (lightsOk) remaining = remaining.copy(sceneEntityId = null, lights = emptyList())
         }
         if (remaining.isEmpty) {
             clear()
-            return RestoreResult.RESTORED
+            return@withLock RestoreResult.RESTORED
         }
         val tries = attempts + 1
         if (tries >= MAX_ATTEMPTS) {
             clear()
-            return RestoreResult.DROPPED
+            return@withLock RestoreResult.DROPPED
         }
         save(remaining)
         kv.putInt(KEY_ATTEMPTS, tries)
-        return RestoreResult.KEPT
+        RestoreResult.KEPT
     }
 
     companion object {
         private const val KEY_RECORD = "pending_restore"
         private const val KEY_ATTEMPTS = "pending_restore_attempts"
-        const val MAX_ATTEMPTS = 4
+
+        /** Tries Home Assistant answered and still refused; offline time never counts. */
+        const val MAX_ATTEMPTS = 6
         const val MAX_AGE_MS = 12 * 60 * 60_000L
     }
 }

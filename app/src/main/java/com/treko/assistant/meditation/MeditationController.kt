@@ -20,8 +20,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.text.Normalizer
 import java.util.Locale
@@ -47,7 +51,10 @@ class MeditationController(
         /** True while the assistant is neither listening, thinking nor speaking. */
         fun isAssistantIdle(): Boolean
 
-        /** Plays [query] on the Home Assistant player [entityId]; true when it started. */
+        /**
+         * Plays [query] (a phrase, or a stream URL) on the Home Assistant player [entityId],
+         * never falling back to an unrelated station; true when it started.
+         */
         suspend fun playOnPlayer(query: String, entityId: String): Boolean
     }
 
@@ -59,6 +66,30 @@ class MeditationController(
     private var sessionJob: Job? = null
     private var monitorJob: Job? = null
     @Volatile private var pendingStart: MeditationPlanner.PendingStart? = null
+
+    /** One start at a time: tool calls run in parallel, and a duplicate start must see the first session. */
+    private val startMutex = Mutex()
+    private var restoreJob: Job? = null
+
+    /** Bumped to make a waiting restore retry try now (a session just ended). */
+    private val restoreKick = MutableStateFlow(0)
+
+    /** The session's audio focus: another app's audio or a call pauses it. */
+    private val focus = MeditationAudioFocus(
+        audioManager,
+        onLost = { transient ->
+            val s = session
+            if (s != null) {
+                TrekoLogBuffer.i(TAG, "Meditation audio focus lost (transient=$transient).")
+                // Gone for good (a video, other music): wait for "sigue"; a short loss resumes by itself.
+                s.pause(if (transient) PauseReason.FOCUS else PauseReason.USER)
+            }
+        },
+        onRegained = {
+            val s = session
+            if (s != null && s.currentState == MeditationState.PAUSED && s.currentPauseReason == PauseReason.FOCUS) s.resume()
+        }
+    )
 
     /** A session is preparing, running, paused or ending. */
     val isActive: Boolean get() = session != null
@@ -82,7 +113,7 @@ class MeditationController(
         }
     }
 
-    private suspend fun start(args: JSONObject): String {
+    private suspend fun start(args: JSONObject): String = startMutex.withLock {
         session?.let { return ctx.getString(R.string.meditation_tool_already, typeName(it.timeline.type), remainingMinutes(it)) }
         val prefs = TrekoPreferences(ctx)
         val (type, minutes) = MeditationPlanner.resolveStart(
@@ -165,7 +196,7 @@ class MeditationController(
     }
 
     private fun remainingMinutes(s: MeditationSession): Int =
-        ((s.timeline.totalMs - s.activeMs()).coerceAtLeast(0L) / 60_000L).toInt() + 1
+        MeditationPlanner.remainingMinutes(s.timeline.totalMs, s.activeMs())
 
     // ---- Session ----
 
@@ -178,6 +209,7 @@ class MeditationController(
         prefs: TrekoPreferences
     ) {
         val timeline = MeditationTimelineBuilder.build(type, scriptTexts(type), minutes)
+        val streams = MeditationStreams(searchByTag = { host.radio.searchByTag(it) })
         val room = HomeMeditationRoom(
             rooms = if (area != null) ha?.rooms else null,
             area = area,
@@ -186,7 +218,8 @@ class MeditationController(
             store = store,
             playOnPlayer = { q, id -> host.playOnPlayer(q, id) },
             musicQuery = ctx.getString(if (type == MeditationType.SLEEP) R.string.meditation_music_query_sleep else R.string.meditation_music_query),
-            phoneMusic = if (settings.playMusic) MeditationPhonePlayer(host.radio) else null,
+            calmStream = { streams.resolve(type) },
+            phoneMusic = if (settings.playMusic) MeditationPhonePlayer(streams) else null,
             log = { TrekoLogBuffer.i(TAG, it) }
         )
         val s = MeditationSession(
@@ -201,6 +234,7 @@ class MeditationController(
             ),
             placeName = area?.name,
             awaitAssistantIdle = { awaitAssistantIdle() },
+            assistantIdle = { host.isAssistantIdle() },
             log = { TrekoLogBuffer.i(TAG, it) }
         )
         session = s
@@ -216,8 +250,11 @@ class MeditationController(
             } finally {
                 monitorJob?.cancel()
                 mirror.cancel()
+                focus.release()
                 if (session === s) session = null
                 _snapshot.value = MeditationSnapshot()
+                // Home Assistant away at the end: keep trying while the service lives.
+                if (store.load() != null) scheduleRestoreRetries(RESTORE_AFTER_SESSION_MS)
             }
         }
     }
@@ -245,6 +282,8 @@ class MeditationController(
     private suspend fun monitor(s: MeditationSession) {
         var idleMs = 0L
         var normalMs = 0L
+        var userPausedMs = 0L
+        var sinceFocusTryMs = FOCUS_RETRY_MS
         while (scope.isActive && session === s) {
             delay(MONITOR_TICK_MS)
             val inCall = audioManager?.mode.let { it == AudioManager.MODE_RINGTONE || it == AudioManager.MODE_IN_CALL }
@@ -255,14 +294,28 @@ class MeditationController(
                 continue
             }
             normalMs += MONITOR_TICK_MS
+            sinceFocusTryMs += MONITOR_TICK_MS
+            // Ask for focus only while the assistant is quiet: asking while it speaks would cut it.
+            if (state == MeditationState.RUNNING && !focus.held && sinceFocusTryMs >= FOCUS_RETRY_MS && host.isAssistantIdle()) {
+                sinceFocusTryMs = 0L
+                if (!focus.acquire()) TrekoLogBuffer.i(TAG, "Meditation audio focus not granted; trying again later.")
+            }
             if (state != MeditationState.PAUSED) {
                 idleMs = 0L
+                userPausedMs = 0L
                 continue
             }
             idleMs = if (host.isAssistantIdle()) idleMs + MONITOR_TICK_MS else 0L
+            userPausedMs = if (s.currentPauseReason == PauseReason.USER) userPausedMs + MONITOR_TICK_MS else 0L
             when (s.currentPauseReason) {
                 PauseReason.CALL -> if (normalMs >= CALL_RESUME_MS) s.resume()
                 PauseReason.INTERRUPTION -> if (idleMs >= AUTO_RESUME_MS) s.resume()
+                PauseReason.USER -> if (userPausedMs >= USER_PAUSE_MAX_MS) {
+                    // Paused and forgotten (asleep, gone): end it, so lights and volume come back.
+                    TrekoLogBuffer.i(TAG, "Meditation paused for ${USER_PAUSE_MAX_MS / 60_000L} min; ending it.")
+                    // A sleep session left paused this long: the user is asleep, so lights off.
+                    s.stop(asCompleted = s.timeline.type == MeditationType.SLEEP)
+                }
                 else -> Unit
             }
         }
@@ -288,15 +341,42 @@ class MeditationController(
     /** The wake word or a tap started a turn: pause (the music ducks); "sigue" resumes. */
     fun onConversationStarted() {
         val s = session ?: return
-        if (s.currentState == MeditationState.RUNNING || s.currentState == MeditationState.PREPARING) {
-            s.pause(PauseReason.INTERRUPTION)
+        when (s.currentState) {
+            MeditationState.RUNNING, MeditationState.PREPARING -> s.pause(PauseReason.INTERRUPTION)
+            // The user talks over the closing line: cut it, and never repeat it over their turn.
+            MeditationState.ENDING -> s.cancelClosing()
+            else -> Unit
         }
     }
 
-    /** An urgent alert must be spoken: pause now, resume by itself after it. */
+    /**
+     * An urgent alert must be spoken: pause now (or cut the closing line), resume by itself
+     * after it. True when nothing of the session will talk over the alert.
+     */
     fun pauseForAlert(): Boolean {
         val s = session ?: return false
+        if (s.currentState == MeditationState.ENDING) {
+            s.cancelClosing()
+            return true
+        }
         return s.pause(PauseReason.INTERRUPTION) || s.currentState == MeditationState.PAUSED
+    }
+
+    /**
+     * "Silencio", "cállate", "buenas noches" said during a session (the wake word paused
+     * it): a sleep session ends (lights and volume come back), any other stays paused
+     * until "sigue" instead of resuming by itself.
+     */
+    fun onSleepIntent() {
+        val s = session ?: return
+        if (s.currentState != MeditationState.PAUSED) return
+        if (s.timeline.type == MeditationType.SLEEP) {
+            TrekoLogBuffer.i(TAG, "Sleep intent during a sleep meditation; ending it.")
+            // Going to sleep: the room ends as after the full session (lights off).
+            s.stop(asCompleted = true)
+        } else {
+            s.pause(PauseReason.USER)
+        }
     }
 
     // ---- UI ----
@@ -314,14 +394,35 @@ class MeditationController(
 
     /** At service start: put back a room left changed by a session the app did not finish. */
     fun restorePendingOnStart() {
+        scheduleRestoreRetries(0L)
+    }
+
+    /**
+     * Puts back a stored record, retrying with a growing gap while the service lives, until
+     * it is restored or dropped ([MeditationRestoreStore.MAX_AGE_MS]). Late restores only
+     * touch what is still as Treko left it. While a session runs it owns the record (it
+     * carries it over and restores it at its end), so nothing is tried then.
+     */
+    private fun scheduleRestoreRetries(firstDelayMs: Long) {
         if (store.load() == null) return
-        scope.launch(Dispatchers.IO) {
-            repeat(RESTORE_TRIES_ON_START) { attempt ->
-                if (attempt > 0) delay(RESTORE_RETRY_MS)
-                if (session != null) return@launch
-                val result = store.restore(host.haClient()?.rooms)
+        if (restoreJob?.isActive == true) {
+            restoreKick.value++
+            return
+        }
+        restoreJob = scope.launch(Dispatchers.IO) {
+            var wait = firstDelayMs
+            var step = 0
+            while (isActive && store.load() != null) {
+                if (wait > 0) {
+                    val kick = restoreKick.value
+                    withTimeoutOrNull(wait) { restoreKick.first { it != kick } }
+                }
+                wait = RESTORE_BACKOFF_MS[step.coerceAtMost(RESTORE_BACKOFF_MS.lastIndex)]
+                step++
+                if (session != null) continue
+                val result = store.restore(host.haClient()?.rooms, late = true, proceed = { session == null })
                 TrekoLogBuffer.i(TAG, "Leftover meditation restore: $result.")
-                if (result != RestoreResult.KEPT) return@launch
+                if (result == RestoreResult.NOTHING || result == RestoreResult.RESTORED || result == RestoreResult.DROPPED) break
             }
         }
     }
@@ -367,8 +468,10 @@ class MeditationController(
         private const val MONITOR_TICK_MS = 1_000L
         private const val CALL_RESUME_MS = 4_000L
         private const val AUTO_RESUME_MS = 12_000L
-        private const val RESTORE_TRIES_ON_START = 3
-        private const val RESTORE_RETRY_MS = 60_000L
+        private const val RESTORE_AFTER_SESSION_MS = 30_000L
+        private val RESTORE_BACKOFF_MS = longArrayOf(30_000L, 60_000L, 120_000L, 300_000L, 600_000L, 900_000L)
+        private const val USER_PAUSE_MAX_MS = 20 * 60_000L
+        private const val FOCUS_RETRY_MS = 30_000L
 
         private val _snapshot = MutableStateFlow(MeditationSnapshot())
 

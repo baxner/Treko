@@ -5,6 +5,8 @@
     - treko_vault_memory: personal notes the user asked Treko to remember.
     - treko_watches: active camera watches (places of the home being watched) and which
       camera sees each Frigate zone, as learned on this phone.
+    - treko_meditation: a meditation's pending room restore (light and player ids and
+      states); replaying it on another phone or after a reinstall would change the home.
     - files/avisos: alert history and camera snapshots, which can show people.
     Habits, tasks, timers and workflows are still backed up.
     Keep in sync with full_backup_content.xml (Android 11 and older).
@@ -14,12 +16,14 @@
         <exclude domain="sharedpref" path="treko_settings.xml" />
         <exclude domain="sharedpref" path="treko_vault_memory.xml" />
         <exclude domain="sharedpref" path="treko_watches.xml" />
+        <exclude domain="sharedpref" path="treko_meditation.xml" />
         <exclude domain="file" path="avisos" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="treko_settings.xml" />
         <exclude domain="sharedpref" path="treko_vault_memory.xml" />
         <exclude domain="sharedpref" path="treko_watches.xml" />
+        <exclude domain="sharedpref" path="treko_meditation.xml" />
         <exclude domain="file" path="avisos" />
     </device-transfer>
 </data-extraction-rules>

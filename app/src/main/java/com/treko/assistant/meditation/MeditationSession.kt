@@ -1,16 +1,27 @@
 package com.treko.assistant.meditation
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class MeditationState { IDLE, PREPARING, RUNNING, PAUSED, ENDING }
 
-/** Why a session is paused: [USER] waits for "sigue"; the others may resume by themselves. */
-enum class PauseReason { USER, INTERRUPTION, CALL }
+/**
+ * Why a session is paused: [USER] waits for "sigue"; the others may resume by themselves
+ * ([FOCUS]: another app took the audio for a while). A stronger reason replaces a weaker
+ * one ([rank]), so a call during a wake-word pause does not resume by itself mid-call.
+ */
+enum class PauseReason(val rank: Int) { USER(2), INTERRUPTION(0), CALL(1), FOCUS(1) }
 
 /** Time source of a session; tests use a fake one. */
 interface MeditationClock {
@@ -34,8 +45,12 @@ interface MeditationRoom {
     /** Music back to the session level. */
     suspend fun unduck()
 
-    /** Fade the music out and put lights and volume back as they were. Never throws. */
-    suspend fun finish()
+    /**
+     * Fade the music out and put lights and volume back as they were. Never throws.
+     * [completed]: the session ran to its end (a sleep session then turns its lights off
+     * instead of putting them back); false when it was stopped early.
+     */
+    suspend fun finish(completed: Boolean)
 }
 
 /** Lines the session says itself (from string resources). */
@@ -89,6 +104,8 @@ class MeditationSession(
     private val placeName: String? = null,
     /** Suspends until the assistant is not talking or listening (before each cue). */
     private val awaitAssistantIdle: suspend () -> Unit = {},
+    /** True while the assistant is not talking or listening (checked before a phone-voice repeat). */
+    private val assistantIdle: () -> Boolean = { true },
     private val log: (String) -> Unit = {}
 ) {
     private val _snapshot = MutableStateFlow(
@@ -100,10 +117,20 @@ class MeditationSession(
     @Volatile private var state = MeditationState.IDLE
     @Volatile private var pauseReason: PauseReason? = null
     @Volatile private var stopRequested = false
+    @Volatile private var endAsCompleted = false
     @Volatile private var started = false
     private var accumulatedMs = 0L
     private var runningSinceMs = 0L
     @Volatile private var speakingVoice: MeditationVoice? = null
+
+    /** The cue being said; pause and stop cancel it, also before the voice really began. */
+    @Volatile private var cueJob: Deferred<SpeakResult>? = null
+
+    /** Bumped by every pause, stop or cut closing: a cue started before it must not be said. */
+    private val cueGeneration = AtomicInteger()
+
+    /** The closing line was cut (wake word or an alert while ending): it is not said again. */
+    @Volatile private var closingCancelled = false
 
     /** Treko's voice is no longer used this session (disconnected or failed twice). */
     @Volatile var trekoVoiceDisabled = false
@@ -148,8 +175,9 @@ class MeditationSession(
         synchronized(lock) {
             if (stopRequested) return false
             if (state == MeditationState.PAUSED) {
-                // A user "pausa" wins over an interruption, so it does not resume by itself.
-                if (reason == PauseReason.USER) {
+                // A user "pausa" wins over an interruption, a call over the wake word.
+                val now = pauseReason
+                if (now == null || reason.rank > now.rank) {
                     pauseReason = reason
                     publishLocked(clock.nowMs())
                 }
@@ -159,8 +187,23 @@ class MeditationSession(
             setState(MeditationState.PAUSED, reason)
         }
         log("Meditation paused ($reason).")
-        speakingVoice?.stop()
+        cutCue()
         return true
+    }
+
+    /** The closing line is being said and must stop (the user talks, an alert): it is not repeated. */
+    fun cancelClosing() {
+        if (state != MeditationState.ENDING) return
+        closingCancelled = true
+        log("Closing line cut.")
+        cutCue()
+    }
+
+    /** Stops the cue in flight: the voice first (synchronous), then its coroutine. */
+    private fun cutCue() {
+        cueGeneration.incrementAndGet()
+        speakingVoice?.stop()
+        cueJob?.cancel()
     }
 
     fun resume(): Boolean {
@@ -172,14 +215,19 @@ class MeditationSession(
         return true
     }
 
-    /** Ends the session early; [run] then restores the room and returns. */
-    fun stop(): Boolean {
+    /**
+     * Ends the session early; [run] then restores the room and returns. [asCompleted]: end
+     * the room as after a full session (no closing line), e.g. "buenas noches" during a sleep
+     * session turns its lights off instead of back on.
+     */
+    fun stop(asCompleted: Boolean = false): Boolean {
         synchronized(lock) {
             if (stopRequested || state == MeditationState.IDLE && started) return false
             stopRequested = true
+            endAsCompleted = asCompleted
         }
         log("Meditation stop requested.")
-        speakingVoice?.stop()
+        cutCue()
         return true
     }
 
@@ -194,9 +242,13 @@ class MeditationSession(
         var natural = false
         try {
             setState(MeditationState.PREPARING)
+            // The phone's voice may have to repeat a cue at any moment: start its engine now.
+            phoneVoice.warmUp()
             // Stopped before it began: nothing to change, nothing to put back.
             val musicOk = if (stopRequested) true else try {
                 room.prepare()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 log("Room preparation failed: ${e.message}")
                 true
@@ -221,13 +273,20 @@ class MeditationSession(
             withContext(NonCancellable) {
                 if (state != MeditationState.ENDING) setState(MeditationState.ENDING)
                 try {
-                    room.finish()
+                    room.finish(completed = natural || endAsCompleted)
                 } catch (e: Exception) {
                     log("Room restore failed: ${e.message}")
                 }
-                if (natural) {
-                    // Closing line with Treko's voice (the phone's if Treko's is out).
-                    speakRouted(lines.closing, withTreko = true)
+                if (natural && !closingCancelled) {
+                    // Closing line with Treko's voice (the phone's if Treko's is out), once
+                    // the assistant is quiet; never over the user's own turn.
+                    val gen = cueGeneration.get()
+                    awaitAssistantIdle()
+                    if (!closingCancelled && cueGeneration.get() == gen && assistantIdle()) {
+                        speakRouted(lines.closing, withTreko = true, gen = gen)
+                    } else {
+                        log("Closing line skipped: the assistant is busy.")
+                    }
                 }
                 trekoVoice.stop()
                 phoneVoice.release()
@@ -245,10 +304,49 @@ class MeditationSession(
         while (!stopRequested) {
             holdWhilePaused()
             if (stopRequested) return
+            val gen = cueGeneration.get()
             awaitAssistantIdle()
-            if (interrupted) continue
-            if (speakRouted(text, withTreko)) return
+            if (interrupted || cueGeneration.get() != gen) continue
+            if (speakRouted(text, withTreko, gen)) return
             if (!interrupted) return
+        }
+    }
+
+    /** A pause, stop or cut closing happened since [gen] was read. */
+    private fun cutSince(gen: Int): Boolean = cueGeneration.get() != gen
+
+    /**
+     * Says [text] with [voice] in a child job that [cutCue] cancels, so a cue that is still
+     * connecting or waiting is never said after a pause or stop.
+     */
+    private suspend fun speakWith(voice: MeditationVoice, text: String, gen: Int): SpeakResult {
+        if (cutSince(gen)) return SpeakResult.CANCELLED
+        speakingVoice = voice
+        return try {
+            coroutineScope {
+                val job = async {
+                    try {
+                        voice.speak(text)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        log("Meditation voice ${voice.label} failed: ${e.message}")
+                        SpeakResult.FAILED
+                    }
+                }
+                cueJob = job
+                // Cut between the check above and here: cancel it now.
+                if (cutSince(gen)) job.cancel()
+                try {
+                    job.await()
+                } catch (e: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    SpeakResult.CANCELLED
+                }
+            }
+        } finally {
+            cueJob = null
+            speakingVoice = null
         }
     }
 
@@ -256,7 +354,7 @@ class MeditationSession(
      * Speaks with the right voice. Returns false only when interrupted (pause or stop);
      * a voice failure is handled here (fallback to the phone) and counts as said.
      */
-    private suspend fun speakRouted(text: String, withTreko: Boolean): Boolean {
+    private suspend fun speakRouted(text: String, withTreko: Boolean, gen: Int): Boolean {
         var useTreko = withTreko && !trekoVoiceDisabled
         if (useTreko && !trekoVoice.isAvailable()) {
             trekoVoiceDisabled = true
@@ -265,16 +363,10 @@ class MeditationSession(
             publish()
         }
         val voice = if (useTreko) trekoVoice else phoneVoice
-        speakingVoice = voice
-        val ok = try {
-            voice.speak(text)
-        } catch (e: Exception) {
-            log("Meditation voice ${voice.label} failed: ${e.message}")
-            false
-        } finally {
-            speakingVoice = null
-        }
-        if (ok) return true
+        val result = speakWith(voice, text, gen)
+        if (result == SpeakResult.SAID) return true
+        // Cut on purpose (pause, stop, the wake word): an interruption, not a voice failure.
+        if (result == SpeakResult.CANCELLED || cutSince(gen) || closingCancelled) return !(interrupted && state != MeditationState.ENDING)
         if (interrupted && state != MeditationState.ENDING) return false
         if (!useTreko) {
             log("Phone voice could not say a cue; continuing.")
@@ -287,15 +379,14 @@ class MeditationSession(
             log("Treko's voice failed $trekoFailures times; the phone's voice reads the rest of the session.")
             publish()
         }
-        speakingVoice = phoneVoice
-        val phoneOk = try {
-            phoneVoice.speak(text)
-        } catch (_: Exception) {
-            false
-        } finally {
-            speakingVoice = null
+        // The phone's voice has no echo reference: never speak it while the mic may be open.
+        awaitAssistantIdle()
+        if (cutSince(gen) || closingCancelled || !assistantIdle()) {
+            log("Phone voice repeat skipped: the assistant is busy.")
+            return !(interrupted && state != MeditationState.ENDING)
         }
-        return phoneOk || !(interrupted && state != MeditationState.ENDING)
+        val phone = speakWith(phoneVoice, text, gen)
+        return phone == SpeakResult.SAID || !(interrupted && state != MeditationState.ENDING)
     }
 
     private suspend fun holdWhilePaused() {

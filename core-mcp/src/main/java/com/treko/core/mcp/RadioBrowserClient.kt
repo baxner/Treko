@@ -231,6 +231,15 @@ class RadioBrowserClient(
         resolveCuratedStations(query, safeLimit)
     }
 
+    /**
+     * Stations with the Radio Browser tag [tag], straight from the mirrors: no curated
+     * fallback, so an empty list really means none was found (or the mirrors are down).
+     */
+    suspend fun searchByTag(tag: String, limit: Int = 10): List<RadioStation> = withContext(Dispatchers.IO) {
+        if (tag.isBlank()) return@withContext emptyList()
+        queryMirrors("tag", tag.trim(), limit.coerceIn(1, 25))
+    }
+
     suspend fun findBestStation(query: String): RadioStation? {
         val stations = searchStations(query, limit = 5)
         if (stations.isEmpty()) return null

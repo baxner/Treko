@@ -191,4 +191,18 @@ class VisionVerdictTest {
         val rated = parseVisionVerdict("""{"personas": 1, "paquete": true, "donde": "en la banqueta", "nivel": "atencion"}""")!!
         assertEquals(VisionLevel.ATTENTION, rated.level)
     }
+
+    @Test
+    fun aPackageLeftOnTheSidewalkStillNeedsAttention() {
+        // Many deliveries are left on the sidewalk by the gate: the place alone is no "passing by".
+        val left = parseVisionVerdict("""{"paquete": true, "actividad": "dejando un paquete", "donde": "en la banqueta"}""")!!
+        assertEquals(VisionLevel.ATTENTION, left.level)
+        val english = parseVisionVerdict("""{"paquete": true, "actividad": "left a parcel", "donde": "on the sidewalk"}""")!!
+        assertEquals(VisionLevel.ATTENTION, english.level)
+        val noActivity = parseVisionVerdict("""{"paquete": true, "donde": "en la banqueta"}""")!!
+        assertEquals(VisionLevel.ATTENTION, noActivity.level)
+        // Walking past while delivering is still a delivery.
+        val delivering = parseVisionVerdict("""{"paquete": true, "actividad": "caminando y entregando un paquete"}""")!!
+        assertEquals(VisionLevel.ATTENTION, delivering.level)
+    }
 }

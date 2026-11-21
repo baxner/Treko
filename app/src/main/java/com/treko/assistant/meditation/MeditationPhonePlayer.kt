@@ -3,8 +3,8 @@ package com.treko.assistant.meditation
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import com.treko.core.common.util.TrekoLogBuffer
-import com.treko.core.mcp.RadioBrowserClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -13,20 +13,23 @@ import kotlin.coroutines.resume
 
 /**
  * Calm internet radio on the phone under the voice, at a low player level (the phone's
- * media volume is not touched, so there is nothing to put back).
+ * media volume is not touched, so there is nothing to put back). Only a stream that
+ * [MeditationStreams] found calm is played; none found means no music.
  */
-class MeditationPhonePlayer(private val radio: RadioBrowserClient) : PhoneMeditationMusic {
+class MeditationPhonePlayer(private val streams: MeditationStreams) : PhoneMeditationMusic {
     @Volatile private var player: MediaPlayer? = null
     @Volatile private var level = HomeMeditationRoom.PHONE_LEVEL
 
-    override suspend fun start(type: MeditationType): Boolean = withContext(Dispatchers.IO) {
-        val station = QUERIES[type].orEmpty().firstNotNullOfOrNull { q ->
-            try {
-                radio.findBestStation(q)
-            } catch (_: Exception) {
-                null
-            }
-        } ?: return@withContext false
+    override suspend fun start(type: MeditationType): Boolean = try {
+        startStream(type)
+    } catch (e: CancellationException) {
+        // Cancelled right after the stream started: do not leave it playing with no session.
+        releaseNow()
+        throw e
+    }
+
+    private suspend fun startStream(type: MeditationType): Boolean = withContext(Dispatchers.IO) {
+        val station = streams.resolve(type) ?: return@withContext false
         val started = withTimeoutOrNull(8_000L) {
             suspendCancellableCoroutine { cont ->
                 val mp = MediaPlayer()
@@ -70,6 +73,15 @@ class MeditationPhonePlayer(private val radio: RadioBrowserClient) : PhoneMedita
         started
     }
 
+    private fun releaseNow() {
+        val mp = player ?: return
+        player = null
+        try {
+            mp.release()
+        } catch (_: Exception) {
+        }
+    }
+
     override fun setLevel(level: Float) {
         this.level = level.coerceIn(0f, 1f)
         try {
@@ -100,14 +112,5 @@ class MeditationPhonePlayer(private val radio: RadioBrowserClient) : PhoneMedita
         private const val TAG = "MeditationMusic"
         private const val FADE_STEPS = 8
         private const val FADE_STEP_MS = 400L
-
-        /** Radio Browser tags (the same in every language); tried in order. */
-        private val QUERIES = mapOf(
-            MeditationType.SLEEP to listOf("sleep", "nature sounds", "meditation"),
-            MeditationType.BODY_SCAN to listOf("meditation", "ambient"),
-            MeditationType.MINDFULNESS to listOf("meditation", "ambient"),
-            MeditationType.BREATH_478 to listOf("meditation", "ambient"),
-            MeditationType.BOX_BREATHING to listOf("meditation", "ambient")
-        )
     }
 }

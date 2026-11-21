@@ -4,13 +4,18 @@ import java.text.Normalizer
 import java.util.Locale
 import kotlin.math.roundToInt
 
-/** A media player of an area: its entity, state and whether Alexa Media Player owns it. */
+/**
+ * A media player of an area: its entity, state, whether Alexa Media Player owns it and its
+ * device class ("tv", "speaker"…; empty when it reports none).
+ */
 data class HaAreaPlayer(
     val entityId: String,
     val state: String,
-    val isAlexa: Boolean
+    val isAlexa: Boolean,
+    val deviceClass: String = ""
 ) {
     val isAvailable: Boolean get() = state !in UNAVAILABLE_STATES
+    val isTv: Boolean get() = deviceClass.equals("tv", ignoreCase = true)
 }
 
 /** A Home Assistant area with the media players and lights assigned to it (directly or by device). */
@@ -23,12 +28,15 @@ data class HaArea(
     val hasPlayer: Boolean get() = mediaPlayers.isNotEmpty()
     val hasLights: Boolean get() = lights.isNotEmpty()
 
-    /** The player to use in this area: a reachable one, Alexa first when [preferAlexa]; null if none. */
-    fun preferredPlayer(preferAlexa: Boolean): HaAreaPlayer? {
-        val reachable = mediaPlayers.filter { it.isAvailable }
-        if (preferAlexa) reachable.firstOrNull { it.isAlexa }?.let { return it }
-        return reachable.firstOrNull()
-    }
+    /**
+     * The player to use in this area; null if none. Never a TV (it would turn on its screen).
+     * Alexa first when [preferAlexa], then players that are on (idle, paused, playing…)
+     * before ones that are off (an off player does not even report its volume).
+     */
+    fun preferredPlayer(preferAlexa: Boolean): HaAreaPlayer? =
+        mediaPlayers.filter { it.isAvailable && !it.isTv }
+            .sortedWith(compareBy({ if (preferAlexa && it.isAlexa) 0 else 1 }, { if (it.state == "off") 1 else 0 }))
+            .firstOrNull()
 }
 
 /** One Home Assistant service call, as plain data (turned into JSON by the client). */
@@ -105,13 +113,23 @@ data class PlayerSnapshot(val entityId: String, val state: String, val volume: D
  * What must be put back if a room session ends or the app dies mid-session. [sceneEntityId]
  * is the Home Assistant scene snapshot (null if it could not be created); [lights] the local
  * snapshot of every light that was changed (lights that were off are never in it).
+ * [volume] is the player's volume before the session (null: unknown, so never changed).
+ * [dimBrightnessPercent], [dimKelvin] and [playerLevel] are what Treko set, so a late restore
+ * can tell what the user changed since and leave that alone.
+ * [lightsOffAtEnd]: the end policy of the session (a sleep session that runs to its end, or
+ * dies on the way): the dimmed lights are turned off instead of put back. Volume and player
+ * are restored either way.
  */
 data class RoomRestoreRecord(
     val sceneEntityId: String?,
     val lights: List<LightSnapshot>,
     val mediaPlayer: String? = null,
     val volume: Double? = null,
-    val startedAtMs: Long = 0L
+    val startedAtMs: Long = 0L,
+    val dimBrightnessPercent: Int? = null,
+    val dimKelvin: Int? = null,
+    val playerLevel: Double? = null,
+    val lightsOffAtEnd: Boolean = false
 ) {
     val isEmpty: Boolean get() = sceneEntityId == null && lights.isEmpty() && mediaPlayer == null
 }
@@ -124,6 +142,9 @@ object HaRooms {
     const val DEFAULT_WARM_KELVIN = 2400
     const val DEFAULT_DIM_PERCENT = 22
     const val DEFAULT_TRANSITION_S = 4
+
+    /** Seconds a sleep session's lights take to fade out at its end. */
+    const val SLEEP_OFF_TRANSITION_S = 30
     const val RESTORE_SCENE_ID = "treko_room_restore"
     const val RESTORE_SCENE_ENTITY = "scene.$RESTORE_SCENE_ID"
 
@@ -133,7 +154,7 @@ object HaRooms {
 
     /**
      * Template listing every area as `id|name|players|lights`, one per line. Players are
-     * `entity=state=alexa(1/0)`, comma separated. Uses only template functions every HA has;
+     * `entity=state=alexa(1/0)=device_class`, comma separated. Uses only template functions every HA has;
      * `integration_entities` of a missing integration is just empty.
      */
     val AREAS_TEMPLATE: String = """
@@ -141,7 +162,7 @@ object HaRooms {
         {%- for a in areas() -%}
         {%- set ents = area_entities(a) -%}
         {{ a }}|{{ (area_name(a) or a) | replace('|', '/') | replace('\n', ' ') }}|
-        {%- for e in ents if e.startswith('media_player.') -%}{{ e }}={{ states(e) }}={{ 1 if e in alexa else 0 }}{{ ',' if not loop.last }}{%- endfor -%}|
+        {%- for e in ents if e.startswith('media_player.') -%}{{ e }}={{ states(e) }}={{ 1 if e in alexa else 0 }}={{ (state_attr(e, 'device_class') or '') | replace('|', '') | replace(',', '') | replace('=', '') }}{{ ',' if not loop.last }}{%- endfor -%}|
         {%- for e in ents if e.startswith('light.') -%}{{ e }}{{ ',' if not loop.last }}{%- endfor -%}
         {{ '\n' }}
         {%- endfor -%}
@@ -160,7 +181,12 @@ object HaRooms {
                 val f = p.trim().split('=')
                 val eid = f.getOrNull(0)?.trim().orEmpty()
                 if (!eid.startsWith("media_player.") || !isValidEntityId(eid)) null
-                else HaAreaPlayer(eid, f.getOrNull(1)?.trim().orEmpty().ifEmpty { "unknown" }, f.getOrNull(2)?.trim() == "1")
+                else HaAreaPlayer(
+                    eid,
+                    f.getOrNull(1)?.trim().orEmpty().ifEmpty { "unknown" },
+                    f.getOrNull(2)?.trim() == "1",
+                    f.getOrNull(3)?.trim().orEmpty().takeUnless { it == "None" }.orEmpty()
+                )
             }
             val lights = parts[3].split(',').map { it.trim() }
                 .filter { it.startsWith("light.") && isValidEntityId(it) }
@@ -396,10 +422,9 @@ object HaRooms {
         brightnessPercent: Int = DEFAULT_DIM_PERCENT,
         transitionSeconds: Int = DEFAULT_TRANSITION_S
     ): List<HaServiceCall> = lightsToAdjust(snapshots).map { s ->
-        val target = (brightnessPercent.coerceIn(1, 100) * 255 + 50) / 100
         val data = linkedMapOf<String, Any>(
             "entity_id" to s.entityId,
-            "brightness" to minOf(target, s.brightness ?: target),
+            "brightness" to dimmedBrightness(s.brightness, brightnessPercent),
             "transition" to transitionSeconds
         )
         if (s.supportsColorTemp) data["color_temp_kelvin"] = kelvin
@@ -430,6 +455,12 @@ object HaRooms {
                 s.effect?.takeIf { it.lowercase(Locale.ROOT) !in setOf("none", "off", "") }?.let { data["effect"] = it }
                 HaServiceCall("light", "turn_on", data)
             }
+        }
+
+    /** Calls that turn [snapshots] off slowly (the end of a sleep session); only lights Treko dimmed. */
+    fun planTurnOff(snapshots: List<LightSnapshot>, transitionSeconds: Int = SLEEP_OFF_TRANSITION_S): List<HaServiceCall> =
+        snapshots.map { s ->
+            HaServiceCall("light", "turn_off", linkedMapOf("entity_id" to s.entityId, "transition" to transitionSeconds))
         }
 
     /** scene.create call snapshotting [entityIds] under [RESTORE_SCENE_ID]. */
@@ -468,6 +499,9 @@ object HaRooms {
         appendLine("player=${record.mediaPlayer.orEmpty()}")
         appendLine("volume=${record.volume?.toString().orEmpty()}")
         appendLine("started=${record.startedAtMs}")
+        appendLine("dim=${record.dimBrightnessPercent?.toString().orEmpty()},${record.dimKelvin?.toString().orEmpty()}")
+        appendLine("level=${record.playerLevel?.toString().orEmpty()}")
+        appendLine("end=${if (record.lightsOffAtEnd) "off" else "restore"}")
         record.lights.forEach { appendLine("L=${encodeLight(it)}") }
     }.trimEnd()
 
@@ -478,12 +512,78 @@ object HaRooms {
         fun field(key: String) = lines.firstOrNull { it.startsWith("$key=") }?.substringAfter('=')?.trim()?.ifEmpty { null }
         val scene = field("scene")?.takeIf { isValidEntityId(it) }
         val player = field("player")?.takeIf { isValidEntityId(it) }
+        val dim = field("dim")?.split(',')
         return RoomRestoreRecord(
             sceneEntityId = scene,
             lights = lines.filter { it.startsWith("L=") }.mapNotNull { decodeLight(it.removePrefix("L=")) },
             mediaPlayer = player,
             volume = field("volume")?.toDoubleOrNull(),
-            startedAtMs = field("started")?.toLongOrNull() ?: 0L
+            startedAtMs = field("started")?.toLongOrNull() ?: 0L,
+            dimBrightnessPercent = dim?.getOrNull(0)?.trim()?.toIntOrNull(),
+            dimKelvin = dim?.getOrNull(1)?.trim()?.toIntOrNull(),
+            playerLevel = field("level")?.toDoubleOrNull(),
+            lightsOffAtEnd = field("end") == "off"
+        )
+    }
+
+    // ---- Late restore ----
+
+    /** How far (0..255) a light's brightness may be from what Treko set and still count as Treko's. */
+    private const val BRIGHTNESS_TOLERANCE = 26
+    private const val KELVIN_TOLERANCE = 350
+    private const val VOLUME_TOLERANCE = 0.03
+
+    /** Brightness (0..255) [planDim] gives a light that was at [original]. */
+    fun dimmedBrightness(original: Int?, brightnessPercent: Int): Int {
+        val target = (brightnessPercent.coerceIn(1, 100) * 255 + 50) / 100
+        return minOf(target, original ?: target)
+    }
+
+    /** What a late restore of [record] may still put back, and whether to stop its player. */
+    data class LateRestorePlan(val record: RoomRestoreRecord, val stopPlayer: Boolean)
+
+    /**
+     * For a restore that comes late (after a crash, or a retry once Home Assistant is back):
+     * only what is still as Treko left it. A light the user turned off is never turned on, a
+     * light set to another level or colour is left alone, and the player is touched only while
+     * it is still at Treko's volume (stopped only if it is still playing). [lights] is the
+     * current state of the record's lights (a light missing from it is not restored);
+     * [player] the current state of its player (null: gone).
+     */
+    fun planLateRestore(record: RoomRestoreRecord, lights: List<LightSnapshot>, player: PlayerSnapshot?): LateRestorePlan {
+        val now = lights.associateBy { it.entityId }
+        val kept = record.lights.filter { saved ->
+            val cur = now[saved.entityId] ?: return@filter false
+            if (!cur.isOn) return@filter false
+            val percent = record.dimBrightnessPercent
+            if (percent != null && cur.brightness != null &&
+                kotlin.math.abs(cur.brightness - dimmedBrightness(saved.brightness, percent)) > BRIGHTNESS_TOLERANCE
+            ) {
+                return@filter false
+            }
+            val kelvin = record.dimKelvin
+            !(kelvin != null && saved.supportsColorTemp && cur.colorMode == "color_temp" && cur.colorTempKelvin != null &&
+                kotlin.math.abs(cur.colorTempKelvin - kelvin) > KELVIN_TOLERANCE)
+        }
+        // The scene would also put back the lights the user changed: only when all are kept.
+        val scene = record.sceneEntityId.takeIf { kept.size == record.lights.size }
+        var stop = false
+        val keepPlayer = record.mediaPlayer != null && player != null && run {
+            val level = record.playerLevel
+            val volume = player.volume
+            // Unknown volume or not at Treko's level: the user has the player now.
+            if (record.volume == null || level == null || volume == null || volume > level + VOLUME_TOLERANCE) return@run false
+            stop = player.state == "playing" || player.state == "buffering"
+            true
+        }
+        return LateRestorePlan(
+            record.copy(
+                sceneEntityId = scene,
+                lights = kept,
+                mediaPlayer = record.mediaPlayer.takeIf { keepPlayer },
+                volume = record.volume.takeIf { keepPlayer }
+            ),
+            stopPlayer = stop
         )
     }
 }

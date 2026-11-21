@@ -40,9 +40,12 @@ class HaRoomsTest {
     @Test
     fun preferredPlayerSkipsUnavailableAndPrefersAlexa() {
         assertEquals("media_player.echo_recamara", areas[0].preferredPlayer(preferAlexa = true)?.entityId)
-        // An "off" player (a TV) can still be turned on to play, so it counts.
-        val tvFirst = areas[0].copy(mediaPlayers = areas[0].mediaPlayers.reversed())
-        assertEquals("media_player.tv_recamara", tvFirst.preferredPlayer(preferAlexa = false)?.entityId)
+        // A player that is on comes before one that is off, whatever the order of the area.
+        val offFirst = areas[0].copy(mediaPlayers = areas[0].mediaPlayers.reversed())
+        assertEquals("media_player.echo_recamara", offFirst.preferredPlayer(preferAlexa = false)?.entityId)
+        // An "off" player is still used when it is the only one (it can be turned on to play).
+        val onlyOff = areas[0].copy(mediaPlayers = listOf(areas[0].mediaPlayers[1]))
+        assertEquals("media_player.tv_recamara", onlyOff.preferredPlayer(preferAlexa = false)?.entityId)
         assertNull(areas[1].preferredPlayer(preferAlexa = true))
     }
 
@@ -248,5 +251,75 @@ class HaRoomsTest {
         assertNull(HaRooms.decodeRecord(null))
         assertNull(HaRooms.decodeRecord(""))
         assertNull(HaRooms.decodeRecord("hola\nscene=x"))
+    }
+
+    @Test
+    fun aTvIsNeverTheMeditationPlayer() {
+        val parsed = HaRooms.parseAreas(
+            "sala|Sala|media_player.tv=on=0=tv,media_player.nest=off=0=speaker,media_player.old=idle=0=None|"
+        ).single()
+        assertTrue(parsed.mediaPlayers[0].isTv)
+        assertEquals("speaker", parsed.mediaPlayers[1].deviceClass)
+        assertEquals("", parsed.mediaPlayers[2].deviceClass)
+        // The idle player without a class first, then the off speaker; never the TV.
+        assertEquals("media_player.old", parsed.preferredPlayer(preferAlexa = false)?.entityId)
+        val tvAndOff = parsed.copy(mediaPlayers = parsed.mediaPlayers.take(2))
+        assertEquals("media_player.nest", tvAndOff.preferredPlayer(preferAlexa = false)?.entityId)
+        assertNull(parsed.copy(mediaPlayers = parsed.mediaPlayers.take(1)).preferredPlayer(preferAlexa = false))
+    }
+
+    @Test
+    fun theEndPolicyAndWhatTrekoSetSurviveTheRecord() {
+        val record = RoomRestoreRecord(
+            sceneEntityId = HaRooms.RESTORE_SCENE_ENTITY,
+            lights = listOf(onCt),
+            mediaPlayer = "media_player.echo",
+            volume = 0.4,
+            startedAtMs = 99L,
+            dimBrightnessPercent = 20,
+            dimKelvin = 2200,
+            playerLevel = 0.18,
+            lightsOffAtEnd = true
+        )
+        assertEquals(record, HaRooms.decodeRecord(HaRooms.encodeRecord(record)))
+        assertFalse(HaRooms.decodeRecord(HaRooms.encodeRecord(record.copy(lightsOffAtEnd = false)))!!.lightsOffAtEnd)
+    }
+
+    @Test
+    fun aLateRestoreKeepsOnlyWhatIsStillAsTrekoLeftIt() {
+        val ceiling = LightSnapshot("light.techo", isOn = true, brightness = 200, colorMode = "color_temp", colorTempKelvin = 4000, supportedColorModes = listOf("color_temp"))
+        val lamp = ceiling.copy(entityId = "light.lampara")
+        val strip = ceiling.copy(entityId = "light.tira")
+        val record = RoomRestoreRecord(
+            sceneEntityId = HaRooms.RESTORE_SCENE_ENTITY,
+            lights = listOf(ceiling, lamp, strip),
+            mediaPlayer = "media_player.echo",
+            volume = 0.45,
+            dimBrightnessPercent = 22,
+            dimKelvin = 2400,
+            playerLevel = 0.18
+        )
+        val dimmed = HaRooms.dimmedBrightness(200, 22)
+        val now = listOf(
+            ceiling.copy(brightness = dimmed, colorTempKelvin = 2400),
+            lamp.copy(isOn = false),
+            strip.copy(brightness = 255, colorTempKelvin = 2400)
+        )
+        val plan = HaRooms.planLateRestore(record, now, PlayerSnapshot("media_player.echo", "playing", 0.18))
+        assertEquals(listOf("light.techo"), plan.record.lights.map { it.entityId })
+        // The scene would also bring back the lamp and the strip: not used.
+        assertNull(plan.record.sceneEntityId)
+        assertTrue(plan.stopPlayer)
+        assertEquals(0.45, plan.record.volume!!, 0.0001)
+
+        // The user turned the volume up (their own music): the player is left alone.
+        val loud = HaRooms.planLateRestore(record, now, PlayerSnapshot("media_player.echo", "playing", 0.5))
+        assertNull(loud.record.mediaPlayer)
+        assertFalse(loud.stopPlayer)
+        // Nothing changed since: everything, scene included.
+        val same = HaRooms.planLateRestore(record, listOf(now[0], now[0].copy(entityId = "light.lampara"), now[0].copy(entityId = "light.tira")), PlayerSnapshot("media_player.echo", "idle", 0.18))
+        assertEquals(HaRooms.RESTORE_SCENE_ENTITY, same.record.sceneEntityId)
+        assertFalse(same.stopPlayer)
+        assertEquals("media_player.echo", same.record.mediaPlayer)
     }
 }

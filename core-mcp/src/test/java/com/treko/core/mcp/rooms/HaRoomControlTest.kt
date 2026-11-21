@@ -154,4 +154,52 @@ class HaRoomControlTest {
         )
         assertEquals(0.45, backend.calls[1].data["volume_level"])
     }
+
+    @Test
+    fun theRecordIsHandedOverBeforeTheFirstLightIsDimmed() = runBlocking {
+        val backend = FakeBackend().apply { lightsOutput = lights }
+        var dimsWhenPlanned = -1
+        var planned: RoomRestoreRecord? = null
+        HaRoomControl(backend).dimLightsWarm(listOf("light.techo", "light.tira"), brightnessPercent = 20, kelvin = 2200) { record ->
+            dimsWhenPlanned = backend.calls.count { it.domain == "light" }
+            planned = record
+        }
+        assertEquals(0, dimsWhenPlanned)
+        assertEquals(listOf("light.techo", "light.tira"), planned!!.lights.map { it.entityId })
+        assertEquals(20, planned!!.dimBrightnessPercent)
+        assertEquals(2200, planned!!.dimKelvin)
+    }
+
+    @Test
+    fun dimCanLeaveAnExistingRestoreSceneAlone() = runBlocking {
+        val backend = FakeBackend().apply { lightsOutput = lights }
+        val record = HaRoomControl(backend).dimLightsWarm(listOf("light.techo"), createScene = false)!!
+        assertNull(record.sceneEntityId)
+        assertTrue(backend.calls.none { it.domain == "scene" })
+    }
+
+    @Test
+    fun turnOffLightsFadesOnlyTheRecordsLightsOut() = runBlocking {
+        val backend = FakeBackend()
+        val record = RoomRestoreRecord(
+            sceneEntityId = null,
+            lights = HaRooms.parseLights(lights).filter { it.isOn },
+            mediaPlayer = "media_player.echo",
+            volume = 0.45,
+            lightsOffAtEnd = true
+        )
+        assertTrue(HaRoomControl(backend).restoreAll(record))
+        assertEquals(listOf("media_stop", "volume_set", "turn_off", "turn_off"), backend.calls.map { it.service })
+        val offs = backend.calls.filter { it.service == "turn_off" }
+        assertEquals(listOf("light.techo", "light.tira"), offs.map { it.data["entity_id"] })
+        assertTrue(offs.all { it.data["transition"] == HaRooms.SLEEP_OFF_TRANSITION_S })
+    }
+
+    @Test
+    fun reachableOnlyWhenATemplateRenders() = runBlocking {
+        val backend = FakeBackend(templates = mutableMapOf("{{ 1 }}" to "1"))
+        assertTrue(HaRoomControl(backend).isReachable())
+        assertFalse(HaRoomControl(FakeBackend()).isReachable())
+        assertFalse(HaRoomControl(FakeBackend(configured = false)).isReachable())
+    }
 }

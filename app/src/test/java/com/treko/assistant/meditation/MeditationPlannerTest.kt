@@ -86,4 +86,12 @@ class MeditationPlannerTest {
         }
         listOf("Tomar agua", "Leer", "Ejercicio").forEach { assertFalse(it, MeditationPlanner.isMeditationHabit(it)) }
     }
+
+    @Test
+    fun remainingMinutesRoundUpAndNeverReadOneTooMany() {
+        assertEquals(10, MeditationPlanner.remainingMinutes(10 * 60_000L, 0L))
+        assertEquals(10, MeditationPlanner.remainingMinutes(10 * 60_000L, 1L))
+        assertEquals(9, MeditationPlanner.remainingMinutes(10 * 60_000L, 60_000L))
+        assertEquals(1, MeditationPlanner.remainingMinutes(10 * 60_000L, 10 * 60_000L))
+    }
 }
