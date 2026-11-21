@@ -201,6 +201,16 @@ class HomeAssistantClientTest {
         assertTrue(lofi.first().tags.contains("lofi") || lofi.first().tags.contains("jazz"))
     }
 
+    @Test
+    fun testGenericRadioDependsOnTheUsersCountry() {
+        val mexico = RadioBrowserClient(countryCode = "MX")
+        assertEquals("Exa FM 104.9", mexico.defaultStationName())
+        assertEquals("Exa FM 104.9", mexico.resolveCuratedStations("una estación de radio", limit = 1).first().name)
+        val elsewhere = RadioBrowserClient(countryCode = "ES")
+        assertEquals("SomaFM Groove Salad", elsewhere.defaultStationName())
+        assertEquals("United States", elsewhere.resolveCuratedStations("radio", limit = 1).first().country)
+    }
+
     private fun withLocalHttpServer(
         statusLine: String,
         contentType: String,
@@ -442,5 +452,18 @@ class HomeAssistantClientTest {
         assertTrue(summary.contains("Temperatura Sala: 22.5°C"))
         assertTrue(summary.contains("Puerta Principal (abierto)"))
         assertTrue(summary.contains("Cámaras (2, 2 disponibles): Puerta (idle), OctoPrint (idle)"))
+    }
+
+    @Test
+    fun testHomeSummaryNeverMentionsAlexaInHomesWithoutIt() {
+        val client = HomeAssistantClient("http://ha.local:8123", "tok")
+        val summary = client.formatHomeStatusSummary(
+            listOf(
+                HomeAssistantClient.HomeEntitySnapshot("media_player.living_tv", "Living TV", "off"),
+                HomeAssistantClient.HomeEntitySnapshot("light.desk", "Desk", "on")
+            )
+        )
+        assertTrue(summary, summary.contains("Multimedia: Ningún reproductor está sonando ahora."))
+        assertFalse(summary, summary.contains("Alexa"))
     }
 }

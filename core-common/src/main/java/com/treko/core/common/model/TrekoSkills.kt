@@ -16,13 +16,29 @@ object TrekoSkills {
     /** Any motion / occupancy / presence binary sensor (any brand, any integration). */
     const val MOTION_SENSORS = "motion_sensors"
 
+    /**
+     * LLM Vision integration (`llmvision.image_analyzer`): describing what a camera shows.
+     * Without it Treko can still show cameras and send watch alerts with the picture.
+     */
+    const val LLM_VISION = "llmvision"
+
+    /** Alexa Media Player integration: Echo speakers, Alexa routines. */
+    const val ALEXA_MEDIA = "alexa_media"
+
     /** Home Assistant integration domains to look for. */
-    val KNOWN_INTEGRATIONS: List<String> = listOf(OCTOPRINT, FRIGATE)
+    val KNOWN_INTEGRATIONS: List<String> = listOf(OCTOPRINT, FRIGATE, LLM_VISION, ALEXA_MEDIA)
+
+    /**
+     * Integrations recognised by their Home Assistant services (GET /api/services), for the
+     * ones that may have no entity at all (an LLM Vision setup with only providers).
+     */
+    val SERVICE_DOMAIN_SKILLS: List<String> = listOf(LLM_VISION, ALEXA_MEDIA)
 
     /** Tool → skills that enable it (any one is enough). */
     private val TOOL_REQUIREMENTS: Map<String, Set<String>> = mapOf(
         "get_3d_printer_status" to setOf(OCTOPRINT),
-        "watch_cameras" to setOf(FRIGATE, MOTION_SENSORS)
+        "watch_cameras" to setOf(FRIGATE, MOTION_SENSORS),
+        "analyze_camera" to setOf(LLM_VISION)
     )
 
     fun requiredSkills(toolName: String): Set<String>? = TOOL_REQUIREMENTS[toolName]

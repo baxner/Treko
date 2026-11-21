@@ -56,18 +56,24 @@ sealed class TargetLookup<out T> {
 }
 
 /**
- * Texto para el modelo cuando no se puede actuar. [kind] es "task" o "habit".
+ * Texto para el modelo cuando no se puede actuar, en español: [kind] y [kindPlural] son el
+ * sustantivo ("tarea", "tareas"). Siempre dice que no se cambió nada.
  */
-fun <T> TargetLookup<T>.failureMessage(kind: String, allItems: List<T>, describe: (T) -> String): String? =
-    when (this) {
+fun <T> TargetLookup<T>.failureMessage(
+    kind: String,
+    kindPlural: String,
+    allItems: List<T>,
+    describe: (T) -> String
+): String? {
+    val current = allItems.joinToString("; ") { describe(it) }.ifBlank { "nada" }
+    return when (this) {
         is TargetLookup.Found -> null
         TargetLookup.MissingQuery ->
-            "Error: no $kind id or title given, nothing was changed. Ask the user which one. Current ${kind}s: " +
-                allItems.joinToString("; ") { describe(it) }.ifBlank { "none" } + "."
+            "No dijiste cuál ($kind), así que no cambié nada; pregunta al usuario. Actuales ($kindPlural): $current."
         is TargetLookup.NotFound ->
-            "No $kind matching '$query' found, nothing was changed. Current ${kind}s: " +
-                allItems.joinToString("; ") { describe(it) }.ifBlank { "none" } + "."
+            "No encontré $kind «$query», así que no cambié nada. Actuales ($kindPlural): $current."
         is TargetLookup.Ambiguous ->
-            "Ambiguous: several ${kind}s match (${candidates.joinToString("; ") { describe(it) }}). " +
-                "Nothing was changed; ask the user which one or pass its id."
+            "Hay varias coincidencias (${candidates.joinToString("; ") { describe(it) }}); no cambié nada. " +
+                "Pregunta al usuario cuál o usa su id."
     }
+}

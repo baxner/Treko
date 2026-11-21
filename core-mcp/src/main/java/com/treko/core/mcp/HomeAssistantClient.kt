@@ -125,7 +125,8 @@ class HomeAssistantClient(
     suspend fun callService(
         domain: String,
         service: String,
-        serviceData: JSONObject? = null
+        serviceData: JSONObject? = null,
+        gate: ActionGate? = null
     ): String = withContext(Dispatchers.IO) {
         try {
             if (!hasValidConfig()) {
@@ -160,6 +161,8 @@ class HomeAssistantClient(
                 }
             }
 
+            gate?.review(ServiceCallPlan(d, s, actionTargetsOf(payload)))?.let { return@withContext it }
+
             val url = "${getBaseUrl()}/api/services/$d/$s"
             val body = payload.toString().toRequestBody("application/json".toMediaType())
 
@@ -176,11 +179,48 @@ class HomeAssistantClient(
                     val correctionNote = if (correctedEid.isNotBlank() && correctedEid != requestedEid) " (en '$correctedEid')" else ""
                     "Servicio '$d.$s' ejecutado correctamente en Home Assistant$correctionNote."
                 } else {
-                    "Error ejecutando servicio '$d.$s' en Home Assistant (${resp.code}): $respBody"
+                    // A short reason helps the model fix its arguments; never the whole body.
+                    val reason = respBody.replace(Regex("\\s+"), " ").trim().take(160)
+                    "No se pudo ejecutar '$d.$s': Home Assistant respondió error ${resp.code}" +
+                        (if (reason.isNotBlank()) " ($reason)." else ".")
                 }
             }
         } catch (e: Exception) {
             "Excepción al llamar al servicio '$domain.$service': ${e.message}"
+        }
+    }
+
+    /**
+     * Entities a service call names (entity_id as text or list, also under "target"), with
+     * their name and device class from the cached states, for [ActionGate] checks.
+     */
+    private fun actionTargetsOf(payload: JSONObject): List<ActionTarget> {
+        val ids = mutableListOf<String>()
+        fun collect(raw: Any?) {
+            when (raw) {
+                is String -> ids += SensitiveActions.splitEntityIds(raw)
+                is JSONArray -> for (i in 0 until raw.length()) collect(raw.opt(i))
+            }
+        }
+        collect(payload.opt("entity_id"))
+        collect(payload.optJSONObject("target")?.opt("entity_id"))
+        if (ids.isEmpty()) return emptyList()
+        val byId = HashMap<String, JSONObject>()
+        try {
+            val array = fetchStatesArray()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val eid = item.optString("entity_id")
+                    if (eid in ids) byId[eid] = item
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "States for the action check failed: ${e.message}")
+        }
+        return ids.distinct().map { id ->
+            val attrs = byId[id]?.optJSONObject("attributes")
+            ActionTarget(id, attrs?.optString("friendly_name").orEmpty(), attrs?.optString("device_class").orEmpty())
         }
     }
 
@@ -466,7 +506,8 @@ class HomeAssistantClient(
         accion: String = "encender",
         brillo: Int = 0,
         colorOrTemp: String = "",
-        source: String = ""
+        source: String = "",
+        gate: ActionGate? = null
     ): String = withContext(Dispatchers.IO) {
         try {
             val entity = resolveEntity(deviceQuery) 
@@ -520,6 +561,10 @@ class HomeAssistantClient(
                 }
             }
 
+            gate?.review(
+                ServiceCallPlan(domain, svc, listOf(ActionTarget(entity.id, entity.friendlyName, entity.deviceClass)))
+            )?.let { return@withContext it }
+
             val payload = JSONObject().apply {
                 put("entity_id", entity.id)
                 if (domain == "light" && svc == "turn_on") {
@@ -550,7 +595,7 @@ class HomeAssistantClient(
                     }
                     return@withContext "Dispositivo '${entity.friendlyName}' ($domain) $statusText correctamente."
                 } else {
-                    return@withContext "Error en Home Assistant (${resp.code}): ${resp.message}"
+                    return@withContext "No pude controlar '${entity.friendlyName}': Home Assistant respondió error ${resp.code}."
                 }
             }
         } catch (e: Exception) {
@@ -1516,7 +1561,31 @@ class HomeAssistantClient(
             ?.let { SkillDetection.parseTemplateOutput(it, candidates) }
             // Template API unavailable: fall back to default entity naming.
             ?: SkillDetection.integrationsFromEntityIds(states.map { it.entityId })
-        integrations + SkillDetection.fromStates(states)
+        val byServices = fetchServiceDomains()?.let { SkillDetection.fromServiceDomains(it) }.orEmpty()
+        integrations + byServices + SkillDetection.fromStates(states)
+    }
+
+    /** Domains that have services in this Home Assistant; null when they can't be read. */
+    private fun fetchServiceDomains(): Set<String>? = try {
+        val req = Request.Builder()
+            .url("${getBaseUrl()}/api/services")
+            .addHeader("Authorization", "Bearer $haToken")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                Log.w(TAG, "Service list answered HTTP ${resp.code}")
+                null
+            } else {
+                val array = JSONArray(resp.body?.string().orEmpty())
+                (0 until array.length()).map { array.getJSONObject(it).optString("domain") }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Service list failed: ${e.message}")
+        null
     }
 
     /** All states, reduced to what the watch catalog and skill detection need. */
@@ -1654,6 +1723,8 @@ class HomeAssistantClient(
             val array = fetchStatesArray(forceRefresh = true)
                 ?: return@withContext "No se pudo consultar el estado del hogar en Home Assistant."
 
+            // Alexa is mentioned only in homes that have the Alexa Media integration.
+            val alexaIds = fetchIntegrationEntityIds(TrekoSkills.ALEXA_MEDIA).orEmpty()
             val snapshots = ArrayList<HomeEntitySnapshot>(array.length())
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
@@ -1673,11 +1744,7 @@ class HomeAssistantClient(
                 val tempUnit = attrs?.optString("temperature_unit").orEmpty().ifBlank { "°C" }
                 val humidity = attrs?.optDouble("humidity", Double.NaN)?.takeIf { !it.isNaN() }
                 val hvacAction = attrs?.optString("hvac_action").orEmpty()
-                val isAlexa = if (eid.startsWith("media_player.")) {
-                    isAlexaMediaPlayer(eid, friendlyName, deviceClass, emptySet())
-                } else {
-                    false
-                }
+                val isAlexa = eid.startsWith("media_player.") && eid in alexaIds
 
                 snapshots.add(
                     HomeEntitySnapshot(
@@ -1728,8 +1795,9 @@ class HomeAssistantClient(
         val players = entities.filter { it.entityId.startsWith("media_player.") }
         if (players.isNotEmpty()) {
             val playing = players.filter { it.state.equals("playing", ignoreCase = true) }
-            val availableAlexas = players.filter {
-                it.isAlexa && it.state.lowercase() !in listOf("unavailable", "unknown")
+            val alexaPlayers = players.filter { it.isAlexa }
+            val availableAlexas = alexaPlayers.filter {
+                it.state.lowercase() !in listOf("unavailable", "unknown")
             }
             val playingText = if (playing.isNotEmpty()) {
                 val items = playing.take(5).joinToString("; ") { p ->
@@ -1744,12 +1812,13 @@ class HomeAssistantClient(
             } else {
                 "Ningún reproductor está sonando ahora"
             }
-            val alexaText = if (availableAlexas.isNotEmpty()) {
-                "Alexas disponibles (${availableAlexas.size}): ${availableAlexas.take(6).joinToString(", ") { it.friendlyName }}"
-            } else {
-                "sin bocinas Alexa disponibles"
+            val alexaText = when {
+                alexaPlayers.isEmpty() -> null
+                availableAlexas.isNotEmpty() ->
+                    "Alexas disponibles (${availableAlexas.size}): ${availableAlexas.take(6).joinToString(", ") { it.friendlyName }}"
+                else -> "sin bocinas Alexa disponibles"
             }
-            sections.add("Multimedia: $playingText; $alexaText.")
+            sections.add(if (alexaText != null) "Multimedia: $playingText; $alexaText." else "Multimedia: $playingText.")
         }
 
         // 3. Clima, temperatura y humedad
@@ -2227,7 +2296,7 @@ class HomeAssistantClient(
                 drafts.add(PlayMediaCommandDraft(stationCleaned, "TUNEIN"))
                 drafts.add(PlayMediaCommandDraft("pon $stationCleaned en TuneIn", "custom"))
             } else {
-                val stationName = resolvedStation?.name ?: stationCleaned.ifBlank { "Exa FM 104.9" }
+                val stationName = resolvedStation?.name ?: stationCleaned.ifBlank { radioBrowserClient.defaultStationName() }
                 drafts.add(PlayMediaCommandDraft("pon $stationName en TuneIn", "custom"))
                 drafts.add(PlayMediaCommandDraft(stationName, "TUNEIN"))
             }

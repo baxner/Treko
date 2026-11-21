@@ -59,4 +59,13 @@ class SkillDetectionTest {
             SkillDetection.integrationsFromEntityIds(listOf("camera.patio", "binary_sensor.patio_patio_person_occupancy"))
         )
     }
+
+    @Test
+    fun `LLM Vision and Alexa are recognised by their services`() {
+        assertEquals(
+            setOf(TrekoSkills.LLM_VISION, TrekoSkills.ALEXA_MEDIA),
+            SkillDetection.fromServiceDomains(setOf("light", "llmvision", "alexa_media", "notify"))
+        )
+        assertEquals(emptySet<String>(), SkillDetection.fromServiceDomains(setOf("light", "camera")))
+    }
 }

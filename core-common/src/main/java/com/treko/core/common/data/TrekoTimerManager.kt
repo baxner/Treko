@@ -259,15 +259,24 @@ object TrekoTimerManager {
         }
     }
 
-    fun getStatusDescription(): String {
-        val s = _timerState.value
-        val timeFormatted = formatMmSs(s.remainingSeconds)
-        val stateText = if (s.isRunning) "en progreso" else "pausado"
-        val mainLine = "Temporizador principal (${s.selectedMode.title}): $timeFormatted restante ($stateText)."
-        val active = _namedTimers.value
-        if (active.isEmpty()) return mainLine
-        val namedLines = active.joinToString("\n") { t -> "• [${t.id}] ${t.label}: ${formatMmSs(t.remainingSeconds)} restante" }
-        return "$mainLine\nTemporizadores activos (${active.size}):\n$namedLines"
+    fun getStatusDescription(): String = describeStatus(_timerState.value, _namedTimers.value)
+
+    /**
+     * Text for the model. The Pomodoro is left out while it sits untouched (not running and
+     * not paused halfway), so "¿qué temporizadores tengo?" is not answered with it.
+     */
+    internal fun describeStatus(main: TimerState, active: List<NamedTimer>): String {
+        val mainInUse = main.isRunning || main.remainingSeconds in 1 until main.totalSeconds
+        val mainLine = if (mainInUse) {
+            val stateText = if (main.isRunning) "en marcha" else "en pausa"
+            "Pomodoro (${main.selectedMode.title}): quedan ${formatMmSs(main.remainingSeconds)}, $stateText."
+        } else {
+            null
+        }
+        if (active.isEmpty()) return mainLine ?: "No hay temporizadores activos."
+        val namedLines = active.joinToString("; ") { t -> "${t.label} (${t.id}): quedan ${formatMmSs(t.remainingSeconds)}" }
+        val namedText = "Temporizadores activos: $namedLines."
+        return if (mainLine != null) "$mainLine $namedText" else namedText
     }
 
     private fun formatMmSs(totalSeconds: Int) =

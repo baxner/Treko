@@ -28,4 +28,11 @@ class TrekoSkillsTest {
         assertTrue(TrekoSkills.isToolAvailable("watch_cameras", setOf(TrekoSkills.FRIGATE)))
         assertTrue(TrekoSkills.isToolAvailable("watch_cameras", setOf(TrekoSkills.MOTION_SENSORS)))
     }
+
+    @Test
+    fun `camera analysis needs LLM Vision`() {
+        assertFalse(TrekoSkills.isToolAvailable("analyze_camera", setOf(TrekoSkills.FRIGATE)))
+        assertTrue(TrekoSkills.isToolAvailable("analyze_camera", setOf(TrekoSkills.LLM_VISION)))
+        assertTrue(TrekoSkills.LLM_VISION in TrekoSkills.KNOWN_INTEGRATIONS)
+    }
 }

@@ -30,6 +30,13 @@ internal object SkillDetection {
         return found
     }
 
+    /**
+     * Skills recognised by the service domains Home Assistant offers (GET /api/services):
+     * LLM Vision may have providers and no entity, so the entity template can miss it.
+     */
+    fun fromServiceDomains(domains: Set<String>): Set<String> =
+        TrekoSkills.SERVICE_DOMAIN_SKILLS.filter { it in domains }.toSet()
+
     /** Fallback when the template API is unavailable: default entity naming of each integration. */
     fun integrationsFromEntityIds(entityIds: List<String>): Set<String> {
         val found = mutableSetOf<String>()

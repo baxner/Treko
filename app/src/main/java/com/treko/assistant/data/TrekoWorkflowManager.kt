@@ -201,7 +201,8 @@ class TrekoWorkflowManager(private val storage: WorkflowStorage) {
             WorkflowDefinition(
                 id = "vigilancia_total",
                 name = "Vigilancia total",
-                description = "Abre el muro multicámara de seguridad en vivo y muestra un resumen de sensores, puertas y cámaras.",
+                // Only opens the wall: watching and alerting is the watch_cameras tool.
+                description = "Abre el muro de cámaras en vivo y da un resumen de la casa. No vigila ni avisa.",
                 aliases = listOf("vigilancia total", "vigilancia", "seguridad", "modo seguridad", "camaras", "todas las camaras", "revisar casa"),
                 steps = listOf(
                     WorkflowStep(type = "camera_wall", live = true),

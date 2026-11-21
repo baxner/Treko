@@ -66,7 +66,11 @@ import com.treko.core.kws.BiometricTurnGate
 import com.treko.core.kws.NeuralSpeechDenoiser
 import com.treko.core.kws.SpeakerBiometricEngine
 import com.treko.core.kws.TrekoWakeWordDetector
+import com.treko.core.mcp.ActionGate
 import com.treko.core.mcp.HomeAssistantClient
+import com.treko.core.mcp.SensitiveActionGuard
+import com.treko.core.mcp.SensitiveActions
+import com.treko.core.mcp.SensitiveKind
 import com.treko.core.mcp.watch.CameraWatch
 import com.treko.core.mcp.watch.WatchSensor
 import com.treko.core.common.model.TrekoSkills
@@ -172,6 +176,9 @@ class TrekoAssistantService : Service() {
 
     private var lastSoundTimestamp: Long = System.currentTimeMillis()
     private var isTorchOn: Boolean = false
+
+    /** Unlock / disarm / open-garage calls need a second, confirmed call (see SensitiveActionGuard). */
+    private val sensitiveActionGuard = SensitiveActionGuard()
 
     @Volatile
     private var hasTurnEmotion: Boolean = false
@@ -1650,7 +1657,8 @@ class TrekoAssistantService : Service() {
             sentinelEnabled = {
                 // Its own setting: turning off the periodic briefings keeps camera security on.
                 val p = TrekoPreferences(this)
-                p.cameraSentinelEnabled && TrekoSkills.FRIGATE in p.detectedSkills
+                p.cameraSentinelEnabled && TrekoSkills.FRIGATE in p.detectedSkills &&
+                    TrekoSkills.LLM_VISION in p.detectedSkills
             },
             onSentinelDetection = { sensor, trace ->
                 TrekoLogBuffer.i(
@@ -2801,7 +2809,12 @@ class TrekoAssistantService : Service() {
                     val isCharging = bm?.isCharging == true
                     val sdf = SimpleDateFormat("EEEE, d MMMM yyyy, HH:mm", Locale.getDefault())
                     val currentTime = sdf.format(Date())
-                    "Treko Device: Battery $batteryLevel% (Charging: $isCharging). Current date/time: $currentTime."
+                    getString(
+                        R.string.tool_device_status,
+                        batteryLevel,
+                        getString(if (isCharging) R.string.tool_battery_charging else R.string.tool_battery_not_charging),
+                        currentTime
+                    )
                 }
                 "manage_vault_memory" -> {
                     val action = args.optString("action", "list").lowercase(Locale.ROOT)
@@ -2810,40 +2823,42 @@ class TrekoAssistantService : Service() {
                     val vaultPrefs = getSharedPreferences("treko_vault_memory", Context.MODE_PRIVATE)
 
                     when (action) {
-                        "set" -> {
-                            if (key.isBlank()) return@withContext "Error: 'key' is required to store in Vault."
+                        "set", "save", "guardar" -> {
+                            if (key.isBlank()) return@withContext getString(R.string.vault_key_required)
                             vaultPrefs.edit().putString(key, value).apply()
-                            "Saved to Vault: '$key' = '$value'."
+                            getString(R.string.vault_saved, key, value)
                         }
-                        "get" -> {
-                            if (key.isBlank()) return@withContext "Error: 'key' is required to read from Vault."
+                        "get", "read", "consultar" -> {
+                            if (key.isBlank()) return@withContext getString(R.string.vault_key_required)
                             val stored = vaultPrefs.getString(key, null)
-                            if (stored != null) "Vault[$key]: $stored" else "No entry found for '$key' in Vault."
+                            if (stored != null) getString(R.string.vault_value, key, stored) else getString(R.string.vault_not_found, key)
                         }
                         "list" -> {
                             val all = vaultPrefs.all
                             if (all.isEmpty()) {
-                                "Vault memory is currently empty."
+                                getString(R.string.vault_empty)
                             } else {
-                                val items = all.entries.joinToString("; ") { "${it.key}: ${it.value}" }
-                                "Stored Vault memories: $items"
+                                getString(R.string.vault_list, all.entries.joinToString("; ") { "${it.key}: ${it.value}" })
                             }
                         }
-                        "delete" -> {
+                        "delete", "remove", "forget", "olvidar", "borrar" -> {
+                            if (key.isBlank()) return@withContext getString(R.string.vault_key_required)
+                            if (!vaultPrefs.contains(key)) return@withContext getString(R.string.vault_not_found, key)
                             vaultPrefs.edit().remove(key).apply()
-                            "Deleted '$key' from Vault memory."
+                            getString(R.string.vault_deleted, key)
                         }
-                        else -> "Unknown manage_vault_memory action '$action'."
+                        else -> getString(R.string.vault_bad_action)
                     }
                 }
                 "home_assistant_call_service" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val domain = args.optString("domain", "").trim()
                     val service = args.optString("service", "").trim()
+                    val confirmed = args.optBoolean("confirm", false)
 
                     val serviceData = when {
                         args.has("service_data") && args.optJSONObject("service_data") != null -> {
@@ -2861,7 +2876,7 @@ class TrekoAssistantService : Service() {
                             val it = args.keys()
                             while (it.hasNext()) {
                                 val key = it.next()
-                                if (key != "domain" && key != "service") {
+                                if (key != "domain" && key != "service" && key != "confirm") {
                                     payload.put(key, args.get(key))
                                 }
                             }
@@ -2869,18 +2884,25 @@ class TrekoAssistantService : Service() {
                         }
                     }
 
-                    HomeAssistantClient(haUrl, haToken).callService(domain, service, serviceData)
+                    // A model may put the flag inside the data too; it is not a Home Assistant field.
+                    val confirmedInData = serviceData.remove("confirm") == true
+                    HomeAssistantClient(haUrl, haToken).callService(
+                        domain,
+                        service,
+                        serviceData,
+                        gate = sensitiveGate(confirmed || confirmedInData)
+                    )
                 }
                 "home_assistant_broadcast" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val message = args.optString("message", "").trim()
                     val target = args.optString("target", "").trim()
                     if (message.isBlank()) {
-                        return@withContext "Broadcast message cannot be empty."
+                        return@withContext getString(R.string.broadcast_empty)
                     }
                     HomeAssistantClient(haUrl, haToken).broadcastMessage(message, target)
                 }
@@ -2888,7 +2910,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     HomeAssistantClient(haUrl, haToken).listEntities(
                         args.optString("domain", ""),
@@ -2899,11 +2921,11 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val entityId = args.optString("entity_id", "").trim()
                     if (entityId.isBlank()) {
-                        return@withContext "'entity_id' is required."
+                        return@withContext getString(R.string.entity_required)
                     }
                     HomeAssistantClient(haUrl, haToken).getEntityState(entityId)
                 }
@@ -2911,7 +2933,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     HomeAssistantClient(haUrl, haToken).listServices(args.optString("domain", ""))
                 }
@@ -2919,7 +2941,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
 
                     val entityId = args.optString("entity_id", "")
@@ -2941,7 +2963,8 @@ class TrekoAssistantService : Service() {
                         accion = action,
                         brillo = brightness,
                         colorOrTemp = colorOrTemp,
-                        source = source
+                        source = source,
+                        gate = sensitiveGate(args.optBoolean("confirm", false))
                     )
                 }
                 "manage_habits" -> {
@@ -2953,41 +2976,43 @@ class TrekoAssistantService : Service() {
 
                     when (action) {
                         "add", "create" -> {
-                            if (title.isBlank()) return@withContext "Error: habit title is required."
+                            if (title.isBlank()) return@withContext getString(R.string.habit_title_required)
                             val item = habitManager.addHabit(title)
-                            "Habit added: '${item.title}' ${item.icon} (ID: ${item.id})."
+                            getString(R.string.habit_added, item.title)
                         }
                         "toggle", "check", "complete" -> {
                             val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
-                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                            lookup.failureMessage("hábito", "hábitos", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
                                 ?.let { return@withContext it }
                             val targetId = (lookup as TargetLookup.Found).item.id
                             habitManager.toggleHabit(targetId)
                             val item = TrekoHabitManager.habitsFlow.value.find { it.id == targetId }
-                            val state = if (item?.isDone == true) "completed" else "pending"
-                            "Habit '${item?.title}' marked as $state."
+                            getString(
+                                if (item?.isDone == true) R.string.habit_done else R.string.habit_pending,
+                                item?.title ?: (lookup as TargetLookup.Found).item.title
+                            )
                         }
                         "delete", "remove" -> {
                             val lookup = TrekoHabitManager.findTarget(id.takeIf { it != -1 }, title)
-                            lookup.failureMessage("habit", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
+                            lookup.failureMessage("hábito", "hábitos", TrekoHabitManager.habitsFlow.value) { "#${it.id} ${it.title}" }
                                 ?.let { return@withContext it }
                             val targetId = (lookup as TargetLookup.Found).item.id
                             val deletedTitle = (lookup as TargetLookup.Found).item.title
                             habitManager.deleteHabit(targetId)
-                            "Habit '$deletedTitle' deleted."
+                            getString(R.string.habit_deleted, deletedTitle)
                         }
                         "add_water", "drink_water", "tomar_agua", "increment_water" -> {
                             val nextCount = TrekoHabitManager.waterGlassesFlow.value + 1
                             habitManager.setWaterGlasses(nextCount)
-                            "Registrado 1 vaso de agua. Ahora llevas $nextCount de 8 vasos hoy."
+                            getString(R.string.water_added, nextCount, 8)
                         }
                         "set_water" -> {
-                            if (waterCount < 0) return@withContext "water_count is required."
+                            if (waterCount < 0) return@withContext getString(R.string.water_count_required)
                             habitManager.setWaterGlasses(waterCount)
-                            "Water counter updated to $waterCount glasses."
+                            getString(R.string.water_set, waterCount)
                         }
                         "list", "get" -> habitManager.listHabitsSummary()
-                        else -> "Unknown manage_habits action '$action'."
+                        else -> getString(R.string.habit_bad_action)
                     }
                 }
                 "manage_tasks" -> {
@@ -2998,31 +3023,33 @@ class TrekoAssistantService : Service() {
 
                     when (action) {
                         "add", "create" -> {
-                            if (title.isBlank()) return@withContext "Error: task title is required."
+                            if (title.isBlank()) return@withContext getString(R.string.task_title_required)
                             val item = taskManager.addTask(title)
-                            "Task added: '${item.title}' (ID: ${item.id})."
+                            getString(R.string.task_added, item.title)
                         }
                         "toggle", "check", "complete" -> {
                             val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
-                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                            lookup.failureMessage("tarea", "tareas", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
                                 ?.let { return@withContext it }
                             val targetId = (lookup as TargetLookup.Found).item.id
                             taskManager.toggleTask(targetId)
                             val item = TrekoTaskManager.tasksFlow.value.find { it.id == targetId }
-                            val state = if (item?.isDone == true) "completed" else "pending"
-                            "Task '${item?.title}' marked as $state."
+                            getString(
+                                if (item?.isDone == true) R.string.task_done else R.string.task_pending,
+                                item?.title ?: (lookup as TargetLookup.Found).item.title
+                            )
                         }
                         "delete", "remove" -> {
                             val lookup = TrekoTaskManager.findTarget(id.takeIf { it != -1 }, title)
-                            lookup.failureMessage("task", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
+                            lookup.failureMessage("tarea", "tareas", TrekoTaskManager.tasksFlow.value) { "#${it.id} ${it.title}" }
                                 ?.let { return@withContext it }
                             val targetId = (lookup as TargetLookup.Found).item.id
                             val deletedTitle = (lookup as TargetLookup.Found).item.title
                             taskManager.deleteTask(targetId)
-                            "Task '$deletedTitle' deleted."
+                            getString(R.string.task_deleted, deletedTitle)
                         }
                         "list", "get" -> taskManager.listTasksSummary()
-                        else -> "Unknown manage_tasks action '$action'."
+                        else -> getString(R.string.task_bad_action)
                     }
                 }
                 "manage_timer" -> {
@@ -3042,12 +3069,12 @@ class TrekoAssistantService : Service() {
                                         seconds = seconds,
                                         label = label
                                     )
-                                    val totalDesc = if (created.totalSeconds >= 60 && created.totalSeconds % 60 == 0) {
-                                        "${created.totalSeconds / 60} min"
+                                    val totalDesc = formatTimerDuration(created.totalSeconds)
+                                    if (label.isBlank()) {
+                                        getString(R.string.timer_started, totalDesc)
                                     } else {
-                                        "${created.totalSeconds}s"
+                                        getString(R.string.timer_started_label, created.label, totalDesc)
                                     }
-                                    "Started timer #${created.id} '${created.label}' for $totalDesc."
                                 }
                                 modeStr.isNotBlank() -> {
                                     when {
@@ -3058,42 +3085,43 @@ class TrekoAssistantService : Service() {
                                     TrekoTimerManager.start()
                                     TrekoTimerManager.getStatusDescription()
                                 }
-                                action in listOf("set", "fijar", "poner") -> {
-                                    val created = TrekoTimerManager.addNamedTimer(minutes = 10, label = label)
-                                    "Started timer #${created.id} '${created.label}' for 10 min."
-                                }
-                                else -> {
+                                // Resuming a Pomodoro paused halfway needs no duration.
+                                label.isBlank() && TrekoTimerManager.timerState.value.let {
+                                    !it.isRunning && it.remainingSeconds in 1 until it.totalSeconds
+                                } -> {
                                     TrekoTimerManager.start()
                                     TrekoTimerManager.getStatusDescription()
                                 }
+                                // No duration: ask instead of guessing one.
+                                else -> getString(R.string.timer_ask_duration)
                             }
                         }
                         "cancel", "cancelar", "delete", "eliminar", "remove", "borrar" -> {
                             when {
                                 label.equals("all", ignoreCase = true) || label.equals("todos", ignoreCase = true) -> {
                                     val n = TrekoTimerManager.cancelAllNamedTimers()
-                                    "Cancelled $n active timer(s)."
+                                    getString(R.string.timer_cancelled_all, n)
                                 }
                                 timerId > 0 -> {
                                     if (TrekoTimerManager.cancelNamedTimer(timerId)) {
-                                        "Cancelled timer #$timerId."
+                                        getString(R.string.timer_cancelled_id, timerId)
                                     } else {
-                                        "Timer #$timerId not found."
+                                        getString(R.string.timer_not_found_id, timerId)
                                     }
                                 }
                                 label.isNotBlank() -> {
                                     val removed = TrekoTimerManager.cancelNamedTimerByLabel(label)
                                     if (removed != null) {
-                                        "Cancelled timer '${removed.label}'."
+                                        getString(R.string.timer_cancelled_label, removed.label)
                                     } else {
-                                        "No active timer matching '$label'."
+                                        getString(R.string.timer_no_match, label)
                                     }
                                 }
                                 else -> {
                                     val active = TrekoTimerManager.namedTimers.value
                                     if (active.size == 1) {
                                         TrekoTimerManager.cancelNamedTimer(active.first().id)
-                                        "Cancelled timer '${active.first().label}'."
+                                        getString(R.string.timer_cancelled_label, active.first().label)
                                     } else {
                                         TrekoTimerManager.pause()
                                         TrekoTimerManager.getStatusDescription()
@@ -3119,9 +3147,9 @@ class TrekoAssistantService : Service() {
                 "control_flashlight" -> {
                     val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
                     if (cm == null) {
-                        "Camera service unavailable on this device."
+                        getString(R.string.flashlight_unavailable)
                     } else {
-                        val cameraId = cm.cameraIdList.firstOrNull() ?: return@withContext "No flash found on device."
+                        val cameraId = cm.cameraIdList.firstOrNull() ?: return@withContext getString(R.string.flashlight_unavailable)
                         val action = args.optString("action", "toggle").lowercase(Locale.ROOT)
                         val newState = when (action) {
                             "turn_on", "on", "encender", "prender" -> true
@@ -3131,15 +3159,16 @@ class TrekoAssistantService : Service() {
                         try {
                             cm.setTorchMode(cameraId, newState)
                             isTorchOn = newState
-                            if (newState) "Flashlight turned on." else "Flashlight turned off."
+                            getString(if (newState) R.string.flashlight_on else R.string.flashlight_off)
                         } catch (e: Exception) {
-                            "Failed to toggle flashlight: ${e.message}"
+                            TrekoLogBuffer.w(TAG, "Flashlight failed: ${e.message}")
+                            getString(R.string.flashlight_failed)
                         }
                     }
                 }
                 "open_app" -> {
                     val appName = args.optString("app_name", "").trim().lowercase(Locale.ROOT)
-                    if (appName.isBlank()) return@withContext "Error: app_name is required."
+                    if (appName.isBlank()) return@withContext getString(R.string.app_name_required)
                     val pm = packageManager
                     val knownPackages = mapOf(
                         "spotify" to "com.spotify.music",
@@ -3183,22 +3212,22 @@ class TrekoAssistantService : Service() {
                     }
 
                     if (targetPkg == null) {
-                        return@withContext "No installed application found matching '$appName'."
+                        return@withContext getString(R.string.app_not_found, appName)
                     }
 
                     val launchIntent = pm.getLaunchIntentForPackage(targetPkg)
                     if (launchIntent != null) {
                         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         startActivity(launchIntent)
-                        "Opening $appName..."
+                        getString(R.string.app_opening, appName)
                     } else {
-                        "Could not launch '$appName'."
+                        getString(R.string.app_failed, appName)
                     }
                 }
                 "set_device_volume" -> {
                     val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                     if (am == null) {
-                        "Audio volume control unavailable."
+                        getString(R.string.volume_unavailable)
                     } else {
                         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
                         val currentVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -3209,36 +3238,36 @@ class TrekoAssistantService : Service() {
                             "up", "subir" -> {
                                 am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
                                 val newVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                "Volume raised to ${(newVol * 100) / maxVol}%."
+                                getString(R.string.volume_raised, (newVol * 100) / maxVol)
                             }
                             "down", "bajar" -> {
                                 am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
                                 val newVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                "Volume lowered to ${(newVol * 100) / maxVol}%."
+                                getString(R.string.volume_lowered, (newVol * 100) / maxVol)
                             }
                             "mute", "silenciar" -> {
                                 am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, AudioManager.FLAG_SHOW_UI)
-                                "Volume muted."
+                                getString(R.string.volume_muted)
                             }
                             "set", "fijar" -> {
                                 if (level in 0..100) {
                                     val target = ((level / 100.0) * maxVol).toInt()
                                     am.setStreamVolume(AudioManager.STREAM_MUSIC, target, AudioManager.FLAG_SHOW_UI)
-                                    "Volume set to $level%."
+                                    getString(R.string.volume_set, level)
                                 } else {
-                                    "Please provide a valid volume percentage between 0 and 100."
+                                    getString(R.string.volume_invalid)
                                 }
                             }
-                            else -> "Current volume is ${(currentVol * 100) / maxVol}%."
+                            else -> getString(R.string.volume_current, (currentVol * 100) / maxVol)
                         }
                     }
                 }
                 "set_alarm" -> {
                     val hour = args.optInt("hour", -1)
                     val minute = args.optInt("minute", 0)
-                    val message = args.optString("message", "Treko Alarm").trim()
+                    val message = args.optString("message", "").trim().ifBlank { getString(R.string.alarm_default_label) }
                     if (hour !in 0..23 || minute !in 0..59) {
-                        return@withContext "Specify valid hour (0-23) and minute (0-59)."
+                        return@withContext getString(R.string.alarm_invalid)
                     }
                     val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
                         putExtra(AlarmClock.EXTRA_HOUR, hour)
@@ -3250,9 +3279,10 @@ class TrekoAssistantService : Service() {
                     try {
                         startActivity(intent)
                         val timeStr = String.format(Locale.US, "%02d:%02d", hour, minute)
-                        "Alarm set for $timeStr ($message)."
+                        getString(R.string.alarm_set, timeStr)
                     } catch (e: Exception) {
-                        "Failed to set alarm: ${e.message}"
+                        TrekoLogBuffer.w(TAG, "Alarm failed: ${e.message}")
+                        getString(R.string.alarm_failed)
                     }
                 }
                 // get_weather se renombró a get_home_weather: chocaba con la herramienta
@@ -3261,7 +3291,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     HomeAssistantClient(haUrl, haToken).getWeatherSummary()
                 }
@@ -3304,7 +3334,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val volume = if (args.has("volume_level")) args.optDouble("volume_level", 0.5).toFloat() else null
                     HomeAssistantClient(haUrl, haToken).mediaPlayerPlayback(device, action, volume)
@@ -3313,17 +3343,17 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val scene = args.optString("scene", "").trim()
-                    if (scene.isBlank()) return@withContext "Scene name is required."
+                    if (scene.isBlank()) return@withContext getString(R.string.scene_required)
                     HomeAssistantClient(haUrl, haToken).triggerScene(scene)
                 }
                 "view_camera" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val cameraQuery = args.optString("camera", "").trim()
                     val action = args.optString("action", "view").trim().lowercase(Locale.ROOT)
@@ -3332,7 +3362,7 @@ class TrekoAssistantService : Service() {
 
                     if (action == "dismiss" || action == "close" || action == "cerrar") {
                         dismissCameraFeed(closeGrid = true)
-                        return@withContext "Camera viewer dismissed."
+                        return@withContext getString(R.string.camera_dismissed)
                     }
 
                     val gridQueries = setOf(
@@ -3370,16 +3400,18 @@ class TrekoAssistantService : Service() {
                         isLive = isLive,
                         liveEntityId = matchedGroup?.liveEntityId
                     )
-                    "Showing camera '$resolvedName' on screen."
+                    getString(R.string.camera_showing, resolvedName)
                 }
                 "analyze_camera" -> {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     val cameraQuery = args.optString("camera", "").trim()
-                    val question = args.optString("question", "Describe in detail what is visible in the camera.")
+                    val question = args.optString("question", "").trim()
+                        .ifBlank { getString(R.string.analyze_default_question) }
+                        .let { "$it ${getString(R.string.analyze_answer_rules)}" }
                     val haClient = HomeAssistantClient(haUrl, haToken)
 
                     val snapshotPair = haClient.getCameraSnapshot(cameraQuery)
@@ -3397,12 +3429,17 @@ class TrekoAssistantService : Service() {
                         isLive = false
                     )
 
+                    // Without LLM Vision there is nothing to call: show the picture and say why.
+                    val skills = prefs.detectedSkills
+                    if (skills.isNotEmpty() && TrekoSkills.LLM_VISION !in skills) {
+                        return@withContext getString(R.string.analyze_no_vision, camInfo.friendlyName)
+                    }
                     val visionAnalysis = haClient.analyzeCameraWithLlmVision(camInfo.entityId, question)
                     if (!visionAnalysis.isNullOrBlank()) {
-                        "AI Vision analysis of camera '${camInfo.friendlyName}': $visionAnalysis. (Snapshot displayed on screen)."
+                        getString(R.string.analyze_result, camInfo.friendlyName, visionAnalysis.trim())
                     } else {
-                        val sizeKb = bytes.size / 1024
-                        "Snapshot from '${camInfo.friendlyName}' retrieved (${sizeKb} KB, state: ${camInfo.state}) and displayed on screen."
+                        TrekoLogBuffer.w(TAG, "analyze_camera: no vision answer for ${camInfo.entityId} (${bytes.size / 1024} KB snapshot)")
+                        getString(R.string.analyze_failed, camInfo.friendlyName)
                     }
                 }
                 "view_all_cameras" -> {
@@ -3416,7 +3453,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     HomeAssistantClient(haUrl, haToken).get3dPrinterStatus()
                 }
@@ -3424,7 +3461,7 @@ class TrekoAssistantService : Service() {
                     val haUrl = prefs.haUrl.trim()
                     val haToken = prefs.haToken.trim()
                     if (haUrl.isBlank() || haToken.isBlank()) {
-                        return@withContext "Home Assistant is not configured in Treko Settings."
+                        return@withContext getString(R.string.tool_ha_not_configured)
                     }
                     HomeAssistantClient(haUrl, haToken).getHomeStatusSummary()
                 }
@@ -3548,10 +3585,47 @@ class TrekoAssistantService : Service() {
                         }
                     }
                 }
-                else -> "Tool '$name' is not implemented in Treko."
+                else -> getString(R.string.tool_unknown, name)
             }
         } catch (e: Exception) {
-            "Error executing $name: ${e.message}"
+            TrekoLogBuffer.w(TAG, "Tool $name failed: ${e.message}")
+            getString(R.string.tool_error, name, e.message.orEmpty().take(160))
+        }
+    }
+
+    /** "10 min", "45 s", "1 min 30 s". */
+    private fun formatTimerDuration(totalSeconds: Int): String {
+        val min = totalSeconds / 60
+        val sec = totalSeconds % 60
+        return when {
+            min == 0 -> getString(R.string.timer_seconds, sec)
+            sec == 0 -> getString(R.string.timer_minutes, min)
+            else -> getString(R.string.timer_minutes_seconds, min, sec)
+        }
+    }
+
+    /**
+     * Gate for Home Assistant calls from the model: unlocking, disarming or opening a garage or
+     * gate only runs on a second call with confirm=true for the same action within a minute.
+     */
+    private fun sensitiveGate(confirmed: Boolean) = ActionGate { plan ->
+        val kind = SensitiveActions.classify(plan) ?: return@ActionGate null
+        when (val decision = sensitiveActionGuard.check(plan.key, confirmed)) {
+            SensitiveActionGuard.Decision.Proceed -> {
+                TrekoLogBuffer.i(TAG, "Sensitive action confirmed: ${plan.key}")
+                null
+            }
+            is SensitiveActionGuard.Decision.Confirm -> {
+                TrekoLogBuffer.i(TAG, "Sensitive action held for confirmation (${decision.token}): ${plan.key}")
+                val names = plan.targets.joinToString(", ") { it.friendlyName.ifBlank { it.entityId } }
+                    .ifBlank { getString(R.string.sensitive_all_targets) }
+                val what = when (kind) {
+                    SensitiveKind.UNLOCK -> getString(R.string.sensitive_unlock, names)
+                    SensitiveKind.DISARM -> getString(R.string.sensitive_disarm, names)
+                    SensitiveKind.OPEN_ACCESS -> getString(R.string.sensitive_open, names)
+                }
+                getString(R.string.sensitive_confirm, what)
+            }
         }
     }
 
@@ -3562,11 +3636,11 @@ class TrekoAssistantService : Service() {
         val haUrl = prefs.haUrl.trim()
         val haToken = prefs.haToken.trim()
         if (haUrl.isBlank() || haToken.isBlank()) {
-            return "Home Assistant is not configured in Treko Settings."
+            return getString(R.string.tool_ha_not_configured)
         }
         val groups = HomeAssistantClient(haUrl, haToken).getDeduplicatedCameras()
         if (groups.isEmpty()) {
-            return "No cameras found in Home Assistant."
+            return getString(R.string.camera_none)
         }
         val feeds = groups.map { group ->
             CameraFeedState(
@@ -3586,13 +3660,13 @@ class TrekoAssistantService : Service() {
             haToken = haToken,
             isLiveAll = liveAll
         )
-        val modeLabel = if (liveAll) "vivo" else "vista previa"
-        val sb = StringBuilder("Panel multi-cámara abierto en pantalla ($modeLabel, ${feeds.size} cámaras):\n")
-        groups.forEach { group ->
-            val liveTag = if (!group.liveEntityId.isNullOrBlank()) " +RTSP" else ""
-            sb.append("• ${group.friendlyName} (${group.snapshotEntityId}$liveTag) [${group.state}]\n")
-        }
-        return sb.toString().trim()
+        // Names only: entity ids and stream details make the model read them out.
+        val names = groups.take(8).joinToString(", ") { it.friendlyName } +
+            (if (groups.size > 8) ", …" else "")
+        return getString(
+            if (liveAll) R.string.camera_wall_opened_live else R.string.camera_wall_opened,
+            names
+        )
     }
 
     private suspend fun executePlayMusicOrRadio(
@@ -3611,7 +3685,7 @@ class TrekoAssistantService : Service() {
             return handlePhoneMusicOrRadio(query, provider)
         }
         if (haUrl.isBlank() || haToken.isBlank()) {
-            return "Home Assistant is not configured in Treko Settings."
+            return getString(R.string.tool_ha_not_configured)
         }
         return HomeAssistantClient(haUrl, haToken).playMusicOrRadio(
             query = query,

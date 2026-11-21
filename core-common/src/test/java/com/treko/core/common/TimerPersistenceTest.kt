@@ -99,4 +99,15 @@ class TimerPersistenceTest {
         assertTrue(TrekoTimerManager.namedTimers.value.isEmpty())
         assertFalse(TrekoTimerManager.timerState.value.isRunning)
     }
+
+    @Test
+    fun statusLeavesOutTheUntouchedPomodoro() {
+        val idle = com.treko.core.common.data.TimerState()
+        assertEquals("No hay temporizadores activos.", TrekoTimerManager.describeStatus(idle, emptyList()))
+        val pasta = TrekoTimerManager.addNamedTimer(minutes = 8, label = "Pasta")
+        val onlyNamed = TrekoTimerManager.describeStatus(idle, listOf(pasta))
+        assertTrue(onlyNamed, onlyNamed.contains("Pasta") && !onlyNamed.contains("Pomodoro"))
+        val paused = idle.copy(remainingSeconds = 600)
+        assertTrue(TrekoTimerManager.describeStatus(paused, emptyList()).contains("en pausa"))
+    }
 }

@@ -64,11 +64,11 @@ class TargetLookupTest {
     @Test
     fun failureMessagesNeverClaimAChange() {
         val describe: (TaskItem) -> String = { "#${it.id} ${it.title}" }
-        assertNull(find(1, null).failureMessage("task", tasks, describe))
+        assertNull(find(1, null).failureMessage("tarea", "tareas", tasks, describe))
         listOf(find(null, ""), find(null, "comprar"), find(null, "gimnasio")).forEach {
-            val msg = it.failureMessage("task", tasks, describe)!!
-            assertTrue(msg, msg.contains("nothing was changed", ignoreCase = true))
+            val msg = it.failureMessage("tarea", "tareas", tasks, describe)!!
+            assertTrue(msg, msg.contains("no cambié nada", ignoreCase = true))
         }
-        assertTrue(find(null, "").failureMessage("task", tasks, describe)!!.contains("#3 Llamar a mamá"))
+        assertTrue(find(null, "").failureMessage("tarea", "tareas", tasks, describe)!!.contains("#3 Llamar a mamá"))
     }
 }

@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
 import java.text.Normalizer
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 data class RadioStation(
@@ -22,7 +23,9 @@ data class RadioStation(
  */
 class RadioBrowserClient(
     private val baseUrls: List<String> = DEFAULT_BASE_URLS,
-    private val httpClient: OkHttpClient = defaultHttpClient()
+    private val httpClient: OkHttpClient = defaultHttpClient(),
+    /** ISO country of the user (the phone's locale); picks the stations for a generic "pon la radio". */
+    private val countryCode: String = Locale.getDefault().country
 ) {
     companion object {
         val DEFAULT_BASE_URLS = listOf(
@@ -149,13 +152,25 @@ class RadioBrowserClient(
             )
         )
 
-        private val DEFAULT_GENERIC_PICKS: List<String> = listOf(
+        /** Generic picks for Mexico (es-MX), where the curated local stations are. */
+        private val MEXICO_GENERIC_PICKS: List<String> = listOf(
             "Exa FM 104.9",
             "La Ke Buena 92.9 FM",
             "Universal 88.1 FM",
             "W Radio 96.9 FM",
             "SomaFM Groove Salad"
         )
+
+        /** Anywhere else: international internet stations, not one country's FM. */
+        private val INTERNATIONAL_GENERIC_PICKS: List<String> = listOf(
+            "SomaFM Groove Salad",
+            "Radio Paradise Rock Mix",
+            "Jazz24",
+            "Radio Paradise Mellow Mix"
+        )
+
+        internal fun genericPicksFor(countryCode: String): List<String> =
+            if (countryCode.equals("MX", ignoreCase = true)) MEXICO_GENERIC_PICKS else INTERNATIONAL_GENERIC_PICKS
 
         private val GENERIC_PHRASES = setOf(
             "", "radio", "la radio", "una radio", "estacion", "una estacion",
@@ -178,6 +193,11 @@ class RadioBrowserClient(
             listOf("clasica", "classical", "orquesta") to "classical"
         )
     }
+
+    private val genericPicks: List<String> = genericPicksFor(countryCode)
+
+    /** Station to ask a smart speaker for when the user only said "pon la radio". */
+    fun defaultStationName(): String = genericPicks.first()
 
     suspend fun searchStations(query: String, limit: Int = 5): List<RadioStation> = withContext(Dispatchers.IO) {
         val safeLimit = limit.coerceIn(1, 25)
@@ -246,7 +266,7 @@ class RadioBrowserClient(
         val safeLimit = limit.coerceIn(1, CURATED_STATIONS.size)
         val norm = normalizeForMatch(cleanRadioQuery(query))
         if (norm.isBlank() || isGenericQuery(query)) {
-            val prioritized = DEFAULT_GENERIC_PICKS.mapNotNull { pick ->
+            val prioritized = genericPicks.mapNotNull { pick ->
                 CURATED_STATIONS.firstOrNull { it.name == pick }
             }
             return (prioritized + CURATED_STATIONS).distinctBy { it.name }.take(safeLimit)
@@ -276,7 +296,7 @@ class RadioBrowserClient(
             return scored.take(safeLimit)
         }
 
-        val prioritized = DEFAULT_GENERIC_PICKS.mapNotNull { pick ->
+        val prioritized = genericPicks.mapNotNull { pick ->
             CURATED_STATIONS.firstOrNull { it.name == pick }
         }
         return (prioritized + CURATED_STATIONS).distinctBy { it.name }.take(safeLimit)
