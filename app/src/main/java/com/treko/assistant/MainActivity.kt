@@ -14,14 +14,18 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -29,18 +33,26 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.core.content.ContextCompat
+import com.treko.assistant.service.AlertNotifications
 import com.treko.assistant.service.TimerAlarms
 import com.treko.assistant.service.TrekoAssistantService
 import com.treko.assistant.ui.components.SetupWizardScreen
+import com.treko.assistant.ui.screens.AlertDetailDialog
+import com.treko.assistant.ui.screens.AlertsScreen
 import com.treko.assistant.ui.screens.CameraViewerDialog
 import com.treko.assistant.ui.screens.DiagnosticsDialog
 import com.treko.assistant.ui.screens.FaceScreen
@@ -63,6 +75,9 @@ class MainActivity : ComponentActivity() {
 
     private var hasMicPermission by mutableStateOf(false)
 
+    /** Alert a notification asked to open; consumed by [MainScreen]. */
+    private var requestedAlertId by mutableStateOf<Long?>(null)
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -80,6 +95,8 @@ class MainActivity : ComponentActivity() {
         // The alerts log loads in the background; the UI observes TrekoAlertLog.events.
         TrekoAlertLog.init(this)
         TrekoAssistantService.isUiAlive = true
+        // A recreated activity already handled its launch intent.
+        if (savedInstanceState == null) handleAlertIntent(intent)
 
         refreshPermissionState()
         checkAndRequestPermissions()
@@ -107,6 +124,8 @@ class MainActivity : ComponentActivity() {
                 } else {
                     MainScreen(
                         prefs = prefs,
+                        requestedAlertId = requestedAlertId,
+                        onAlertRequestHandled = { requestedAlertId = null },
                         hasMicPermission = hasMicPermission,
                         onRequestMicPermission = { checkAndRequestPermissions() },
                         onOpenAppSettings = { openAppSettings() },
@@ -118,6 +137,21 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAlertIntent(intent)
+    }
+
+    /** A tapped alert notification: show that alert in the Alerts tab. */
+    private fun handleAlertIntent(intent: Intent?) {
+        val id = intent?.getLongExtra(AlertNotifications.EXTRA_ALERT_ID, 0L) ?: 0L
+        if (id <= 0L) return
+        // Not again on a later recreation from the same intent.
+        intent?.removeExtra(AlertNotifications.EXTRA_ALERT_ID)
+        requestedAlertId = id
     }
 
     override fun onResume() {
@@ -179,19 +213,31 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class NavigationTab {
-    FACE, HABITS, TASKS, TIMER, SETTINGS
+    FACE, HABITS, TASKS, ALERTS, TIMER, SETTINGS
 }
 
 @Composable
 fun MainScreen(
     prefs: TrekoPreferences,
+    requestedAlertId: Long?,
+    onAlertRequestHandled: () -> Unit,
     hasMicPermission: Boolean,
     onRequestMicPermission: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onReopenWizard: () -> Unit
 ) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableStateOf(NavigationTab.FACE) }
+    var selectedTab by rememberSaveable { mutableStateOf(NavigationTab.FACE) }
+    /** Alert whose detail is open (Alerts tab), kept across recreation. */
+    var openAlertId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val unreadAlerts by TrekoAlertLog.unreadCount.collectAsState()
+
+    LaunchedEffect(requestedAlertId) {
+        val id = requestedAlertId ?: return@LaunchedEffect
+        selectedTab = NavigationTab.ALERTS
+        openAlertId = id
+        onAlertRequestHandled()
+    }
     var showDiagnostics by remember { mutableStateOf(false) }
 
     val currentEmotion by TrekoAssistantService.currentEmotion.collectAsState()
@@ -213,41 +259,36 @@ fun MainScreen(
                 containerColor = SurfaceDark,
                 contentColor = TextPrimary
             ) {
-                NavigationBarItem(
-                    selected = selectedTab == NavigationTab.FACE,
-                    onClick = { selectedTab = NavigationTab.FACE },
-                    icon = { Icon(Icons.Default.Face, contentDescription = stringResource(R.string.tab_face)) },
-                    label = { Text(stringResource(R.string.tab_face)) },
-                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
-                )
-                NavigationBarItem(
-                    selected = selectedTab == NavigationTab.HABITS,
-                    onClick = { selectedTab = NavigationTab.HABITS },
-                    icon = { Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = stringResource(R.string.tab_habits)) },
-                    label = { Text(stringResource(R.string.tab_habits)) },
-                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
-                )
-                NavigationBarItem(
-                    selected = selectedTab == NavigationTab.TASKS,
-                    onClick = { selectedTab = NavigationTab.TASKS },
-                    icon = { Icon(Icons.Default.CheckCircle, contentDescription = stringResource(R.string.tab_tasks)) },
-                    label = { Text(stringResource(R.string.tab_tasks)) },
-                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
-                )
-                NavigationBarItem(
-                    selected = selectedTab == NavigationTab.TIMER,
-                    onClick = { selectedTab = NavigationTab.TIMER },
-                    icon = { Icon(Icons.Default.Timer, contentDescription = stringResource(R.string.tab_timer)) },
-                    label = { Text(stringResource(R.string.tab_timer)) },
-                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
-                )
-                NavigationBarItem(
-                    selected = selectedTab == NavigationTab.SETTINGS,
-                    onClick = { selectedTab = NavigationTab.SETTINGS },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.tab_settings)) },
-                    label = { Text(stringResource(R.string.tab_settings)) },
-                    colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
-                )
+                // Six tabs: only the selected one shows its label, so none is cut off on narrow phones.
+                TrekoTabItem(selectedTab, NavigationTab.FACE, R.string.tab_face, { selectedTab = it }) {
+                    Icon(Icons.Default.Face, contentDescription = stringResource(R.string.tab_face))
+                }
+                TrekoTabItem(selectedTab, NavigationTab.HABITS, R.string.tab_habits, { selectedTab = it }) {
+                    Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = stringResource(R.string.tab_habits))
+                }
+                TrekoTabItem(selectedTab, NavigationTab.TASKS, R.string.tab_tasks, { selectedTab = it }) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = stringResource(R.string.tab_tasks))
+                }
+                TrekoTabItem(selectedTab, NavigationTab.ALERTS, R.string.tab_alerts, { selectedTab = it }) {
+                    BadgedBox(
+                        badge = {
+                            if (unreadAlerts > 0) {
+                                val badgeCd = pluralStringResource(R.plurals.alerts_badge_cd, unreadAlerts, unreadAlerts)
+                                Badge(modifier = Modifier.semantics { contentDescription = badgeCd }) {
+                                    Text(if (unreadAlerts > 99) "99+" else unreadAlerts.toString())
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Notifications, contentDescription = stringResource(R.string.tab_alerts))
+                    }
+                }
+                TrekoTabItem(selectedTab, NavigationTab.TIMER, R.string.tab_timer, { selectedTab = it }) {
+                    Icon(Icons.Default.Timer, contentDescription = stringResource(R.string.tab_timer))
+                }
+                TrekoTabItem(selectedTab, NavigationTab.SETTINGS, R.string.tab_settings, { selectedTab = it }) {
+                    Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.tab_settings))
+                }
             }
         }
     ) { padding ->
@@ -303,6 +344,7 @@ fun MainScreen(
                     )
                     NavigationTab.HABITS -> HabitsScreen()
                     NavigationTab.TASKS -> TasksScreen()
+                    NavigationTab.ALERTS -> AlertsScreen(onOpenAlert = { openAlertId = it })
                     NavigationTab.TIMER -> TimerScreen()
                     NavigationTab.SETTINGS -> SettingsScreen(
                         prefs = prefs,
@@ -311,6 +353,10 @@ fun MainScreen(
                         onRequestMicPermission = onRequestMicPermission
                     )
                 }
+            }
+
+            openAlertId?.let { id ->
+                AlertDetailDialog(alertId = id, onDismiss = { openAlertId = null })
             }
 
             activeMultiCameraGrid?.let { gridState ->
@@ -338,4 +384,22 @@ fun MainScreen(
             }
         }
     }
+}
+
+@Composable
+private fun RowScope.TrekoTabItem(
+    selected: NavigationTab,
+    tab: NavigationTab,
+    labelRes: Int,
+    onSelect: (NavigationTab) -> Unit,
+    icon: @Composable () -> Unit
+) {
+    NavigationBarItem(
+        selected = selected == tab,
+        onClick = { onSelect(tab) },
+        icon = icon,
+        label = { Text(stringResource(labelRes), maxLines = 1) },
+        alwaysShowLabel = false,
+        colors = NavigationBarItemDefaults.colors(selectedIconColor = NeonCyan, indicatorColor = SurfaceDark)
+    )
 }

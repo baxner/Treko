@@ -10,6 +10,7 @@ import com.treko.core.common.model.AlertEvent
 import com.treko.core.common.model.AlertSource
 import com.treko.core.common.util.TrekoLogBuffer
 import com.treko.core.mcp.HomeAssistantClient
+import com.treko.core.mcp.watch.CameraWatch
 import com.treko.core.mcp.watch.CameraWatchBook
 import com.treko.core.mcp.watch.HaEventStream
 import com.treko.core.mcp.watch.WatchCatalog
@@ -70,6 +71,10 @@ class CameraWatchCoordinator(
     /** Places being watched right now, for the UI and the persistent notification. */
     val activeAreas: StateFlow<List<String>> = _activeAreas.asStateFlow()
 
+    private val _activeWatches = MutableStateFlow<List<CameraWatch>>(emptyList())
+    /** The watches running right now (alerts screen), oldest first. */
+    val activeWatches: StateFlow<List<CameraWatch>> = _activeWatches.asStateFlow()
+
     val hasActiveWatches: Boolean get() = book.active(now()).isNotEmpty()
 
     /** Restores saved watches and reconnects; call on service start and on config change. */
@@ -102,6 +107,15 @@ class CameraWatchCoordinator(
         stream = null
         liveProblem = null
         _activeAreas.value = emptyList()
+        _activeWatches.value = emptyList()
+    }
+
+    /** Stops one watch (alerts screen). False when it had already ended. */
+    fun stopWatch(id: Long): Boolean {
+        val removed = book.stopById(id) ?: return false
+        TrekoLogBuffer.i(TAG, "Watch ${removed.id} stopped from the app (${removed.areaNames.joinToString()}).")
+        syncStream(rebuild = false)
+        return true
     }
 
     fun stopAll(): Int {
@@ -193,6 +207,7 @@ class CameraWatchCoordinator(
         if (released) return
         val active = book.active(now())
         _activeAreas.value = active.flatMap { it.areaNames }.distinct()
+        _activeWatches.value = active
         sentinelSensors = if (sentinelEnabled()) {
             catalog.filter {
                 it.source == WatchSensor.Source.FRIGATE_CAMERA && it.objectType in SENTINEL_OBJECTS

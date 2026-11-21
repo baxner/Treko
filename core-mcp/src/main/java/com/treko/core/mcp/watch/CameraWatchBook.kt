@@ -89,6 +89,14 @@ class CameraWatchBook(
         removed
     }
 
+    /** Stops one watch (alerts screen). Returns it, or null when it already ended. */
+    fun stopById(id: Long): CameraWatch? = synchronized(lock) {
+        val victim = watches.firstOrNull { it.id == id } ?: return null
+        watches.remove(victim)
+        persistLocked()
+        victim
+    }
+
     fun active(nowMs: Long): List<CameraWatch> = synchronized(lock) {
         pruneLocked(nowMs)
         watches.toList()

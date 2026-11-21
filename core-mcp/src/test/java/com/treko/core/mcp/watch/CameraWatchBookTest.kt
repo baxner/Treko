@@ -54,6 +54,18 @@ class CameraWatchBookTest {
     }
 
     @Test
+    fun `stop by id ends only that watch and survives a restart`() {
+        val storage = MemoryPersistence()
+        val book = CameraWatchBook(storage)
+        val first = book.add(listOf("s.jardin"), listOf("Jardín"), "person", hour, false, 0)
+        book.add(listOf("s.frente"), listOf("Frente"), "car", hour, false, 0)
+        assertEquals(first, book.stopById(first.id))
+        assertNull(book.stopById(first.id))
+        assertEquals(setOf("s.frente"), book.watchedSensorIds(1))
+        assertEquals(setOf("s.frente"), CameraWatchBook(storage).watchedSensorIds(1))
+    }
+
+    @Test
     fun `watches survive a restart`() {
         val storage = MemoryPersistence()
         CameraWatchBook(storage).add(listOf("s.a|b", "s.c"), listOf("Jardín, atrás"), "car", hour, true, 5)

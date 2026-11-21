@@ -65,6 +65,7 @@ import com.treko.core.kws.NeuralSpeechDenoiser
 import com.treko.core.kws.SpeakerBiometricEngine
 import com.treko.core.kws.TrekoWakeWordDetector
 import com.treko.core.mcp.HomeAssistantClient
+import com.treko.core.mcp.watch.CameraWatch
 import com.treko.core.mcp.watch.WatchSensor
 import com.treko.core.common.model.TrekoSkills
 import com.treko.core.mcp.RadioBrowserClient
@@ -294,8 +295,18 @@ class TrekoAssistantService : Service() {
         @Volatile
         var isUiAlive: Boolean = false
 
+        private val _activeWatches = MutableStateFlow<List<CameraWatch>>(emptyList())
+        /** The camera watches running right now, for the alerts screen. */
+        val activeWatches: StateFlow<List<CameraWatch>> = _activeWatches.asStateFlow()
+
         fun stopAllWatches() {
             instance?.cameraWatch?.stopAll()
+        }
+
+        /** Stops one camera watch (alerts screen). */
+        fun stopWatch(id: Long) {
+            val coordinator = instance?.cameraWatch ?: return
+            instance?.serviceScope?.launch(Dispatchers.IO) { coordinator.stopWatch(id) }
         }
 
         private val _conversationHistory = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -821,6 +832,44 @@ class TrekoAssistantService : Service() {
 
         fun showCameraFeed(state: CameraFeedState) {
             _activeCameraFeed.value = state
+        }
+
+        /**
+         * Opens the live view of the camera an alert is about (alerts screen). Uses the camera
+         * group of that entity when Home Assistant knows one, so its live stream is used.
+         * False when Home Assistant is not configured or there is no camera.
+         */
+        fun showAlertCamera(context: Context, cameraEntityId: String, fallbackName: String): Boolean {
+            val prefs = TrekoPreferences(context.applicationContext)
+            val haUrl = prefs.haUrl.trim()
+            val haToken = prefs.haToken.trim()
+            if (haUrl.isBlank() || haToken.isBlank() || cameraEntityId.isBlank()) return false
+            val scope = instance?.serviceScope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            scope.launch(Dispatchers.IO) {
+                val group = try {
+                    HomeAssistantClient(haUrl, haToken).getDeduplicatedCameras().find {
+                        it.primaryEntityId == cameraEntityId ||
+                            it.snapshotEntityId == cameraEntityId ||
+                            it.liveEntityId == cameraEntityId
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    TrekoLogBuffer.w("TrekoService", "Alert camera lookup failed: ${e.message}")
+                    null
+                }
+                _activeMultiCameraGrid.value = null
+                _activeCameraFeed.value = CameraFeedState(
+                    entityId = group?.snapshotEntityId?.ifBlank { null } ?: cameraEntityId,
+                    friendlyName = group?.friendlyName?.ifBlank { null } ?: fallbackName,
+                    // Blank: the viewer builds the camera proxy URL from haUrl.
+                    snapshotUrl = group?.snapshotUrl.orEmpty(),
+                    haUrl = haUrl,
+                    haToken = haToken,
+                    isLive = true,
+                    liveEntityId = group?.liveEntityId
+                )
+            }
+            return true
         }
 
         fun dismissCameraFeed(closeGrid: Boolean = false) {
@@ -1564,6 +1613,7 @@ class TrekoAssistantService : Service() {
             }
         )
         cameraWatch = coordinator
+        serviceScope.launch { coordinator.activeWatches.collect { _activeWatches.value = it } }
         serviceScope.launch {
             var hadWatches = false
             coordinator.activeAreas.collect { areas ->
@@ -3861,6 +3911,7 @@ class TrekoAssistantService : Service() {
         cameraWatch?.release()
         cameraWatch = null
         _activeWatchAreas.value = emptyList()
+        _activeWatches.value = emptyList()
         isServiceRunning = false
         isTrainingMode = false
 
